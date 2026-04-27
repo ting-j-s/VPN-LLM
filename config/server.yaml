@@ -1,0 +1,22 @@
+# Server configuration
+transport:
+  type: ssh
+  host: 0.0.0.0
+  port: 2222
+  # path to private key file
+  key_file: /etc/ssh/ssh_host_rsa_key
+
+tun:
+  name: tun0
+  mtu: 1400
+  # tunnel subnet
+  subnet: 10.0.0.1/24
+
+forwarding:
+  # NAT mode: allow client to reach external networks
+  nat_enabled: true
+  # upstream gateway
+  gateway: 192.168.1.1
+
+logging:
+  level: INFO
