@@ -250,6 +250,11 @@ class ClientCore:
                 self._last_received_time = time.time()
 
                 frame = decode_frame(data)
+                logger.debug(
+                    f"Transport->TUN RECEIVED frame: type={frame.frame_type.name} "
+                    f"session={uuid.UUID(bytes=frame.session_id).hex[:8] if frame.session_id else '?'} "
+                    f"payload_len={len(frame.payload) if frame.payload else 0}"
+                )
                 self._handle_frame(frame)
 
             except VPNError as e:
@@ -280,7 +285,10 @@ class ClientCore:
                 try:
                     self.tun.write_packet(frame.payload)
                     self._transport_to_tun_bytes += len(frame.payload)
-                    logger.debug(f"Transport->TUN: wrote {len(frame.payload)} bytes")
+                    logger.debug(
+                        f"Transport->TUN WROTE packet: len={len(frame.payload)} bytes, "
+                        f"total received: {self._transport_to_tun_bytes} bytes"
+                    )
                 except Exception as e:
                     logger.error(f"TUN write error: {e}")
 
@@ -313,7 +321,11 @@ class ClientCore:
                     self.transport.send(data)
                     self._tun_to_transport_bytes += len(packet)
                     self._last_sent_time = time.time()
-                    logger.debug(f"TUN->Transport: sent {len(packet)} bytes")
+                    logger.debug(
+                        f"TUN->Transport READ packet: len={len(packet)} bytes, "
+                        f"total sent: {self._tun_to_transport_bytes} bytes, "
+                        f"frame type=DATA session={uuid.UUID(bytes=self.session_id).hex[:8]}"
+                    )
 
             except VPNError as e:
                 if self._stop_event.is_set():

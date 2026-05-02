@@ -1,12 +1,13 @@
 """VPN Tunnel Logging Utilities."""
 
 import logging
+import os
 import sys
 from typing import Optional
 
 
-# Global default level
-_DEFAULT_LEVEL = "INFO"
+# Global default level - check environment variable first
+_DEFAULT_LEVEL = os.environ.get("VPN_LLM_LOG_LEVEL", "INFO").upper()
 
 
 def set_default_level(level: str) -> None:

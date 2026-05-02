@@ -344,43 +344,135 @@ sudo ip netns exec vpn_cli ping -I tun1 10.8.0.1
    ```
    If this fails, the namespace/veth setup is broken.
 
-2. **Check server is listening**
+2. **Check TCP tunnel established**
    ```bash
-   sudo ip netns exec vpn_srv ss -tlnp | grep 2222
+   sudo ip netns exec vpn_srv ss -tnp | grep 2222
+   sudo ip netns exec vpn_cli ss -tnp | grep 2222
    ```
-   Should show `0.0.0.0:2222` listening.
+   Should show ESTAB connection.
 
-3. **Check client connected**
-   Server logs should show `TCP connection accepted from ('192.168.100.2', ...)`
-
-4. **Check TUN devices exist**
-   ```bash
-   sudo ip netns exec vpn_srv ip link show tun0
-   sudo ip netns exec vpn_cli ip link show tun1
-   ```
-
-5. **Check TUN devices are UP**
-   ```bash
-   sudo ip netns exec vpn_srv ip link show tun0
-   # Look for state UP, not state DOWN
-   ```
-
-6. **Check TUN IPs configured**
+3. **Confirm TUN device IPs**
    ```bash
    sudo ip netns exec vpn_srv ip addr show tun0 | grep 10.8.0.1
    sudo ip netns exec vpn_cli ip addr show tun1 | grep 10.8.0.2
    ```
 
-7. **Use tcpdump to see where packets stop**
-   - Run tcpdump on vpn_cli tun1 first
-   - Then tcpdump on vpn_cli veth_cli
-   - Then tcpdump on vpn_srv veth_srv
-   - Then tcpdump on vpn_srv tun0
-   - Find the step where packets disappear
+4. **Check routing - where does ping go?**
+   ```bash
+   # In vpn_cli, where does 10.8.0.1 go?
+   sudo ip netns exec vpn_cli ip route get 10.8.0.1
+   # Expected: 10.8.0.1 dev tun1 src 10.8.0.2
+   # If it says "local", kernel will local-deliver, not send to TUN fd
 
-8. **Check server/client logs for errors**
-   - Look for `Frame error`, `Not connected`, `recv timeout`
-   - If you see `Frame error: Not connected`, the TUN read is happening but transport is not connected
+   # In vpn_srv, where does 10.8.0.2 go?
+   sudo ip netns exec vpn_srv ip route get 10.8.0.2
+   ```
+
+5. **Check TUN interface statistics (don't just look at RX/TX)**
+   ```bash
+   # Use -s to see actual byte counts, look at both directions
+   sudo ip netns exec vpn_cli ip -s link show tun1
+   sudo ip netns exec vpn_srv ip -s link show tun0
+   ```
+   Note: Kernel delivering TO TUN fd may appear as TX (out of interface).
+   Kernel receiving FROM TUN fd may appear as RX.
+
+6. **Use tcpdump to find where packet stops**
+
+   Step-by-step:
+   ```bash
+   # Terminal A - watch client tun1
+   sudo ip netns exec vpn_cli tcpdump -i tun1 -n -vv icmp
+
+   # Terminal B - watch client veth_cli
+   sudo ip netns exec vpn_cli tcpdump -i veth_cli -n -vv tcp port 2222
+
+   # Terminal C - watch server veth_srv
+   sudo ip netns exec vpn_srv tcpdump -i veth_srv -n -vv tcp port 2222
+
+   # Terminal D - watch server tun0
+   sudo ip netns exec vpn_srv tcpdump -i tun0 -n -vv icmp
+
+   # Terminal E - run ping
+   sudo ip netns exec vpn_cli ping -I tun1 10.8.0.1
+   ```
+
+   Expected pattern for SUCCESS:
+   - tun1: ICMP echo request OUT (TX)
+   - veth_cli: TCP packets carrying DATA frames
+   - veth_srv: TCP packets arriving
+   - tun0: ICMP echo request IN (RX)
+   - (server processes, generates reply)
+   - tun0: ICMP echo reply OUT (TX)
+   - veth_srv: TCP packets carrying DATA frames
+   - veth_cli: TCP packets arriving
+   - tun1: ICMP echo reply IN (RX)
+   - ping shows reply
+
+7. **Enable DEBUG logging to see TUN fd read/write**
+
+   ```bash
+   # Start server with DEBUG
+   sudo ip netns exec vpn_srv env VPN_LLM_LOG_LEVEL=DEBUG python -m src.server --config config/server_netns.yaml --transport tcp
+
+   # Start client with DEBUG (separate terminal)
+   sudo ip netns exec vpn_cli env VPN_LLM_LOG_LEVEL=DEBUG python -m src.client --config config/client_netns.yaml --transport tcp
+   ```
+
+   Look for these DEBUG messages:
+   - `LinuxTunDevice 'tun1' READ: len=84 src=10.8.0.2 dst=10.8.0.1 proto=ICMP` - packet read from TUN fd
+   - `TUN->Transport READ packet: len=84 bytes, total sent: ...` - packet sent to tunnel
+   - `Transport->TUN RECEIVED frame: type=DATA ...` - frame received from tunnel
+   - `Transport->TUN WROTE packet: len=84 bytes` - packet written to TUN fd
+
+   If you see TUN READ but no TUN->Transport sent, the packet was read but not sent to transport.
+   If you see Transport->TUN RECEIVED but no WROTE, the frame was received but couldn't write to TUN.
+
+8. **Use tun_fd_probe.py to isolate TUN fd issue**
+
+   ```bash
+   # Terminal 1 - start probe (creates tun_probe)
+   sudo ip netns exec vpn_cli python scripts/phase3_netns/tun_fd_probe.py --name tun_probe
+
+   # Terminal 2 - configure IP and ping from different subnet
+   sudo ip netns exec vpn_cli ip addr add 10.9.0.2/24 dev tun_probe
+   sudo ip netns exec vpn_cli ip link set tun_probe up
+
+   # Terminal 3 - configure server side
+   sudo ip netns exec vpn_srv ip addr add 10.9.0.1/24 dev tun0
+   sudo ip netns exec vpn_srv ip link set tun0 up
+
+   # Terminal 4 - ping (from vpn_srv to test server-side delivery)
+   sudo ip netns exec vpn_srv ping -I tun0 10.9.0.1  # should fail (local)
+
+   # Better: use ping from vpn_srv to external IP through tun_probe
+   # But this requires routing setup
+
+   # Alternative: ping from vpn_cli to 10.9.0.1
+   sudo ip netns exec vpn_cli ping -I tun_probe 10.9.0.1
+   ```
+
+   If tun_fd_probe.py shows packets, TUN fd works.
+   If tun_fd_probe.py shows nothing, TUN fd or routing has issue.
+
+9. **Check TUN device state**
+   ```bash
+   # Is TUN UP?
+   sudo ip netns exec vpn_cli ip link show tun1 | grep UP
+
+   # Is TUN point-to-point correct?
+   sudo ip netns exec vpn_cli ip -o link show tun1
+   ```
+
+10. **Common issues and fixes**
+
+    | Symptom | Likely Cause | Fix |
+    |---------|-------------|-----|
+    | tun1 TX counter increments but no TCP on veth_cli | Routing sends to TUN but kernel local-delivers | Check `ip route get 10.8.0.1` |
+    | TCP on veth but no DATA frames in tcpdump | TUN->Transport loop not calling send() | Enable DEBUG, check logs |
+    | No RX/TX on tun1 during ping | Kernel doesn't route to TUN fd | Check routing table |
+    | Connection refused | Server not listening | Check `ss -tlnp` |
+    | Connection already exists | Stale connection | Delete namespace and recreate |
 
 ---
 

@@ -204,6 +204,7 @@ class LinuxTunDevice(TunDevice):
         """Open and configure the TUN device.
 
         Opens /dev/net/tun and configures the interface name.
+        Automatically sets non-blocking mode for read_packet().
 
         Raises:
             TunDeviceError: If device cannot be opened or configured.
@@ -240,7 +241,11 @@ class LinuxTunDevice(TunDevice):
 
         self._fd = fd
         self._opened = True
-        logger.info(f"LinuxTunDevice '{self.name}' opened (FD={fd}, MTU={self.mtu})")
+
+        # Set non-blocking mode by default
+        self.set_nonblocking()
+
+        logger.info(f"LinuxTunDevice '{self.name}' opened (FD={fd}, MTU={self.mtu}, nonblocking=True)")
 
     def close(self) -> None:
         """Close the TUN device file descriptor."""
@@ -257,11 +262,37 @@ class LinuxTunDevice(TunDevice):
         self._opened = False
         logger.info(f"LinuxTunDevice '{self.name}' closed")
 
+    def _parse_ip_info(self, packet: bytes) -> dict:
+        """Parse basic IP info from packet for logging.
+
+        Args:
+            packet: Raw IP packet bytes.
+
+        Returns:
+            Dict with src, dst, protocol, length.
+        """
+        info = {"length": len(packet)}
+        try:
+            if len(packet) >= 20:
+                version = packet[0] >> 4
+                if version == 4:
+                    info["src"] = ".".join(str(b) for b in packet[12:16])
+                    info["dst"] = ".".join(str(b) for b in packet[16:20])
+                    info["protocol"] = packet[9]
+                elif version == 6:
+                    # IPv6 - just note it
+                    info["src"] = "IPv6"
+                    info["dst"] = "IPv6"
+                    info["protocol"] = packet[6]
+        except Exception:
+            pass
+        return info
+
     def read_packet(self) -> Optional[bytes]:
         """Read an IP packet from the TUN device.
 
         Reads raw IP packet from the TUN file descriptor.
-        Non-blocking if O_NONBLOCK was set on fd.
+        Non-blocking mode is set by open().
 
         Returns:
             Raw IP packet bytes, or None if no data available (EAGAIN).
@@ -274,10 +305,17 @@ class LinuxTunDevice(TunDevice):
 
         try:
             packet = os.read(self._fd, self.mtu)
-            logger.debug(f"LinuxTunDevice read {len(packet)} bytes")
+            if packet:
+                info = self._parse_ip_info(packet)
+                logger.debug(
+                    f"LinuxTunDevice '{self.name}' READ: "
+                    f"len={info['length']} src={info.get('src','?')} dst={info.get('dst','?')} proto={info.get('protocol','?')}"
+                )
             return packet
         except OSError as e:
             if e.errno == 11:  # EAGAIN
+                return None
+            if e.errno == 11 or e.errno == 35:  # EAGAIN or EWOULDBLOCK
                 return None
             raise TunDeviceError(f"Read error: {e}")
 
@@ -298,7 +336,11 @@ class LinuxTunDevice(TunDevice):
 
         try:
             os.write(self._fd, packet)
-            logger.debug(f"LinuxTunDevice wrote {len(packet)} bytes")
+            info = self._parse_ip_info(packet)
+            logger.debug(
+                f"LinuxTunDevice '{self.name}' WRITE: "
+                f"len={info['length']} src={info.get('src','?')} dst={info.get('dst','?')} proto={info.get('protocol','?')}"
+            )
         except OSError as e:
             raise TunDeviceError(f"Write error: {e}")
 
