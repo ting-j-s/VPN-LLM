@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from src.transport.tcp_transport import TCPTransport
-from src.common.errors import TransportError
+from src.common.errors import TransportError, TransportTimeout
 
 
 class TestTCPTransportClient:
@@ -155,6 +155,68 @@ class TestTCPTransportRoundtrip:
         client_transport.send(b"")
         received = server_transport.recv(timeout=2.0)
         assert received == b""
+
+        client_transport.close()
+        server_transport.close()
+
+
+class TestTCPTransportTimeout:
+    """Test TCP transport timeout handling."""
+
+    def test_recv_timeout_raises_transport_timeout(self):
+        """Test that recv timeout raises TransportTimeout (not returns None)."""
+        from src.transport.tcp_transport import TCPTransport
+        from src.common.errors import TransportTimeout
+
+        port = 19991
+        server_transport = TCPTransport(mode="server", host="127.0.0.1", port=port)
+        server_transport.connect()
+
+        client_transport = TCPTransport(mode="client", host="127.0.0.1", port=port)
+        client_transport.connect()
+
+        server_transport.accept(timeout=5.0)
+
+        # Client sends data first so server has something to receive
+        client_transport.send(b"Hello")
+        received = server_transport.recv(timeout=2.0)
+        assert received == b"Hello"
+
+        # Now recv with very short timeout - should raise TransportTimeout
+        with pytest.raises(TransportTimeout):
+            server_transport.recv(timeout=0.1)
+
+        # Transport should still be connected after timeout
+        assert server_transport.is_connected()
+        assert client_transport.is_connected()
+
+        client_transport.close()
+        server_transport.close()
+
+    def test_multiple_timeouts_dont_disconnect(self):
+        """Test that multiple recv timeouts don't disconnect the transport."""
+        from src.transport.tcp_transport import TCPTransport
+        from src.common.errors import TransportTimeout
+
+        port = 19990
+        server_transport = TCPTransport(mode="server", host="127.0.0.1", port=port)
+        server_transport.connect()
+
+        client_transport = TCPTransport(mode="client", host="127.0.0.1", port=port)
+        client_transport.connect()
+
+        server_transport.accept(timeout=5.0)
+
+        # Multiple timeouts should not disconnect
+        for i in range(5):
+            with pytest.raises(TransportTimeout):
+                server_transport.recv(timeout=0.1)
+            assert server_transport.is_connected()
+
+        # Send data - should still work
+        client_transport.send(b"After timeouts")
+        received = server_transport.recv(timeout=2.0)
+        assert received == b"After timeouts"
 
         client_transport.close()
         server_transport.close()

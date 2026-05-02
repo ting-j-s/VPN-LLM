@@ -21,6 +21,11 @@ class TransportError(VPNError):
     pass
 
 
+class TransportTimeout(TransportError):
+    """Transport recv timeout - not an error, just no data available."""
+    pass
+
+
 class TunDeviceError(VPNError):
     """TUN device errors."""
     pass

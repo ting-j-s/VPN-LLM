@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Optional
 
-from ..common.errors import VPNError
+from ..common.errors import VPNError, TransportTimeout
 from ..common.frame import Frame, FrameType, create_frame, encode_frame, decode_frame
 from ..common.logger import get_logger
 from ..transport.base import Transport
@@ -261,6 +261,13 @@ class ClientCore:
                 if self._stop_event.is_set():
                     # Normal shutdown, connection closed by peer
                     logger.debug(f"Connection closed: {e}")
+                    break
+                if isinstance(e, TransportTimeout):
+                    # Timeout is normal, no data available
+                    continue
+                # Check if transport is truly disconnected (not just idle)
+                if not self.transport.is_connected():
+                    logger.debug(f"Transport disconnected, stopping loop: {e}")
                     break
                 logger.warning(f"Frame error: {e}")
                 break

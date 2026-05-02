@@ -1,14 +1,14 @@
 """TCP Transport Implementation.
 
 Provides TCP-based transport for the VPN tunnel.
-Supports both client (connect) and server (bind/listen/accept) modes.
+Supports both client (connect, accept) and server (bind/listen/accept) modes.
 """
 
 import socket
 import struct
 from typing import Optional
 
-from ..common.errors import TransportError
+from ..common.errors import TransportError, TransportTimeout
 from ..common.logger import get_logger
 from .base import Transport
 
@@ -204,10 +204,11 @@ class TCPTransport(Transport):
                     None = blocking, 0 = non-blocking.
 
         Returns:
-            Frame bytes, or None if no data (non-blocking).
+            Frame bytes, or None if no data (timeout or idle).
 
         Raises:
-            TransportError: If receive fails or not connected.
+            TransportTimeout: If socket timeout (not an error, just no data).
+            TransportError: If receive fails or connection closed.
         """
         if not self._connected or self._client_socket is None:
             raise TransportError("Not connected")
@@ -218,6 +219,7 @@ class TCPTransport(Transport):
             # Read length prefix (4 bytes)
             length_data = self._recv_exact(LENGTH_PREFIX_LEN)
             if length_data is None:
+                # Socket closed or timeout
                 self._connected = False
                 return None
 
@@ -227,11 +229,13 @@ class TCPTransport(Transport):
                 raise TransportError(f"Received invalid length: {length}")
 
             if length == 0:
+                # Empty payload - valid frame
                 return b""
 
             # Read full data based on length
             data = self._recv_exact(length)
             if data is None:
+                # Socket closed or timeout
                 self._connected = False
                 return None
 
@@ -239,8 +243,26 @@ class TCPTransport(Transport):
             return data
 
         except socket.timeout:
+            # Timeout is normal, not an error - no data available
+            raise TransportTimeout("Receive timeout")
+        except TimeoutError:
+            # Timeout (alias for socket.timeout in Python 3)
+            raise TransportTimeout("Receive timeout")
+        except ConnectionResetError:
+            # Connection was forcibly closed by peer
+            self._connected = False
+            logger.debug("TCP connection reset by peer")
             return None
-        except socket.error as e:
+        except BrokenPipeError:
+            # Connection broken (send on closed socket)
+            self._connected = False
+            logger.debug("TCP connection broken")
+            return None
+        except OSError as e:
+            if e.errno == 104:  # ECONNRESET
+                self._connected = False
+                logger.debug("TCP connection reset (ECONNRESET)")
+                return None
             self._connected = False
             raise TransportError(f"Receive failed: {e}")
         finally:
@@ -263,6 +285,9 @@ class TCPTransport(Transport):
         while remaining > 0:
             try:
                 chunk = self._client_socket.recv(remaining)
+            except (socket.timeout, TimeoutError):
+                # Timeout should not be treated as disconnected
+                raise TransportTimeout("Receive timeout during partial read")
             except socket.error as e:
                 if e.errno == 11:  # EAGAIN
                     continue
