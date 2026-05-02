@@ -1,22 +1,19 @@
-# Client configuration
-transport:
-  type: ssh
-  host: 127.0.0.1
-  port: 22
-  username: vpnuser
-  # path to private key file
-  key_file: ~/.ssh/id_rsa
-
-tun:
-  name: tun0
+client:
+  tun_name: tun0
+  tun_ip: 10.8.0.2
+  tun_peer: 10.8.0.1
   mtu: 1400
-  # tunnel subnet
-  subnet: 10.0.0.2/24
 
 server:
-  # server public address
   host: 127.0.0.1
-  port: 2222
+  port: 22
+  username: testuser
+  ssh_key_path: ~/.ssh/id_rsa
 
-logging:
-  level: INFO
+transport:
+  type: ssh
+
+session:
+  heartbeat_interval: 10
+  reconnect: true
+  reconnect_interval: 3

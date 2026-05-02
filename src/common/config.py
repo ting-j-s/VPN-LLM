@@ -1,89 +1,107 @@
-"""VPN Tunnel Configuration Management."""
+"""VPN Tunnel Configuration Management.
 
-import os
+Loads and validates YAML configuration files for client and server.
+"""
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
-from .errors import ConfigError
-from .logger import setup_logger
+from .errors import TunnelError
 
 
-logger = setup_logger(__name__)
+class ConfigError(TunnelError):
+    """Configuration error."""
+    pass
+
+
+# Allowed transport types
+ALLOWED_TRANSPORT_TYPES = {"ssh"}
+
+
+@dataclass
+class ClientTUNConfig:
+    """Client TUN device configuration."""
+    tun_name: str = "tun0"
+    tun_ip: str = "10.8.0.2"
+    tun_peer: str = "10.8.0.1"
+    mtu: int = 1400
+
+
+@dataclass
+class ServerTUNConfig:
+    """Server TUN device configuration."""
+    tun_name: str = "tun0"
+    tun_ip: str = "10.8.0.1"
+    tun_peer: str = "10.8.0.2"
+    mtu: int = 1400
+    listen_mode: str = "ssh"
+
+
+@dataclass
+class ServerEndpointConfig:
+    """Server endpoint (SSH server) configuration."""
+    host: str = "127.0.0.1"
+    port: int = 22
+    username: str = ""
+    ssh_key_path: str = ""
 
 
 @dataclass
 class TransportConfig:
     """Transport layer configuration."""
     type: str = "ssh"
-    host: str = "127.0.0.1"
-    port: int = 22
-    username: Optional[str] = None
-    key_file: Optional[str] = None
 
 
 @dataclass
-class TUNConfig:
-    """TUN device configuration."""
-    name: str = "tun0"
-    mtu: int = 1400
-    subnet: str = "10.0.0.2/24"
-
-
-@dataclass
-class ServerConfig:
-    """Server public address configuration."""
-    host: str = "127.0.0.1"
-    port: int = 2222
+class SessionConfig:
+    """Session management configuration."""
+    # Client session fields
+    heartbeat_interval: int = 10
+    reconnect: bool = True
+    reconnect_interval: int = 3
+    # Server session fields
+    heartbeat_timeout: int = 30
 
 
 @dataclass
 class ForwardingConfig:
-    """Forwarding layer configuration."""
-    nat_enabled: bool = True
-    gateway: str = "192.168.1.1"
-
-
-@dataclass
-class LoggingConfig:
-    """Logging configuration."""
-    level: str = "INFO"
+    """Forwarding layer configuration (server only)."""
+    enable_nat: bool = False
+    enable_route: bool = True
 
 
 @dataclass
 class ClientConfig:
     """Client full configuration."""
+    client: ClientTUNConfig = field(default_factory=ClientTUNConfig)
+    server: ServerEndpointConfig = field(default_factory=ServerEndpointConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
-    tun: TUNConfig = field(default_factory=TUNConfig)
-    server: ServerConfig = field(default_factory=ServerConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
 
 
 @dataclass
-class ServerFullConfig:
+class ServerConfig:
     """Server full configuration."""
-    transport: TransportConfig = field(default_factory=TransportConfig)
-    tun: TUNConfig = field(default_factory=TUNConfig)
+    server: ServerTUNConfig = field(default_factory=ServerTUNConfig)
     forwarding: ForwardingConfig = field(default_factory=ForwardingConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    transport: TransportConfig = field(default_factory=TransportConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
 
 
-def load_config(config_path: str) -> ClientConfig | ServerFullConfig:
-    """Load configuration from YAML file.
+def _load_yaml(path: Path) -> dict:
+    """Load YAML file.
 
     Args:
-        config_path: Path to the YAML configuration file.
+        path: Path to YAML file.
 
     Returns:
-        Loaded configuration object.
+        Parsed YAML data.
 
     Raises:
-        ConfigError: If configuration file cannot be loaded or parsed.
+        ConfigError: If file not found or YAML parse error.
     """
-    path = Path(config_path).expanduser()
-
     if not path.exists():
         raise ConfigError(f"Configuration file not found: {path}")
 
@@ -94,55 +112,125 @@ def load_config(config_path: str) -> ClientConfig | ServerFullConfig:
         raise ConfigError(f"Failed to parse YAML: {e}")
 
     if not data:
-        raise ConfigError("Empty configuration file")
+        raise ConfigError(f"Empty configuration file: {path}")
 
-    # Determine config type based on content
-    if "forwarding" in data:
-        # Server config
-        transport_data = data.get("transport", {})
-        return ServerFullConfig(
-            transport=TransportConfig(
-                type=transport_data.get("type", "ssh"),
-                host=transport_data.get("host", "0.0.0.0"),
-                port=transport_data.get("port", 2222),
-                username=transport_data.get("username"),
-                key_file=transport_data.get("key_file"),
-            ),
-            tun=TUNConfig(
-                name=data.get("tun", {}).get("name", "tun0"),
-                mtu=data.get("tun", {}).get("mtu", 1400),
-                subnet=data.get("tun", {}).get("subnet", "10.0.0.1/24"),
-            ),
-            forwarding=ForwardingConfig(
-                nat_enabled=data.get("forwarding", {}).get("nat_enabled", True),
-                gateway=data.get("forwarding", {}).get("gateway", "192.168.1.1"),
-            ),
-            logging=LoggingConfig(
-                level=data.get("logging", {}).get("level", "INFO"),
-            ),
+    return data
+
+
+def _validate_transport(data: dict) -> None:
+    """Validate transport section.
+
+    Args:
+        data: Configuration data.
+
+    Raises:
+        ConfigError: If validation fails.
+    """
+    transport = data.get("transport", {})
+    transport_type = transport.get("type", "ssh")
+
+    if transport_type not in ALLOWED_TRANSPORT_TYPES:
+        raise ConfigError(
+            f"Invalid transport.type: '{transport_type}'. "
+            f"Allowed: {ALLOWED_TRANSPORT_TYPES}"
         )
-    else:
-        # Client config
-        transport_data = data.get("transport", {})
-        server_data = data.get("server", {})
-        return ClientConfig(
-            transport=TransportConfig(
-                type=transport_data.get("type", "ssh"),
-                host=transport_data.get("host", "127.0.0.1"),
-                port=transport_data.get("port", 22),
-                username=transport_data.get("username"),
-                key_file=transport_data.get("key_file"),
-            ),
-            tun=TUNConfig(
-                name=data.get("tun", {}).get("name", "tun0"),
-                mtu=data.get("tun", {}).get("mtu", 1400),
-                subnet=data.get("tun", {}).get("subnet", "10.0.0.2/24"),
-            ),
-            server=ServerConfig(
-                host=server_data.get("host", "127.0.0.1"),
-                port=server_data.get("port", 2222),
-            ),
-            logging=LoggingConfig(
-                level=data.get("logging", {}).get("level", "INFO"),
-            ),
-        )
+
+
+def load_client_config(path: str) -> ClientConfig:
+    """Load client configuration from YAML file.
+
+    Args:
+        path: Path to client YAML configuration file.
+
+    Returns:
+        ClientConfig object.
+
+    Raises:
+        ConfigError: If validation fails.
+    """
+    data = _load_yaml(Path(path))
+    _validate_transport(data)
+
+    # Build ClientTUNConfig
+    client_data = data.get("client", {})
+    tun = ClientTUNConfig(
+        tun_name=client_data.get("tun_name", "tun0"),
+        tun_ip=client_data.get("tun_ip", "10.8.0.2"),
+        tun_peer=client_data.get("tun_peer", "10.8.0.1"),
+        mtu=client_data.get("mtu", 1400),
+    )
+
+    # Build ServerEndpointConfig
+    server_data = data.get("server", {})
+    if not server_data.get("host"):
+        raise ConfigError("server.host is required")
+    if not server_data.get("username"):
+        raise ConfigError("server.username is required")
+    if not server_data.get("ssh_key_path"):
+        raise ConfigError("server.ssh_key_path is required")
+
+    endpoint = ServerEndpointConfig(
+        host=server_data["host"],
+        port=server_data.get("port", 22),
+        username=server_data["username"],
+        ssh_key_path=str(Path(server_data["ssh_key_path"]).expanduser()),
+    )
+
+    # Build TransportConfig
+    transport_data = data.get("transport", {})
+    transport = TransportConfig(type=transport_data.get("type", "ssh"))
+
+    # Build SessionConfig
+    session_data = data.get("session", {})
+    session = SessionConfig(
+        heartbeat_interval=session_data.get("heartbeat_interval", 10),
+        reconnect=session_data.get("reconnect", True),
+        reconnect_interval=session_data.get("reconnect_interval", 3),
+    )
+
+    return ClientConfig(client=tun, server=endpoint, transport=transport, session=session)
+
+
+def load_server_config(path: str) -> ServerConfig:
+    """Load server configuration from YAML file.
+
+    Args:
+        path: Path to server YAML configuration file.
+
+    Returns:
+        ServerConfig object.
+
+    Raises:
+        ConfigError: If validation fails.
+    """
+    data = _load_yaml(Path(path))
+    _validate_transport(data)
+
+    # Build ServerTUNConfig
+    server_data = data.get("server", {})
+    tun = ServerTUNConfig(
+        tun_name=server_data.get("tun_name", "tun0"),
+        tun_ip=server_data.get("tun_ip", "10.8.0.1"),
+        tun_peer=server_data.get("tun_peer", "10.8.0.2"),
+        mtu=server_data.get("mtu", 1400),
+        listen_mode=server_data.get("listen_mode", "ssh"),
+    )
+
+    # Build ForwardingConfig
+    fwd_data = data.get("forwarding", {})
+    forwarding = ForwardingConfig(
+        enable_nat=fwd_data.get("enable_nat", False),
+        enable_route=fwd_data.get("enable_route", True),
+    )
+
+    # Build TransportConfig
+    transport_data = data.get("transport", {})
+    transport = TransportConfig(type=transport_data.get("type", "ssh"))
+
+    # Build SessionConfig
+    session_data = data.get("session", {})
+    session = SessionConfig(
+        heartbeat_timeout=session_data.get("heartbeat_timeout", 30),
+    )
+
+    return ServerConfig(server=tun, forwarding=forwarding, transport=transport, session=session)
