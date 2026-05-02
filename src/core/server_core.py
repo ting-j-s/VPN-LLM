@@ -12,8 +12,8 @@ import threading
 import time
 from typing import Optional
 
-from ..common.errors import TunnelError
-from ..common.frame import Frame, FRAME_TYPE_DATA, FRAME_TYPE_HELLO, FRAME_TYPE_HELLO_ACK, FRAME_TYPE_KEEPALIVE, FRAME_TYPE_DISCONNECT
+from ..common.errors import VPNError
+from ..common.frame import Frame, FrameType, create_frame
 from ..common.logger import setup_logger
 from ..transport.base import BaseTransport
 from ..tun.tun_device import TUNDevice
@@ -109,9 +109,9 @@ class ServerCore:
                 continue
 
             # Handle handshake
-            if frame.frame_type == FRAME_TYPE_HELLO:
+            if frame.frame_type == FrameType.HELLO:
                 logger.info(f"Received HELLO (session_id={frame.session_id})")
-                ack = Frame.create_hello_ack_frame(frame.session_id)
+                ack = create_frame(FrameType.HELLO_ACK, frame.session_id)
                 try:
                     self.transport.send_frame(ack)
                     self._connected = True
@@ -125,7 +125,7 @@ class ServerCore:
                 continue
 
             # Handle data frames
-            if frame.frame_type == FRAME_TYPE_DATA:
+            if frame.frame_type == FrameType.DATA:
                 if frame.payload:
                     try:
                         self.tun.write(frame.payload)
@@ -133,16 +133,16 @@ class ServerCore:
                     except Exception as e:
                         logger.error(f"TUN write error: {e}")
 
-            elif frame.frame_type == FRAME_TYPE_KEEPALIVE:
+            elif frame.frame_type == FrameType.KEEPALIVE:
                 logger.debug("Received KEEPALIVE")
                 # Respond with keepalive
                 try:
-                    ack = Frame.create_keepalive_frame(frame.session_id)
+                    ack = create_frame(FrameType.KEEPALIVE, frame.session_id)
                     self.transport.send_frame(ack)
                 except Exception as e:
                     logger.error(f"Keepalive response error: {e}")
 
-            elif frame.frame_type == FRAME_TYPE_DISCONNECT:
+            elif frame.frame_type == FrameType.DISCONNECT:
                 logger.info("Received DISCONNECT from client")
                 break
 

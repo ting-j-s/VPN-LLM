@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from enum import IntEnum
 
-from .errors import TunnelError
+from .errors import VPNError
 
 
 # Frame constants
@@ -28,7 +28,7 @@ class FrameType(IntEnum):
     CLOSE = 0x04
 
 
-class FrameDecodeError(TunnelError):
+class FrameDecodeError(VPNError):
     """Raised when frame decoding fails."""
     pass
 
@@ -77,6 +77,20 @@ def encode_frame(frame: Frame) -> bytes:
         frame.session_id,
     )
     return header + frame.payload
+
+
+def create_frame(frame_type: FrameType, session_id: bytes, payload: bytes = b"") -> Frame:
+    """Create a Frame with given type, session and payload.
+
+    Args:
+        frame_type: Type of frame.
+        session_id: 16-byte session ID.
+        payload: Optional payload data.
+
+    Returns:
+        Frame object.
+    """
+    return Frame(frame_type=frame_type, session_id=session_id, payload=payload)
 
 
 def decode_frame(data: bytes) -> Frame:

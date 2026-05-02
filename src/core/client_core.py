@@ -12,8 +12,8 @@ import threading
 import time
 from typing import Optional
 
-from ..common.errors import TunnelError
-from ..common.frame import Frame, FRAME_TYPE_DATA, FRAME_TYPE_HELLO, FRAME_TYPE_HELLO_ACK, FRAME_TYPE_KEEPALIVE
+from ..common.errors import VPNError
+from ..common.frame import Frame, FrameType, create_frame
 from ..common.logger import setup_logger
 from ..transport.base import BaseTransport
 from ..tun.tun_device import TUNDevice
@@ -73,17 +73,17 @@ class ClientCore:
         self._connected = self.transport.is_connected()
 
         if not self._connected:
-            raise TunnelError("Transport connection failed")
+            raise VPNError("Transport connection failed")
 
         # Send hello handshake
-        hello_frame = Frame.create_hello_frame(self.session_id)
+        hello_frame = create_frame(FrameType.HELLO, self.session_id, b"HELLO")
         self.transport.send_frame(hello_frame)
         logger.info("Sent HELLO frame")
 
         # Wait for hello ack
         ack = self.transport.recv_frame(timeout=10.0)
-        if ack is None or ack.frame_type != FRAME_TYPE_HELLO_ACK:
-            raise TunnelError("Hello acknowledgment not received")
+        if ack is None or ack.frame_type != FrameType.HELLO_ACK:
+            raise VPNError("Hello acknowledgment not received")
 
         logger.info("Received HELLO_ACK, tunnel established")
 
@@ -112,7 +112,7 @@ class ClientCore:
 
         # Send disconnect
         try:
-            disconnect_frame = Frame.create_disconnect_frame(self.session_id)
+            disconnect_frame = create_frame(FrameType.CLOSE, self.session_id)
             self.transport.send_frame(disconnect_frame)
         except Exception:
             pass
@@ -141,7 +141,7 @@ class ClientCore:
                 continue
 
             # Handle different frame types
-            if frame.frame_type == FRAME_TYPE_DATA:
+            if frame.frame_type == FrameType.DATA:
                 # Write IP packet to TUN
                 if frame.payload:
                     try:
@@ -149,9 +149,9 @@ class ClientCore:
                         logger.debug(f"TUN wrote {len(frame.payload)} bytes")
                     except Exception as e:
                         logger.error(f"TUN write error: {e}")
-            elif frame.frame_type == FRAME_TYPE_KEEPALIVE:
+            elif frame.frame_type == FrameType.KEEPALIVE:
                 logger.debug("Received KEEPALIVE")
-            elif frame.frame_type == FRAME_TYPE_DISCONNECT:
+            elif frame.frame_type == FrameType.DISCONNECT:
                 logger.info("Received DISCONNECT from server")
                 break
             else:
@@ -176,7 +176,7 @@ class ClientCore:
 
             if packet:
                 # Encode as data frame
-                frame = Frame.create_data_frame(self.session_id, packet)
+                frame = create_frame(FrameType.DATA, self.session_id, packet)
                 try:
                     self.transport.send_frame(frame)
                     logger.debug(f"Sent {len(packet)} bytes as frame")
@@ -187,7 +187,7 @@ class ClientCore:
             now = time.time()
             if now - last_keepalive >= self.keepalive_interval:
                 try:
-                    keepalive = Frame.create_keepalive_frame(self.session_id)
+                    keepalive = create_frame(FrameType.HEARTBEAT, self.session_id)
                     self.transport.send_frame(keepalive)
                     last_keepalive = now
                     logger.debug("Sent KEEPALIVE")

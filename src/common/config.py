@@ -8,10 +8,10 @@ from pathlib import Path
 
 import yaml
 
-from .errors import TunnelError
+from .errors import VPNError
 
 
-class ConfigError(TunnelError):
+class ConfigError(VPNError):
     """Configuration error."""
     pass
 

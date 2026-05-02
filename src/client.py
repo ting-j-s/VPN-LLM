@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from common.config import load_config
 from common.logger import setup_logger
-from common.errors import TunnelError
+from common.errors import VPNError
 from tun.tun_device import create_tun_device
 from transport.ssh_transport import SSHTransport
 from core.client_core import ClientCore
@@ -78,7 +78,7 @@ def main():
                 remote_port=config.server.port,
             )
         else:
-            raise TunnelError(f"Unsupported transport type: {config.transport.type}")
+            raise VPNError(f"Unsupported transport type: {config.transport.type}")
 
         # Create and start client core
         global _client
@@ -97,7 +97,7 @@ def main():
         while _client.is_connected():
             signal.pause()
 
-    except TunnelError as e:
+    except VPNError as e:
         logger.error(f"Tunnel error: {e}")
         sys.exit(1)
     except Exception as e:

@@ -1,8 +1,8 @@
 """Tests for Transport module with mocks."""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
-from src.common.frame import Frame, FRAME_TYPE_DATA, FRAME_TYPE_HELLO, FRAME_TYPE_HELLO_ACK, FRAME_TYPE_KEEPALIVE
+import uuid
+from src.common.frame import Frame, FrameType, create_frame, encode_frame, decode_frame
 from src.transport.base import BaseTransport
 from src.common.errors import TransportError
 
@@ -78,7 +78,7 @@ class TestMockTransport:
         transport = MockTransport()
         transport.connect()
 
-        frame = Frame.create_hello_frame(session_id=1)
+        frame = create_frame(FrameType.HEARTBEAT, uuid.uuid4().bytes)
         transport.send_frame(frame)
 
         assert len(transport._sent_frames) == 1
@@ -88,7 +88,7 @@ class TestMockTransport:
         """Test sending frame when not connected raises error."""
         transport = MockTransport()
 
-        frame = Frame.create_hello_frame(session_id=1)
+        frame = create_frame(FrameType.HEARTBEAT, uuid.uuid4().bytes)
         with pytest.raises(TransportError, match="Not connected"):
             transport.send_frame(frame)
 
@@ -97,7 +97,7 @@ class TestMockTransport:
         transport = MockTransport()
         transport.connect()
 
-        frame = Frame.create_data_frame(session_id=1, payload=b"test")
+        frame = create_frame(FrameType.DATA, uuid.uuid4().bytes, b"test")
         transport.queue_frame(frame)
 
         received = transport.recv_frame(timeout=1.0)
@@ -137,18 +137,18 @@ class TestBaseTransportInterface:
 class TestFrameRoundtrip:
     """Test frame serialization with transport."""
 
-    def test_frame_hello_roundtrip(self):
-        """Test hello frame goes through mock transport."""
+    def test_frame_heartbeat_roundtrip(self):
+        """Test heartbeat frame goes through mock transport."""
         transport = MockTransport()
         transport.connect()
 
-        hello = Frame.create_hello_frame(session_id=42)
+        session_id = uuid.uuid4().bytes
+        hello = create_frame(FrameType.HEARTBEAT, session_id, b"HELLO")
         transport.send_frame(hello)
 
         sent = transport.get_sent_frames()
         assert len(sent) == 1
-        assert sent[0].frame_type == FRAME_TYPE_HELLO
-        assert sent[0].session_id == 42
+        assert sent[0].frame_type == FrameType.HEARTBEAT
         assert sent[0].payload == b"HELLO"
 
     def test_frame_data_roundtrip(self):
@@ -156,34 +156,36 @@ class TestFrameRoundtrip:
         transport = MockTransport()
         transport.connect()
 
+        session_id = uuid.uuid4().bytes
         payload = b"\x00\x01\x02\x03\x04\x05"
-        frame = Frame.create_data_frame(session_id=1, payload=payload)
+        frame = create_frame(FrameType.DATA, session_id, payload)
         transport.send_frame(frame)
 
-        # Simulate server returning ack
-        ack = Frame.create_hello_ack_frame(session_id=1)
+        # Simulate server returning ack (AUTH is 0x03)
+        ack = create_frame(FrameType.AUTH, session_id, b"ACK")
         transport.queue_frame(ack)
 
         received = transport.recv_frame(timeout=1.0)
         assert received is not None
-        assert received.frame_type == FRAME_TYPE_HELLO_ACK
+        assert received.frame_type == FrameType.AUTH
 
     def test_multiple_frames(self):
         """Test sending and receiving multiple frames."""
         transport = MockTransport()
         transport.connect()
+        session_id = uuid.uuid4().bytes
 
         for i in range(5):
-            frame = Frame.create_data_frame(session_id=1, payload=f"packet{i}".encode())
+            frame = create_frame(FrameType.DATA, session_id, f"packet{i}".encode())
             transport.send_frame(frame)
 
         assert len(transport.get_sent_frames()) == 5
 
         # Queue responses
         for _ in range(5):
-            transport.queue_frame(Frame.create_keepalive_frame(session_id=1))
+            transport.queue_frame(create_frame(FrameType.HEARTBEAT, session_id))
 
         for _ in range(5):
             received = transport.recv_frame(timeout=1.0)
             assert received is not None
-            assert received.frame_type == FRAME_TYPE_KEEPALIVE
+            assert received.frame_type == FrameType.HEARTBEAT

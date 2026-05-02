@@ -11,7 +11,7 @@ from typing import Optional
 
 import paramiko
 
-from ..common.errors import TransportError, ConnectionError
+from ..common.errors import TransportError, VPNError
 from ..common.frame import Frame
 from ..common.logger import setup_logger
 from .base import BaseTransport
@@ -70,7 +70,7 @@ class SSHTransport(BaseTransport):
 
         Raises:
             TransportError: If SSH connection fails.
-            ConnectionError: If authentication fails.
+            VPNError: If authentication fails.
         """
         if self._connected:
             logger.warning("Already connected")
@@ -110,7 +110,7 @@ class SSHTransport(BaseTransport):
         try:
             self._client.connect(**connect_kwargs)
         except paramiko.AuthenticationException as e:
-            raise ConnectionError(f"SSH authentication failed: {e}")
+            raise VPNError(f"SSH authentication failed: {e}")
         except paramiko.SSHException as e:
             raise TransportError(f"SSH connection failed: {e}")
         except socket.error as e:

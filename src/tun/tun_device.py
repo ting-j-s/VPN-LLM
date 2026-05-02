@@ -10,7 +10,7 @@ import struct
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from .errors import TUNError
+from .errors import TunDeviceError
 from .logger import setup_logger
 
 
@@ -98,7 +98,7 @@ class MockTUNDevice(TUNDevice):
         Returns packets that were injected via inject_packet().
         """
         if not self._opened:
-            raise TUNError("Device not opened")
+            raise TunDeviceError("Device not opened")
 
         if not self._rx_queue:
             return None
@@ -115,10 +115,10 @@ class MockTUNDevice(TUNDevice):
         Stores packets in TX queue for inspection.
         """
         if not self._opened:
-            raise TUNError("Device not opened")
+            raise TunDeviceError("Device not opened")
 
         if len(packet) > self.mtu:
-            raise TUNError(f"Packet too large: {len(packet)} > MTU={self.mtu}")
+            raise TunDeviceError(f"Packet too large: {len(packet)} > MTU={self.mtu}")
 
         self._tx_queue.append(packet)
         logger.debug(f"Mock TUN wrote {len(packet)} bytes")
@@ -131,7 +131,7 @@ class MockTUNDevice(TUNDevice):
             packet: Raw IP packet bytes.
         """
         if len(packet) > self.mtu:
-            raise TUNError(f"Packet too large: {len(packet)} > MTU={self.mtu}")
+            raise TunDeviceError(f"Packet too large: {len(packet)} > MTU={self.mtu}")
         self._rx_queue.append(packet)
         logger.debug(f"Mock TUN injected {len(packet)} bytes")
 
@@ -176,7 +176,7 @@ class LinuxTUNDevice(TUNDevice):
         Requires CAP_NET_ADMIN capability or root privileges.
 
         Raises:
-            TUNError: If device cannot be opened.
+            TunDeviceError: If device cannot be opened.
         """
         if self._opened:
             return
@@ -185,7 +185,7 @@ class LinuxTUNDevice(TUNDevice):
         try:
             tun_fd = os.open("/dev/net/tun", os.O_RDWR)
         except OSError as e:
-            raise TUNError(f"Cannot open /dev/net/tun: {e}")
+            raise TunDeviceError(f"Cannot open /dev/net/tun: {e}")
 
         # Build ioctl request for TUNSETIFF
         # struct ifreq { char ifrname[IFNAMSIZ]; short ifr_flags; }
@@ -198,7 +198,7 @@ class LinuxTUNDevice(TUNDevice):
             ioctl(tun_fd, 0x400454CA, ifreq)  # TUNSETIFF
         except OSError as e:
             os.close(tun_fd)
-            raise TUNError(f"Cannot set TUN device parameters: {e}")
+            raise TunDeviceError(f"Cannot set TUN device parameters: {e}")
 
         self.fd = tun_fd
         self._opened = True
@@ -226,7 +226,7 @@ class LinuxTUNDevice(TUNDevice):
             Raw IP packet bytes, or None if no data available (EAGAIN).
         """
         if not self._opened or self.fd is None:
-            raise TUNError("Device not opened")
+            raise TunDeviceError("Device not opened")
 
         try:
             packet = os.read(self.fd, max_size)
@@ -234,7 +234,7 @@ class LinuxTUNDevice(TUNDevice):
         except OSError as e:
             if e.errno == 11:  # EAGAIN
                 return None
-            raise TUNError(f"Read error: {e}")
+            raise TunDeviceError(f"Read error: {e}")
 
     def write(self, packet: bytes) -> int:
         """Write an IP packet to the TUN device.
@@ -246,13 +246,13 @@ class LinuxTUNDevice(TUNDevice):
             Number of bytes written.
         """
         if not self._opened or self.fd is None:
-            raise TUNError("Device not opened")
+            raise TunDeviceError("Device not opened")
 
         try:
             n = os.write(self.fd, packet)
             return n
         except OSError as e:
-            raise TUNError(f"Write error: {e}")
+            raise TunDeviceError(f"Write error: {e}")
 
     def set_mtu(self, mtu: int) -> None:
         """Set MTU via sysfs or ip command.

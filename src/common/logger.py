@@ -5,38 +5,50 @@ import sys
 from typing import Optional
 
 
-def setup_logger(
-    name: str,
-    level: str = "INFO",
-    log_file: Optional[str] = None
-) -> logging.Logger:
-    """Configure and return a logger instance.
+# Global default level
+_DEFAULT_LEVEL = "INFO"
+
+
+def set_default_level(level: str) -> None:
+    """Set global default log level.
 
     Args:
-        name: Logger name, typically module name.
-        level: Logging level (DEBUG, INFO, WARNING, ERROR).
-        log_file: Optional file path for log output.
+        level: Log level (DEBUG, INFO, WARNING, ERROR).
+    """
+    global _DEFAULT_LEVEL
+    _DEFAULT_LEVEL = level.upper()
+
+
+def get_logger(name: str, level: Optional[str] = None) -> logging.Logger:
+    """Get a configured logger instance.
+
+    Args:
+        name: Logger name, typically module name or __name__.
+        level: Optional log level override. Defaults to global default.
 
     Returns:
         Configured logger instance.
     """
+    log_level = (level or _DEFAULT_LEVEL).upper()
+
     logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, level.upper()))
+    logger.setLevel(getattr(logging, log_level, logging.INFO))
+    logger.propagate = False
 
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    # Add handler if not already present
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.DEBUG)
 
-    # File handler if specified
-    if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        formatter = logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
     return logger
+
+
+# Alias for backward compatibility
+setup_logger = get_logger
