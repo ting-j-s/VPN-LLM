@@ -1,5 +1,6 @@
 """Tests for Frame module."""
 
+import struct
 import pytest
 import uuid
 
@@ -12,6 +13,7 @@ from src.common.frame import (
     MAGIC,
     VERSION,
     HEADER_SIZE,
+    MAX_PAYLOAD_SIZE,
 )
 
 
@@ -138,10 +140,10 @@ class TestDecodeErrors:
         frame = Frame(frame_type=FrameType.DATA, session_id=session_id, payload=b"test")
         data = encode_frame(frame)
 
-        # Truncate payload
+        # Truncate payload - now raises "Frame data truncated"
         truncated = data[:-2]
 
-        with pytest.raises(FrameDecodeError, match="Payload length mismatch"):
+        with pytest.raises(FrameDecodeError, match="Frame data truncated"):
             decode_frame(truncated)
 
     def test_frame_too_short(self):
@@ -160,6 +162,37 @@ class TestDecodeErrors:
 
         with pytest.raises(FrameDecodeError, match="Unknown frame type"):
             decode_frame(corrupted)
+
+    def test_oversized_payload(self):
+        """Test that oversized payload raises error."""
+        session_id = uuid.uuid4().bytes
+        # Craft a frame with length > MAX_PAYLOAD_SIZE
+        from src.common.frame import MAX_PAYLOAD_SIZE
+        oversized_length = MAX_PAYLOAD_SIZE + 1
+
+        header = struct.pack(
+            ">4s B B I 16s",
+            MAGIC,
+            VERSION,
+            FrameType.DATA,
+            oversized_length,
+            session_id,
+        )
+
+        with pytest.raises(FrameDecodeError, match="Payload too large"):
+            decode_frame(header + b"\x00" * 100)
+
+    def test_trailing_data(self):
+        """Test that trailing data after declared payload raises error."""
+        session_id = uuid.uuid4().bytes
+        frame = Frame(frame_type=FrameType.DATA, session_id=session_id, payload=b"test")
+        data = encode_frame(frame)
+
+        # Add trailing garbage bytes
+        with_trailing = data + b"TRAILING"
+
+        with pytest.raises(FrameDecodeError, match="trailing data"):
+            decode_frame(with_trailing)
 
 
 class TestConstants:

@@ -18,6 +18,8 @@ from .errors import VPNError
 MAGIC = b"VTUN"
 VERSION = 1
 HEADER_SIZE = 26  # Magic(4) + Version(1) + Type(1) + Length(4) + SessionID(16)
+# Max payload: 10MB
+MAX_PAYLOAD_SIZE = 10 * 1024 * 1024
 
 
 class FrameType(IntEnum):
@@ -125,6 +127,21 @@ def decode_frame(data: bytes) -> Frame:
 
     if len(session_id) != 16:
         raise FrameDecodeError(f"Invalid session_id length: {len(session_id)}")
+
+    # Reject oversized payload
+    if length > MAX_PAYLOAD_SIZE:
+        raise FrameDecodeError(f"Payload too large: {length} > {MAX_PAYLOAD_SIZE}")
+
+    if len(data) < HEADER_SIZE + length:
+        raise FrameDecodeError(
+            f"Frame data truncated: expected {HEADER_SIZE + length}, got {len(data)}"
+        )
+
+    # Reject trailing data after declared payload
+    if len(data) > HEADER_SIZE + length:
+        raise FrameDecodeError(
+            f"Frame has trailing data: {len(data)} bytes total, expected {HEADER_SIZE + length}"
+        )
 
     payload = data[HEADER_SIZE:HEADER_SIZE + length]
 

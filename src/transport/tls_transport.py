@@ -79,6 +79,7 @@ class TLSTransport(Transport):
         keyfile: Optional[str] = None,
         cafile: Optional[str] = None,
         verify_server: bool = True,
+        insecure_skip_verify: bool = False,
         server_hostname: Optional[str] = None,
     ):
         """Initialize TLS transport.
@@ -105,6 +106,7 @@ class TLSTransport(Transport):
         self.keyfile = keyfile
         self.cafile = cafile
         self.verify_server = verify_server
+        self.insecure_skip_verify = insecure_skip_verify
         self.server_hostname = server_hostname or host
 
         self._server_socket: Optional[ssl.SSLSocket] = None
@@ -152,7 +154,10 @@ class TLSTransport(Transport):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             if self.certfile:
                 context.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
-            if self.cafile:
+            if self.insecure_skip_verify:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            elif self.cafile:
                 context.load_verify_locations(cafile=self.cafile)
                 if self.verify_server:
                     context.verify_mode = ssl.CERT_REQUIRED

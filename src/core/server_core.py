@@ -103,6 +103,27 @@ class ServerCore:
         except Exception as e:
             raise VPNError(f"Failed to open TUN device: {e}")
 
+        # Connect transport (server mode: listen/accept)
+        try:
+            self.transport.connect()
+        except Exception as e:
+            self.tun.close()
+            raise VPNError(f"Failed to start transport listener: {e}")
+
+        # For server mode transports, wait for client connection
+        if hasattr(self.transport, 'accept'):
+            try:
+                self.transport.accept()
+            except Exception as e:
+                self.transport.close()
+                self.tun.close()
+                raise VPNError(f"Failed to accept client connection: {e}")
+
+        if not self.transport.is_connected():
+            self.transport.close()
+            self.tun.close()
+            raise VPNError("Transport connection failed")
+
         # Initialize heartbeat state
         now = time.time()
         self._last_sent_time = now

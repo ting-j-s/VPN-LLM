@@ -47,12 +47,14 @@ class SSHTransport(Transport):
         username: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
         password: Optional[str] = None,
+        auto_add_host_key: bool = False,
     ):
         self.host = host
         self.port = port
         self.username = username
         self.ssh_key_path = Path(ssh_key_path).expanduser() if ssh_key_path else None
         self.password = password
+        self.auto_add_host_key = auto_add_host_key
 
         self._client: Optional[paramiko.SSHClient] = None
         self._channel: Optional[paramiko.Channel] = None
@@ -72,7 +74,10 @@ class SSHTransport(Transport):
 
         # Create SSH client
         self._client = paramiko.SSHClient()
-        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        if self.auto_add_host_key:
+            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
+            self._client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
         # Load system known hosts
         try:
