@@ -135,7 +135,8 @@ def _create_tcp_transport(config) -> TCPTransport:
 
     elif hasattr(config, 'server') and hasattr(config.server, 'tun_ip'):
         # Server config
-        host = getattr(config.server, 'tun_ip', '0.0.0.0')
+        # Note: bind to 0.0.0.0, not tun_ip. tun_ip is for TUN device routing, not TCP binding.
+        host = '0.0.0.0'
         port = getattr(config.server, 'listen_port', 2222)
 
         logger.info(f"Creating TCPTransport (server): host={host}, port={port}")
@@ -193,7 +194,8 @@ def _create_tls_transport(config) -> TLSTransport:
 
     elif hasattr(config, 'server') and hasattr(config.server, 'tun_ip'):
         # Server config
-        host = getattr(config.server, 'tun_ip', '0.0.0.0')
+        # Note: bind to 0.0.0.0, not tun_ip. tun_ip is for TUN device routing, not TCP binding.
+        host = '0.0.0.0'
         port = getattr(config.server, 'listen_port', 2223)
 
         logger.info(f"Creating TLSTransport (server): host={host}, port={port}")
@@ -244,7 +246,8 @@ def _create_websocket_transport(config) -> WebSocketTransport:
 
     elif hasattr(config, 'server') and hasattr(config.server, 'tun_ip'):
         # Server config
-        host = getattr(config.server, 'tun_ip', '0.0.0.0')
+        # Note: bind to 0.0.0.0, not tun_ip. tun_ip is for TUN device routing, not TCP binding.
+        host = '0.0.0.0'
         port = getattr(config.server, 'listen_port', 2224)
 
         logger.info(f"Creating WebSocketTransport (server): host={host}, port={port}, path={path}")
