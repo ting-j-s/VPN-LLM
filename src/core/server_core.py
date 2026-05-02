@@ -16,7 +16,7 @@ from ..common.errors import VPNError
 from ..common.frame import Frame, FrameType, create_frame
 from ..common.logger import setup_logger
 from ..transport.base import BaseTransport
-from ..tun.tun_device import TUNDevice
+from ..tun.tun_device import TunDevice
 
 
 logger = setup_logger(__name__)
@@ -31,7 +31,7 @@ class ServerCore:
 
     def __init__(
         self,
-        tun: TUNDevice,
+        tun: TunDevice,
         transport: BaseTransport,
         session_id: int = 1,
         keepalive_interval: float = 30.0,
@@ -128,7 +128,7 @@ class ServerCore:
             if frame.frame_type == FrameType.DATA:
                 if frame.payload:
                     try:
-                        self.tun.write(frame.payload)
+                        self.tun.write_packet(frame.payload)
                         logger.debug(f"TUN wrote {len(frame.payload)} bytes")
                     except Exception as e:
                         logger.error(f"TUN write error: {e}")
