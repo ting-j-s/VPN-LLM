@@ -154,10 +154,19 @@ class TLSTransport(Transport):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             if self.certfile:
                 context.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
+
             if self.insecure_skip_verify:
+                # Explicitly skip verification - only use for testing
+                import warnings
+                warnings.warn(
+                    "TLS certificate verification is disabled. "
+                    "This is insecure and should only be used for testing.",
+                    UserWarning
+                )
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
             elif self.cafile:
+                # Use explicit CA file
                 context.load_verify_locations(cafile=self.cafile)
                 if self.verify_server:
                     context.verify_mode = ssl.CERT_REQUIRED
@@ -165,8 +174,12 @@ class TLSTransport(Transport):
                 else:
                     context.check_hostname = False
                     context.verify_mode = ssl.CERT_NONE
+            elif self.verify_server:
+                # verify_server=True but no cafile - use system default CA
+                context.verify_mode = ssl.CERT_REQUIRED
+                context.check_hostname = True
             else:
-                # No CA file - default to no verification
+                # verify_server=False and no cafile - allow unverified
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
             if self.server_hostname:

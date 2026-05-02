@@ -88,11 +88,14 @@ def _create_ssh_transport(config) -> SSHTransport:
 
         logger.info(f"Creating SSHTransport: host={host}, port={port}, username={username}")
 
+        auto_add_host_key = getattr(config.transport, 'auto_add_host_key', False)
+
         return SSHTransport(
             host=host,
             port=port,
             username=username,
             ssh_key_path=ssh_key_path,
+            auto_add_host_key=auto_add_host_key,
         )
 
     # Server config
@@ -165,6 +168,8 @@ def _create_tls_transport(config) -> TLSTransport:
     keyfile = getattr(config.transport, 'keyfile', None)
     cafile = getattr(config.transport, 'cafile', None)
     verify_server = getattr(config.transport, 'verify_server', True)
+    insecure_skip_verify = getattr(config.transport, 'insecure_skip_verify', False)
+    server_hostname = getattr(config.transport, 'server_hostname', None) or getattr(config.server, 'host', None)
 
     # Determine if client or server
     if hasattr(config, 'server') and hasattr(config.server, 'host'):
@@ -182,6 +187,8 @@ def _create_tls_transport(config) -> TLSTransport:
             keyfile=keyfile,
             cafile=cafile,
             verify_server=verify_server,
+            insecure_skip_verify=insecure_skip_verify,
+            server_hostname=server_hostname,
         )
 
     elif hasattr(config, 'server') and hasattr(config.server, 'tun_ip'):

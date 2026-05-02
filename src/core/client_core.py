@@ -152,8 +152,12 @@ class ClientCore:
         logger.info(f"Client core started (session_id={session_hex}...)")
 
     def stop(self) -> None:
-        """Stop the client tunnel gracefully."""
+        """Stop the client tunnel gracefully.
+
+        This method is idempotent and can be called multiple times.
+        """
         if not self._running:
+            logger.debug("Client core already stopped")
             return
 
         logger.info("Stopping client core")
@@ -174,13 +178,16 @@ class ClientCore:
         try:
             self.transport.close()
         except Exception as e:
-            logger.error(f"Error closing transport: {e}")
+            logger.warning(f"Error closing transport: {e}")
 
         # Close TUN
         try:
             self.tun.close()
         except Exception as e:
-            logger.error(f"Error closing TUN: {e}")
+            logger.warning(f"Error closing TUN: {e}")
+
+        logger.info(f"Graceful shutdown completed (tun->transport={self._tun_to_transport_bytes} bytes, "
+                    f"transport->tun={self._transport_to_tun_bytes} bytes)")
 
         logger.info(f"Client core stopped (tun->transport={self._tun_to_transport_bytes} bytes, "
                     f"transport->tun={self._transport_to_tun_bytes} bytes)")
@@ -239,9 +246,17 @@ class ClientCore:
                 self._handle_frame(frame)
 
             except VPNError as e:
-                logger.error(f"Frame error: {e}")
+                if self._stop_event.is_set():
+                    # Normal shutdown, connection closed by peer
+                    logger.debug(f"Connection closed: {e}")
+                    break
+                logger.warning(f"Frame error: {e}")
                 break
             except Exception as e:
+                if self._stop_event.is_set():
+                    # Normal shutdown
+                    logger.debug(f"Connection closed: {e}")
+                    break
                 logger.error(f"Error in transport->tun loop: {e}")
                 break
 

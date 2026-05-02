@@ -110,7 +110,7 @@ def main():
         logger.info("=" * 50)
 
         # Keep main thread alive
-        while _client.is_connected():
+        while _client and _client.is_connected():
             signal.pause()
 
     except VPNError as e:

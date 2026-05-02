@@ -161,8 +161,12 @@ class ServerCore:
         logger.info(f"Server core started (session_id={session_hex}...)")
 
     def stop(self) -> None:
-        """Stop the server tunnel gracefully."""
+        """Stop the server tunnel gracefully.
+
+        This method is idempotent and can be called multiple times.
+        """
         if not self._running:
+            logger.debug("Server core already stopped")
             return
 
         logger.info("Stopping server core")
@@ -183,15 +187,15 @@ class ServerCore:
         try:
             self.transport.close()
         except Exception as e:
-            logger.error(f"Error closing transport: {e}")
+            logger.warning(f"Error closing transport: {e}")
 
         # Close TUN
         try:
             self.tun.close()
         except Exception as e:
-            logger.error(f"Error closing TUN: {e}")
+            logger.warning(f"Error closing TUN: {e}")
 
-        logger.info(f"Server core stopped (transport->tun={self._transport_to_tun_bytes} bytes, "
+        logger.info(f"Graceful shutdown completed (transport->tun={self._transport_to_tun_bytes} bytes, "
                     f"tun->transport={self._tun_to_transport_bytes} bytes)")
 
     def _heartbeat_loop(self) -> None:
@@ -248,9 +252,17 @@ class ServerCore:
                 self._handle_frame(frame)
 
             except VPNError as e:
-                logger.error(f"Frame error: {e}")
+                if self._stop_event.is_set():
+                    # Normal shutdown, connection closed by peer
+                    logger.debug(f"Connection closed: {e}")
+                    break
+                logger.warning(f"Frame error: {e}")
                 break
             except Exception as e:
+                if self._stop_event.is_set():
+                    # Normal shutdown
+                    logger.debug(f"Connection closed: {e}")
+                    break
                 logger.error(f"Error in transport->tun loop: {e}")
                 break
 

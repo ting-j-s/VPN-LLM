@@ -62,14 +62,8 @@
 ```
 vpn_tunnel/
 ├── config/                    # 配置文件
-│   ├── client.yaml           # SSH 客户端配置
-│   ├── client_tcp.yaml       # TCP 客户端配置
-│   ├── client_tls.yaml       # TLS 客户端配置
-│   ├── client_websocket.yaml # WebSocket 客户端配置
-│   ├── server.yaml           # SSH 服务端配置
-│   ├── server_tcp.yaml       # TCP 服务端配置
-│   ├── server_tls.yaml       # TLS 服务端配置
-│   └── server_websocket.yaml # WebSocket 服务端配置
+│   ├── client.yaml           # 默认 TCP 客户端配置
+│   └── server.yaml           # 默认 TCP 服务端配置
 │
 ├── src/
 │   ├── client.py            # 客户端入口
@@ -87,7 +81,7 @@ vpn_tunnel/
 │   │   ├── ssh_transport.py # SSH 传输
 │   │   ├── tcp_transport.py # TCP 传输
 │   │   ├── tls_transport.py # TLS 传输
-│   │   └── websocket_transport.py # WebSocket 传输
+│   │   └── websocket_transport.py # WebSocket 传输 (experimental)
 │   │
 │   ├── tun/                 # TUN 设备抽象
 │   │   └── tun_device.py    # MockTunDevice / LinuxTunDevice
@@ -107,13 +101,14 @@ vpn_tunnel/
 │       ├── llm_client.py    # OpenAI 风格 API 客户端
 │       └── code_task_manager.py # 代码任务管理器
 │
-├── tests/                   # 测试套件 (108 tests)
+├── tests/                   # 测试套件 (109 tests)
 │   ├── test_frame.py
 │   ├── test_config.py
 │   ├── test_tcp_transport.py
 │   ├── test_tls_transport.py
 │   ├── test_websocket_transport.py
 │   ├── test_transport_mock.py
+│   ├── test_core.py         # Core 端到端测试
 │   ├── test_llm_client.py
 │   └── test_code_task_manager.py
 │
@@ -121,7 +116,7 @@ vpn_tunnel/
 └── README.md               # 本文档
 ```
 
-## 4. 第一阶段运行方式
+## 4. 运行方式
 
 ### 环境准备
 
@@ -142,24 +137,39 @@ python3 -m pytest tests/ -v
 
 ### Mock TUN 模式（无需 root）
 
-MockTunDevice 不需要 TUN 设备权限，适合功能测试：
+MockTunDevice 不需要 TUN 设备权限，适合功能测试。使用 `--mock-tun` 参数启用：
 
 ```bash
-# 服务端（使用 mock transport）
-python3 -m src.server --config config/server.yaml --transport mock
+# 服务端
+python3 -m src.server --config config/server.yaml --transport tcp --mock-tun
 
-# 客户端（使用 mock transport）
-python3 -m src.client --config config/client.yaml --transport mock
+# 客户端
+python3 -m src.client --config config/client.yaml --transport tcp --mock-tun
+```
+
+### MockTransport 模式（仅用于单元测试）
+
+**注意**：MockTransport 使用内存队列模拟传输，**不能**用于两个独立进程之间的通信。它仅适用于单进程内的单元测试和集成测试。
+
+```bash
+# 错误用法 - 两个独立进程无法通过 MockTransport 通信
+python3 -m src.server --transport mock  # 不会生效
+python3 -m src.client --transport mock  # 不会生效
+
+# 正确用法 - 在测试代码中使用 MockTransport
+# 参见 tests/test_transport_mock.py 和 tests/test_core.py
 ```
 
 ### TCP 模式（需要网络权限）
 
+默认配置文件已使用 TCP 类型：
+
 ```bash
 # 服务端
-python3 -m src.server --config config/server_tcp.yaml
+python3 -m src.server --config config/server.yaml --mock-tun
 
 # 客户端
-python3 -m src.client --config config/client_tcp.yaml
+python3 -m src.client --config config/client.yaml --mock-tun
 ```
 
 ### TLS 模式
@@ -168,21 +178,24 @@ python3 -m src.client --config config/client_tcp.yaml
 # 生成测试证书（仅用于实验）
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -subj "/CN=localhost"
 
-# 服务端
-python3 -m src.server --config config/server_tls.yaml
+# 服务端（需要配置 certfile, keyfile）
+python3 -m src.server --config config/server.yaml --transport tls
 
-# 客户端
-python3 -m src.client --config config/client_tls.yaml
+# 客户端（需要配置 cafile 验证服务器证书，或使用 insecure_skip_verify 跳过验证）
+python3 -m src.client --config config/client.yaml --transport tls
 ```
 
-### WebSocket 模式
+### WebSocket 模式（experimental）
+
+> **⚠️ WebSocket transport is experimental and needs further integration testing.**
+> 当前实现在多线程和已有 event loop 环境里可能不稳定。
 
 ```bash
 # 服务端
-python3 -m src.server --config config/server_websocket.yaml
+python3 -m src.server --config config/server.yaml --transport websocket
 
 # 客户端
-python3 -m src.client --config config/client_websocket.yaml
+python3 -m src.client --config config/client.yaml --transport websocket
 ```
 
 ## 5. 配置文件说明
@@ -201,7 +214,7 @@ server:
   port: 2222            # 服务器端口
 
 transport:
-  type: ssh             # 传输类型: ssh/tcp/tls/websocket/mock
+  type: tcp             # 传输类型: ssh/tcp/tls/websocket/mock
 
 session:
   heartbeat_interval: 10   # 心跳间隔（秒）
@@ -217,7 +230,6 @@ server:
   tun_ip: 10.8.0.1      # 本地 TUN IP
   tun_peer: 10.8.0.2    # 远程 TUN IP
   mtu: 1400             # MTU
-  listen_mode: ssh      # 监听模式
   listen_port: 2222     # 监听端口
 
 forwarding:
@@ -225,10 +237,30 @@ forwarding:
   enable_route: true    # 是否启用路由
 
 transport:
-  type: ssh             # 传输类型
+  type: tcp             # 传输类型
 
 session:
   heartbeat_timeout: 30 # 心跳超时（秒）
+```
+
+### TLS 客户端配置扩展
+
+```yaml
+transport:
+  type: tls
+  certfile: /path/to/client.crt    # 客户端证书（可选）
+  keyfile: /path/to/client.key     # 客户端私钥（可选）
+  cafile: /path/to/ca.crt          # CA 证书，用于验证服务器
+  verify_server: true             # 是否验证服务器证书（默认 true）
+  insecure_skip_verify: false      # 跳过证书验证（默认 false，**生产环境勿用**）
+```
+
+### SSH 配置扩展
+
+```yaml
+transport:
+  type: ssh
+  auto_add_host_key: false        # 是否自动添加未知主机密钥（默认 false，**生产环境勿用**）
 ```
 
 ## 6. Frame 格式说明
@@ -246,7 +278,7 @@ session:
 - **Magic (4字节)**：固定值 `VTUN` (0x5654554E)
 - **Version (1字节)**：当前为 `0x01`
 - **Type (1字节)**：`0x01`=DATA, `0x02`=HEARTBEAT, `0x03`=AUTH, `0x04`=CLOSE
-- **Length (4字节)**：Session ID + Payload 的长度（大端序）
+- **Length (4字节)**：Payload 的长度（大端序），不包括 Session ID
 - **Session ID (16字节)**：UUID，用于标识会话
 - **Payload (变长)**：数据负载
 
@@ -298,11 +330,11 @@ class Transport(ABC):
 
 | 类型 | 说明 | 特性 |
 |------|------|------|
-| SSH | 基于 Paramiko | 加密传输，需 SSH 服务器 |
+| SSH | 基于 Paramiko | 加密传输，需 SSH 服务器，默认严格主机密钥验证 |
 | TCP | 原始 TCP | 简单直接，无加密 |
-| TLS | TLS 加密 TCP | 证书认证，可选双向验证 |
-| WebSocket | WebSocket 协议 | 可穿透防火墙，HTTP 兼容 |
-| Mock | 内存模拟 | 无网络依赖，用于测试 |
+| TLS | TLS 加密 TCP | 证书认证，默认启用服务器证书验证 |
+| WebSocket | WebSocket 协议 | 可穿透防火墙，HTTP 兼容，**experimental** |
+| Mock | 内存模拟 | 无网络依赖，**仅用于单元测试，不能跨进程通信** |
 
 ### 工厂模式
 
@@ -390,15 +422,11 @@ def _create_my_transport(config):
     return MyTransport(mode=MyTransport.MODE_CLIENT, host=host, port=port)
 ```
 
-### 步骤 3：添加入口文件配置
-
-创建 `config/client_my.yaml` 和 `config/server_my.yaml`
-
-### 步骤 4：添加测试
+### 步骤 3：添加测试
 
 创建 `tests/test_my_transport.py`
 
-### 步骤 5：更新配置允许列表
+### 步骤 4：更新配置允许列表
 
 编辑 `src/common/config.py`：
 
@@ -446,7 +474,7 @@ sudo ip route add 10.8.0.0/24 dev tun0
 
 | 方案 | 权限需求 | 适用场景 |
 |------|----------|----------|
-| MockTunDevice | 无需 root | 功能测试、开发 |
+| MockTunDevice (--mock-tun) | 无需 root | 功能测试、开发 |
 | LinuxTunDevice | 需要 root | 真实隧道实验 |
 
 ### 注意事项

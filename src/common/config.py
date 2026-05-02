@@ -5,6 +5,7 @@ Loads and validates YAML configuration files for client and server.
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -53,6 +54,16 @@ class ServerEndpointConfig:
 class TransportConfig:
     """Transport layer configuration."""
     type: str = "ssh"
+    # TLS-specific options
+    certfile: Optional[str] = None
+    keyfile: Optional[str] = None
+    cafile: Optional[str] = None
+    verify_server: bool = True
+    insecure_skip_verify: bool = False
+    # SSH-specific options
+    auto_add_host_key: bool = False
+    # WebSocket-specific options
+    path: str = "/"
 
 
 @dataclass
@@ -172,7 +183,16 @@ def load_client_config(path: str) -> ClientConfig:
 
     # Build TransportConfig
     transport_data = data.get("transport", {})
-    transport = TransportConfig(type=transport_data.get("type", "ssh"))
+    transport = TransportConfig(
+        type=transport_data.get("type", "ssh"),
+        certfile=transport_data.get("certfile"),
+        keyfile=transport_data.get("keyfile"),
+        cafile=transport_data.get("cafile"),
+        verify_server=transport_data.get("verify_server", True),
+        insecure_skip_verify=transport_data.get("insecure_skip_verify", False),
+        auto_add_host_key=transport_data.get("auto_add_host_key", False),
+        path=transport_data.get("path", "/"),
+    )
 
     # SSH-specific validation (only when using SSH transport)
     if transport.type == "ssh":
@@ -227,7 +247,16 @@ def load_server_config(path: str) -> ServerConfig:
 
     # Build TransportConfig
     transport_data = data.get("transport", {})
-    transport = TransportConfig(type=transport_data.get("type", "ssh"))
+    transport = TransportConfig(
+        type=transport_data.get("type", "ssh"),
+        certfile=transport_data.get("certfile"),
+        keyfile=transport_data.get("keyfile"),
+        cafile=transport_data.get("cafile"),
+        verify_server=transport_data.get("verify_server", True),
+        insecure_skip_verify=transport_data.get("insecure_skip_verify", False),
+        auto_add_host_key=transport_data.get("auto_add_host_key", False),
+        path=transport_data.get("path", "/"),
+    )
 
     # Build SessionConfig
     session_data = data.get("session", {})
