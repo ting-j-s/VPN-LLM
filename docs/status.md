@@ -151,52 +151,59 @@ sudo python -m src.client --config config/client.yaml --transport tcp
 
 ---
 
-## Phase 3: real TUN + 路由 + ping 连通性
+## Phase 3: real TUN + 路由 + ping 连通性验证 ⏳ 进行中
 
 ### 目标
 
-让项目具备清晰的真实 TUN 验证流程，证明 tun0/tun1 不只是能创建，还能通过 IP 地址、路由和 ping/tcpdump 验证真实 IP 包流动。
+使用 Linux network namespace 或两台 Linux 主机验证真实 IP 包通过 TCP tunnel 转发。验证标准是 ping + tcpdump 看到包流动，而不只是 TUN 设备创建成功。
+
+### 推荐验证拓扑
+
+1. **两个 network namespace（单机，推荐）**
+   - `vpn_srv` namespace 运行 server，使用 tun0 (10.8.0.1/24)
+   - `vpn_cli` namespace 运行 client，使用 tun1 (10.8.0.2/24)
+   - veth pair 连接两个 namespace，client 通过 192.168.100.1:2222 连接 server
+   - 详见 [docs/phase3_netns_validation.md](real_tun_linux.md)
+
+2. **两台 Linux 主机（最佳）**
+   - 一台运行 server，另一台运行 client
+   - 各自使用 tun0/tun1
+
+3. **同一台机器同一 namespace（不推荐）**
+   - tun0/tun1 使用同一 /24 可能导致 kernel 直接路由
+   - ping 结果不能可靠证明 tunnel 转发成功
+   - 必须用 tcpdump 区分 direct routing vs tunnel forwarding
 
 ### 验收标准
 
-1. 手动配置 IP 地址后，tun0/tun1 可显示正确 IP
-2. `ip route` 可看到 tunnel 路由
-3. `ping -I tun1 10.8.0.1` 和 `ping -I tun0 10.8.0.2` 可连通
-4. `tcpdump -i tun0 -n icmp` 可看到 ICMP 包流动
+1. ✅ 手动配置 IP 地址后，tun0/tun1 可显示正确 IP
+2. ✅ `ip netns exec vpn_cli ip route` 可看到 tunnel 路由（namespace 模式下）
+3. ✅ `ping -I tun1 10.8.0.1` 可连通
+4. ✅ `tcpdump -i veth_srv -n tcp port 2222` 可看到 TCP tunnel 流量
+5. ✅ `tcpdump -i tun0 -n icmp` 可看到 ICMP 包在 TUN 设备上流动
 
 ### 文档
 
-详见 [docs/real_tun_linux.md](real_tun_linux.md)
+- [docs/real_tun_linux.md](real_tun_linux.md) - 通用 real TUN 设置和故障排查
+- [docs/phase3_netns_validation.md](phase3_netns_validation.md) - **推荐** network namespace 验证指南
 
-### 手动验证步骤
+### 辅助脚本
 
-```bash
-# 1. 配置 IP 地址
-sudo ip addr add 10.8.0.1/24 dev tun0
-sudo ip link set tun0 up
-sudo ip addr add 10.8.0.2/24 dev tun1
-sudo ip link set tun1 up
+- `scripts/phase3_netns/setup_netns.sh` - 创建 namespace 和 veth
+- `scripts/phase3_netns/cleanup_netns.sh` - 清理 namespace
+- `scripts/phase3_netns/show_state.sh` - 显示当前状态
 
-# 2. 启用 IP 转发（Server）
-sudo sysctl -w net.ipv4.ip_forward=1
+### 配置文件
 
-# 3. 添加路由
-sudo ip route add 10.8.0.0/24 dev tun0  # Server
-sudo ip route add 10.8.0.0/24 dev tun1  # Client
-
-# 4. ping 验证
-ping -I tun1 10.8.0.1  # 从 Client ping Server
-ping -I tun0 10.8.0.2  # 从 Server ping Client
-
-# 5. tcpdump 抓包
-sudo tcpdump -i tun0 -n icmp
-```
+- `config/server_netns.yaml` - namespace 测试用 server 配置
+- `config/client_netns.yaml` - namespace 测试用 client 配置
 
 ### 注意事项
 
 - 本阶段**不自动修改系统路由**，只提供命令和文档
 - 完整网络连通性仍依赖手动 ip addr / ip route 配置
 - 需要 root 或 CAP_NET_ADMIN 权限
+- 同一 machine 同一 namespace 测试需要 tcpdump 辅助判断
 
 ---
 

@@ -117,6 +117,8 @@ sudo ip addr add 10.8.0.2/24 dev tun1
 sudo ip link set tun1 up
 ```
 
+> **Note**: `ip addr add` changes runtime network state only. The address will be lost after reboot, after the TUN interface is deleted, or after the network namespace is removed. It is **not persistent** across reboots.
+
 ### Remove IP if needed
 
 ```bash
@@ -124,18 +126,22 @@ sudo ip addr del 10.8.0.1/24 dev tun0
 sudo ip addr del 10.8.0.2/24 dev tun1
 ```
 
-### Important warning for same-machine testing
+### Important warning for same-machine same-namespace testing
 
-> **⚠️ Same-machine routing conflicts**:
+> **⚠️ Same-machine same-namespace routing conflicts**:
 >
-> If server and client run on the **same machine in the same network namespace**, both tun0 and tun1 using the **same /24 network (10.8.0.0/24)** will cause routing conflicts. The kernel may route packets directly without going through the TCP tunnel.
+> If server and client run on the **same machine in the same network namespace**:
 >
-> **Recommended topologies for proper verification**:
-> 1. **Two Linux hosts** (best): One runs server on tun0, the other runs client on tun0/tun1
-> 2. **Two network namespaces**: Create separate namespaces to isolate routing
-> 3. **Two VMs**: Each VM has its own routing table
+> 1. **Both tun0 and tun1 using the same /24 (10.8.0.0/24) causes routing conflicts** - the kernel may route packets directly between tun0 and tun1 without going through the TCP tunnel.
+> 2. **ping results cannot reliably prove tunnel forwarding** - kernel direct routing and tunnel forwarding both produce "ping works" results, but only tunnel forwarding involves the TCP connection on port 2222.
+> 3. **You must use tcpdump to distinguish** whether packets go through the tunnel or are directly routed.
 >
-> Same-machine testing can work but requires careful routing table management and may not prove end-to-end tunnel functionality.
+> **Recommended topologies for reliable Phase 3 verification**:
+> 1. **Two separate Linux hosts** (best): Each has its own routing table, tunnel is the only path
+> 2. **Two Linux network namespaces on one host** (good): Isolated routing tables, can verify tunnel actually carries traffic
+> 3. **Two VMs** (good): Each VM has independent network stack
+>
+> Same-machine same-namespace testing is **not recommended** for Phase 3 verification unless you add tcpdump proof showing packets traverse the TCP tunnel.
 
 ---
 

@@ -503,8 +503,11 @@ sudo python -m src.server --config config/server.yaml --transport tcp
 sudo python -m src.client --config config/client.yaml --transport tcp
 ```
 
-**完整验证流程**（需要手动配置）：
-详见 [docs/real_tun_linux.md](docs/real_tun_linux.md)
+**完整验证流程**：
+- [docs/real_tun_linux.md](docs/real_tun_linux.md) - 通用 real TUN 设置和故障排查
+- [docs/phase3_netns_validation.md](docs/phase3_netns_validation.md) - **推荐** 使用 network namespace 做单机可复现验证
+
+> **Phase 3 推荐使用 network namespace**：同一 namespace 下直接使用 tun0/tun1 ping 不可靠（可能直接被 kernel 路由），建议使用 `ip netns exec` 在隔离的 namespace 中运行 server/client 进行验证。详见 [docs/phase3_netns_validation.md](docs/phase3_netns_validation.md)。
 
 ### 注意事项
 
