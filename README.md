@@ -482,7 +482,29 @@ sudo ip route add 10.8.0.0/24 dev tun0
 | 方案 | 权限需求 | 适用场景 |
 |------|----------|----------|
 | MockTunDevice (--mock-tun) | 无需 root | 功能测试、开发 |
-| LinuxTunDevice | 需要 root | 真实隧道实验 |
+| LinuxTunDevice (真实 TUN) | 需要 root | 真实隧道实验 |
+
+### Real Linux TUN (experimental)
+
+项目支持使用真实 Linux TUN 设备（替代 MockTunDevice）。当前状态：
+
+- ✅ LinuxTunDevice 可成功创建真实 TUN 设备（tun0, tun1）
+- ✅ Server/Client 可分别使用不同 TUN 设备启动
+- ✅ Graceful shutdown 工作正常
+- ⏳ 完整网络连通性需要手动配置 IP 地址和路由
+
+**快速开始：**
+
+```bash
+# 终端 1 - 启动服务端
+sudo python -m src.server --config config/server.yaml --transport tcp
+
+# 终端 2 - 启动客户端
+sudo python -m src.client --config config/client.yaml --transport tcp
+```
+
+**完整验证流程**（需要手动配置）：
+详见 [docs/real_tun_linux.md](docs/real_tun_linux.md)
 
 ### 注意事项
 
