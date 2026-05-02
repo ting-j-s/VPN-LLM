@@ -106,9 +106,9 @@
 Phase 1: TCP + mock-tun (v0.1-tcp-mocktun) ✅ 已完成
     └── 验证：TCP 连接、MockTUN、Graceful Shutdown
 
-Phase 2: TCP + real Linux TUN (当前)
+Phase 2: TCP + real Linux TUN (v0.1-tcp-realtun) ✅ 已完成
     └── 目标：替换 MockTunDevice → LinuxTunDevice
-    └── 验证：TUN 设备读写真实 IP 包
+    └── 验证：TUN 设备读写真实 IP 包（2026-05-02 验证）
 
 Phase 3: TCP + real TUN + 路由
     └── 目标：配置路由表、IP 转发
@@ -145,13 +145,18 @@ Phase 5: LLM 协议框架
 sudo python -m src.server --config config/server.yaml --transport tcp
 ```
 
+**已完成**:
+1. LinuxTunDevice.open() 修复 - 使用 struct.pack 替代 array 索引
+2. TUN 设备可成功创建 (tun0, tun1)
+3. Server/Client 可同时运行，各自使用不同 TUN 设备
+4. Graceful shutdown 工作正常
+
 **需要完成**:
-1. LinuxTunDevice 可能需要调整（non-blocking 模式）
-2. 需要 TUN 设备创建/清理脚本
-3. 需要处理 `ip addr` 和 `ip route` 命令
-4. 需要考虑权限降级方案
+1. 需要 TUN 设备创建/清理脚本
+2. 需要处理 `ip addr` 和 `ip route` 命令（路由配置）
+3. 需要考虑权限降级方案
 
 ---
 
 **最后更新**: 2026-05-02
-**当前版本**: v0.1-tcp-mocktun
+**当前版本**: v0.1-tcp-realtun

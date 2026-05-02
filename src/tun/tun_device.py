@@ -218,20 +218,19 @@ class LinuxTunDevice(TunDevice):
         except OSError as e:
             raise TunDeviceError(f"Cannot open /dev/net/tun: {e}")
 
-        # Build ifreq structure for TUNSETIFF
+        # Build ifreq structure for TUNSETIFF using struct
         # struct ifreq {
-        #     char ifrname[IFNAMSIZ];  // 16 bytes
+        #     char ifrname[IFNAMSIZ];  // 16 bytes, null-padded
         #     short ifr_flags;          // 2 bytes
         # }
-        # IFNAMSIZ = 16
-        ifreq = array.array("B", b"\x00" * 16)
-        # Copy device name (up to 15 bytes + null)
-        name_bytes = self.name.encode("utf-8")
-        ifreq[0:len(name_bytes)] = array.array("B", name_bytes)
-        # ifr_flags: IFF_TUN | IFF_NO_PI
-        # IFF_TUN = 0x0001, IFF_NO_PI = 0x1000
-        ifreq[16] = (IFF_TUN | IFF_NO_PI) & 0xFF
-        ifreq[17] = ((IFF_TUN | IFF_NO_PI) >> 8) & 0xFF
+        import struct
+        name_bytes = self.name.encode("utf-8")[:15]  # max 15 chars + null
+        name_bytes = name_bytes.ljust(16, b'\x00')  # pad to 16 bytes
+        ifreq = struct.pack(
+            "16sH",
+            name_bytes,
+            IFF_TUN | IFF_NO_PI
+        )
 
         try:
             fcntl.ioctl(fd, TUNSETIFF, ifreq)
