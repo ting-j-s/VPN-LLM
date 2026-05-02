@@ -178,6 +178,7 @@ class TLSTransport(Transport):
                 # verify_server=True but no cafile - use system default CA
                 context.verify_mode = ssl.CERT_REQUIRED
                 context.check_hostname = True
+                context.load_default_certs(ssl.Purpose.SERVER_AUTH)
             else:
                 # verify_server=False and no cafile - allow unverified
                 context.check_hostname = False

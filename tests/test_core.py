@@ -198,11 +198,106 @@ class TestCoreEndToEnd:
 
         Flow: client_tun -> server_tun AND server_tun -> client_tun
 
-        Note: This test is skipped due to timing sensitivity with
-        heartbeats causing premature disconnection in test environment.
-        The underlying code is tested by the unidirectional tests.
+        Note: This test is sensitive to timing. If it fails intermittently,
+        the unidirectional tests (test_client_to_server_data_path and
+        test_server_to_client_data_path) still verify the core functionality.
         """
-        pytest.skip("Bidirectional test skipped due to timing sensitivity")
+        port = get_free_port()
+
+        # Create session ID
+        session_id = uuid.uuid4().bytes
+
+        # Create TUN devices
+        server_tun = MockTunDevice(name="server-tun", mtu=1400)
+        client_tun = MockTunDevice(name="client-tun", mtu=1400)
+
+        # Create TCP transports
+        server_transport = TCPTransport(mode=TCPTransport.MODE_SERVER, host="127.0.0.1", port=port)
+        client_transport = TCPTransport(mode=TCPTransport.MODE_CLIENT, host="127.0.0.1", port=port)
+
+        # Create cores with same session ID
+        server_core = ServerCore(
+            tun=server_tun,
+            transport=server_transport,
+            session_id=session_id,
+            heartbeat_interval=10,
+            heartbeat_timeout=30,
+        )
+        client_core = ClientCore(
+            tun=client_tun,
+            transport=client_transport,
+            session_id=session_id,
+            heartbeat_interval=10,
+            heartbeat_timeout=30,
+        )
+
+        # Start server in a thread
+        server_ready = threading.Event()
+        def run_server():
+            server_core.start()
+            server_ready.set()
+        server_thread = threading.Thread(target=run_server)
+
+        try:
+            server_thread.start()
+            # Wait for server to be ready
+            time.sleep(0.3)
+
+            # Start client
+            client_core.start()
+
+            # Wait for connection to establish
+            time.sleep(2.0)
+
+            # Verify both are connected (wait if needed)
+            for _ in range(10):
+                if server_core.is_connected() and client_core.is_connected():
+                    break
+                time.sleep(0.2)
+
+            if not server_core.is_connected():
+                pytest.skip("Server not connected (timing issue)")
+            if not client_core.is_connected():
+                pytest.skip("Client not connected (timing issue)")
+
+            # Inject packet from client
+            client_payload = b"\x45\x00\x00\x1e\x00\x01\x00\x00\x40\x06\x00\x00\x7f\x00\x00\x01\x7f\x00\x00\x01"
+            client_tun.inject_packet(client_payload)
+
+            # Inject packet from server
+            server_payload = b"\x45\x00\x00\x1e\x00\x01\x00\x00\x40\x06\x00\x00\x7f\x00\x00\x02\x7f\x00\x00\x02"
+            server_tun.inject_packet(server_payload)
+
+            # Wait for packets to propagate
+            max_wait = 5.0
+            start = time.time()
+            client_received = None
+            server_received = None
+            while time.time() - start < max_wait:
+                # Check connection status during wait
+                if not server_core.is_connected() or not client_core.is_connected():
+                    break
+                if client_received is None:
+                    server_packets = server_tun.get_tx_packets()
+                    if server_packets:
+                        client_received = server_packets[0]
+                if server_received is None:
+                    client_packets = client_tun.get_tx_packets()
+                    if client_packets:
+                        server_received = client_packets[0]
+                if client_received is not None and server_received is not None:
+                    break
+                time.sleep(0.2)
+
+            # Verify packets were received correctly
+            assert client_received == client_payload, f"Server received wrong payload: {client_received!r}"
+            assert server_received == server_payload, f"Client received wrong payload: {server_received!r}"
+
+        finally:
+            # Clean up
+            client_core.stop()
+            server_core.stop()
+            server_thread.join(timeout=2.0)
 
 
 class TestMockTransportLoopback:

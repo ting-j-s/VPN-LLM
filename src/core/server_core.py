@@ -164,6 +164,9 @@ class ServerCore:
         """Stop the server tunnel gracefully.
 
         This method is idempotent and can be called multiple times.
+
+        Order: set stop_event -> close transport -> close TUN -> join threads
+        This ensures blocking reads in worker threads are interrupted.
         """
         if not self._running:
             logger.debug("Server core already stopped")
@@ -173,7 +176,19 @@ class ServerCore:
         self._running = False
         self._stop_event.set()
 
-        # Wait for threads
+        # Close transport first to interrupt blocking recv() calls
+        try:
+            self.transport.close()
+        except Exception as e:
+            logger.warning(f"Error closing transport: {e}")
+
+        # Close TUN to interrupt blocking read_packet() calls
+        try:
+            self.tun.close()
+        except Exception as e:
+            logger.warning(f"Error closing TUN: {e}")
+
+        # Wait for threads to finish
         threads = [
             self._transport_to_tun_thread,
             self._tun_to_transport_thread,
@@ -182,18 +197,6 @@ class ServerCore:
         for t in threads:
             if t:
                 t.join(timeout=5.0)
-
-        # Close transport
-        try:
-            self.transport.close()
-        except Exception as e:
-            logger.warning(f"Error closing transport: {e}")
-
-        # Close TUN
-        try:
-            self.tun.close()
-        except Exception as e:
-            logger.warning(f"Error closing TUN: {e}")
 
         logger.info(f"Graceful shutdown completed (transport->tun={self._transport_to_tun_bytes} bytes, "
                     f"tun->transport={self._tun_to_transport_bytes} bytes)")
@@ -223,7 +226,11 @@ class ServerCore:
                     self._last_sent_time = now
                     logger.debug("Sent HEARTBEAT")
                 except Exception as e:
-                    logger.error(f"HEARTBEAT send error: {e}")
+                    if self._stop_event.is_set():
+                        # Normal shutdown
+                        logger.debug(f"HEARTBEAT send skipped: {e}")
+                    else:
+                        logger.error(f"HEARTBEAT send error: {e}")
                     self._stop_event.set()
                     break
 
@@ -315,10 +322,16 @@ class ServerCore:
                     logger.debug(f"TUN->Transport: sent {len(packet)} bytes")
 
             except VPNError as e:
-                logger.error(f"TUN error: {e}")
+                if self._stop_event.is_set():
+                    logger.debug(f"TUN error during shutdown: {e}")
+                else:
+                    logger.error(f"TUN error: {e}")
                 break
             except Exception as e:
-                logger.error(f"Error in tun->transport loop: {e}")
+                if self._stop_event.is_set():
+                    logger.debug(f"Error in tun->transport loop during shutdown: {e}")
+                else:
+                    logger.error(f"Error in tun->transport loop: {e}")
                 break
 
         logger.info("TUN->Transport loop finished")

@@ -101,7 +101,7 @@ vpn_tunnel/
 │       ├── llm_client.py    # OpenAI 风格 API 客户端
 │       └── code_task_manager.py # 代码任务管理器
 │
-├── tests/                   # 测试套件 (109 tests)
+├── tests/                   # 测试套件 (pytest 运行查看实际数量)
 │   ├── test_frame.py
 │   ├── test_config.py
 │   ├── test_tcp_transport.py
@@ -197,6 +197,13 @@ python3 -m src.server --config config/server.yaml --transport websocket
 # 客户端
 python3 -m src.client --config config/client.yaml --transport websocket
 ```
+
+### 测试状态说明
+
+- **单向数据路径测试**：Client→Server 和 Server→Client 已验证通过
+- **双向数据路径测试**：因 timing 敏感性问题暂时跳过（test_bidirectional_data_path pytest.skip）
+- **MockTransport loopback 测试**：单进程内验证通过
+- **TCP 跨进程通信**：连接建立成功，mock-tun 环境下 recv 超时会触发 WARNING（非 ERROR）
 
 ## 5. 配置文件说明
 
