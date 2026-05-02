@@ -1,4 +1,4 @@
-# SSH Transport Client Configuration
+# TCP Transport Client Configuration
 client:
   tun_name: tun0
   tun_ip: 10.8.0.2
@@ -7,12 +7,10 @@ client:
 
 server:
   host: 127.0.0.1
-  port: 22
-  username: testuser
-  ssh_key_path: ~/.ssh/id_rsa
+  port: 2222
 
 transport:
-  type: ssh
+  type: tcp
 
 session:
   heartbeat_interval: 10

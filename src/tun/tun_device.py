@@ -4,6 +4,9 @@ Provides a unified interface for TUN device operations.
 Supports both real TUN devices (Linux) and mock devices for testing.
 """
 
+import array
+import fcntl
+import os
 import queue
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -13,6 +16,11 @@ from ..common.logger import get_logger
 
 
 logger = get_logger(__name__)
+
+# Linux TUN device ioctl definitions
+TUNSETIFF = 0x400454CA  # Set TUN device interface name
+IFF_TUN = 0x0001        # TUN device (no packet info)
+IFF_NO_PI = 0x1000      # No packet info (raw IP packet)
 
 
 class TunDevice(ABC):
@@ -95,10 +103,10 @@ class MockTunDevice(TunDevice):
         """Read an IP packet from the mock device.
 
         Returns packets that were injected via inject_packet().
-        Blocks if no packet available (queue behavior).
+        Non-blocking - returns None if queue is empty.
 
         Returns:
-            Raw IP packet bytes, or None if queue is empty (non-blocking check).
+            Raw IP packet bytes, or None if queue empty.
         """
         if not self._opened:
             raise TunDeviceError("Device not opened")
@@ -167,15 +175,17 @@ class LinuxTunDevice(TunDevice):
     Requirements:
     - Linux kernel with /dev/net/tun support
     - CAP_NET_ADMIN capability (root or setcap)
-    - Will raise TunDeviceError if permissions insufficient
+
+    Usage:
+        device = LinuxTunDevice(name="tun0", mtu=1400)
+        device.open()
+        # ... use read_packet() / write_packet() ...
+        device.close()
 
     Note:
-        This is a placeholder implementation.
-        Full implementation requires:
-        - Opening /dev/net/tun
-        - ioctl TUNSETIFF to configure interface
-        - Setting up interface IP and routes
-        - Configuring proper MTU
+        This class only handles the TUN file descriptor.
+        IP address configuration, routing, and NAT should be
+        handled separately in the forwarding module.
     """
 
     def __init__(self, name: str = "tun0", mtu: int = 1400):
@@ -193,28 +203,84 @@ class LinuxTunDevice(TunDevice):
     def open(self) -> None:
         """Open and configure the TUN device.
 
+        Opens /dev/net/tun and configures the interface name.
+
         Raises:
             TunDeviceError: If device cannot be opened or configured.
-            NotImplementedError: Placeholder - not yet implemented.
         """
-        raise NotImplementedError(
-            "LinuxTunDevice is not yet implemented. "
-            "Use MockTunDevice for testing."
-        )
+        if self._opened:
+            logger.warning(f"{self.name} already opened")
+            return
+
+        # Open /dev/net/tun
+        try:
+            fd = os.open("/dev/net/tun", os.O_RDWR)
+        except OSError as e:
+            raise TunDeviceError(f"Cannot open /dev/net/tun: {e}")
+
+        # Build ifreq structure for TUNSETIFF
+        # struct ifreq {
+        #     char ifrname[IFNAMSIZ];  // 16 bytes
+        #     short ifr_flags;          // 2 bytes
+        # }
+        # IFNAMSIZ = 16
+        ifreq = array.array("B", b"\x00" * 16)
+        # Copy device name (up to 15 bytes + null)
+        name_bytes = self.name.encode("utf-8")
+        ifreq[0:len(name_bytes)] = array.array("B", name_bytes)
+        # ifr_flags: IFF_TUN | IFF_NO_PI
+        # IFF_TUN = 0x0001, IFF_NO_PI = 0x1000
+        ifreq[16] = (IFF_TUN | IFF_NO_PI) & 0xFF
+        ifreq[17] = ((IFF_TUN | IFF_NO_PI) >> 8) & 0xFF
+
+        try:
+            fcntl.ioctl(fd, TUNSETIFF, ifreq)
+        except OSError as e:
+            os.close(fd)
+            raise TunDeviceError(f"Cannot set TUN device name to '{self.name}': {e}")
+
+        self._fd = fd
+        self._opened = True
+        logger.info(f"LinuxTunDevice '{self.name}' opened (FD={fd}, MTU={self.mtu})")
+
+    def close(self) -> None:
+        """Close the TUN device file descriptor."""
+        if not self._opened:
+            return
+
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError as e:
+                logger.warning(f"Error closing TUN fd: {e}")
+            self._fd = None
+
+        self._opened = False
+        logger.info(f"LinuxTunDevice '{self.name}' closed")
 
     def read_packet(self) -> Optional[bytes]:
         """Read an IP packet from the TUN device.
 
+        Reads raw IP packet from the TUN file descriptor.
+        Non-blocking if O_NONBLOCK was set on fd.
+
         Returns:
-            Raw IP packet bytes, or None if no data available.
+            Raw IP packet bytes, or None if no data available (EAGAIN).
 
         Raises:
-            NotImplementedError: Placeholder.
+            TunDeviceError: If read fails.
         """
-        raise NotImplementedError(
-            "LinuxTunDevice is not yet implemented. "
-            "Use MockTunDevice for testing."
-        )
+        if not self._opened or self._fd is None:
+            raise TunDeviceError("Device not opened")
+
+        try:
+            packet = os.read(self._fd, self.mtu)
+            logger.debug(f"LinuxTunDevice read {len(packet)} bytes")
+            return packet
+        except OSError as e:
+            if e.errno == 11:  # EAGAIN
+                return None
+            raise TunDeviceError(f"Read error: {e}")
 
     def write_packet(self, packet: bytes) -> None:
         """Write an IP packet to the TUN device.
@@ -223,23 +289,38 @@ class LinuxTunDevice(TunDevice):
             packet: Raw IP packet bytes.
 
         Raises:
-            NotImplementedError: Placeholder.
+            TunDeviceError: If write fails.
         """
-        raise NotImplementedError(
-            "LinuxTunDevice is not yet implemented. "
-            "Use MockTunDevice for testing."
-        )
+        if not self._opened or self._fd is None:
+            raise TunDeviceError("Device not opened")
 
-    def close(self) -> None:
-        """Close the TUN device.
+        if len(packet) > self.mtu:
+            raise TunDeviceError(f"Packet too large: {len(packet)} > MTU={self.mtu}")
+
+        try:
+            os.write(self._fd, packet)
+            logger.debug(f"LinuxTunDevice wrote {len(packet)} bytes")
+        except OSError as e:
+            raise TunDeviceError(f"Write error: {e}")
+
+    def set_nonblocking(self) -> None:
+        """Set the TUN fd to non-blocking mode.
+
+        After calling this, read_packet() will return None
+        immediately if no data available.
 
         Raises:
-            NotImplementedError: Placeholder.
+            TunDeviceError: If fcntl fails.
         """
-        raise NotImplementedError(
-            "LinuxTunDevice is not yet implemented. "
-            "Use MockTunDevice for testing."
-        )
+        if self._fd is None:
+            raise TunDeviceError("Device not opened")
+
+        try:
+            flags = fcntl.fcntl(self._fd, fcntl.F_GETFL)
+            fcntl.fcntl(self._fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            logger.debug(f"LinuxTunDevice '{self.name}' set to non-blocking")
+        except OSError as e:
+            raise TunDeviceError(f"Cannot set non-blocking: {e}")
 
 
 def create_tun_device(

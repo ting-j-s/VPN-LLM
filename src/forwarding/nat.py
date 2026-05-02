@@ -1,180 +1,200 @@
 """NAT (Network Address Translation) Module.
 
-Provides NAT functionality for forwarding tunnel traffic to external networks.
-Implements basic source NAT for outbound traffic.
+Provides utilities for enabling/disabling NAT on the VPN tunnel.
+All functions return commands to be executed manually by the user.
+
+Warning:
+    NAT and routing changes require root privileges.
+    Always review commands before executing.
 """
 
-import logging
-import socket
-import struct
+import subprocess
 from typing import Optional
 
-from ..common.errors import ForwardingError
-from ..common.logger import setup_logger
+from ..common.logger import get_logger
 
 
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
 
 
-class NATForwarder:
-    """NAT forwarder for tunnel traffic.
+def build_enable_nat_command(
+    tun_name: str,
+    outbound_if: str = "eth0",
+) -> str:
+    """Build command to enable NAT for the TUN interface.
 
-    Performs basic NAT operations:
-    - Translates source IP addresses for outbound traffic
-    - Maintains translation table for return traffic
-    - Forwards traffic to external gateway
+    Enables IP forwarding and masquerading for packets from the tunnel.
 
-    Note: This is a simplified implementation for tunnel scenarios.
-    Full NAT implementation would require connection tracking and
-    proper port management.
+    Args:
+        tun_name: TUN device name (e.g., "tun0").
+        outbound_if: Outbound network interface (e.g., "eth0", "wlan0").
+
+    Returns:
+        Shell command string to enable NAT.
     """
+    # Enable IP forwarding and configure iptables NAT
+    # Using -C to check and -A to add, ignoring errors if already exists
+    cmd = (
+        f"echo 1 > /proc/sys/net/ipv4/ip_forward && "
+        f"iptables -t nat -C POSTROUTING -s {tun_name} -o {outbound_if} -j MASQUERADE 2>/dev/null || "
+        f"iptables -t nat -A POSTROUTING -s {tun_name} -o {outbound_if} -j MASQUERADE"
+    )
+    logger.info(f"NAT enable command: {cmd}")
+    return cmd
 
-    def __init__(
-        self,
-        tunnel_ip: str = "10.0.0.2",
-        external_ip: str = "10.0.0.1",
-        gateway: str = "192.168.1.1",
-        mtu: int = 1400,
-    ):
-        """Initialize NAT forwarder.
 
-        Args:
-            tunnel_ip: IP address assigned to tunnel interface.
-            external_ip: External IP address visible to remote network.
-            gateway: Upstream gateway for forwarded traffic.
-            mtu: Maximum transmission unit.
-        """
-        self.tunnel_ip = tunnel_ip
-        self.external_ip = external_ip
-        self.gateway = gateway
-        self.mtu = mtu
+def build_disable_nat_command(
+    tun_name: str,
+    outbound_if: str = "eth0",
+) -> str:
+    """Build command to disable NAT for the TUN interface.
 
-        self._enabled = False
-        logger.info(
-            f"NAT forwarder initialized: tunnel={tunnel_ip}, "
-            f"external={external_ip}, gateway={gateway}"
+    Removes the masquerading rule from iptables.
+
+    Args:
+        tun_name: TUN device name (e.g., "tun0").
+        outbound_if: Outbound network interface.
+
+    Returns:
+        Shell command string to disable NAT.
+    """
+    cmd = f"iptables -t nat -D POSTROUTING -s {tun_name} -o {outbound_if} -j MASQUERADE"
+    logger.info(f"NAT disable command: {cmd}")
+    return cmd
+
+
+def build_iptables_forward_rule(
+    tun_name: str,
+    action: str = "ACCEPT",
+) -> str:
+    """Build command to add iptables FORWARD rule.
+
+    Args:
+        tun_name: TUN device name.
+        action: FORWARD action (ACCEPT, DROP, etc.).
+
+    Returns:
+        Shell command string for iptables rule.
+    """
+    cmd = f"iptables -A FORWARD -i {tun_name} -j {action}"
+    logger.info(f"iptables FORWARD rule: {cmd}")
+    return cmd
+
+
+def build_flush_forward_rules(tun_name: str) -> str:
+    """Build command to flush all FORWARD rules for the TUN device.
+
+    Args:
+        tun_name: TUN device name.
+
+    Returns:
+        Shell command string to flush rules.
+    """
+    cmd = f"iptables -F FORWARD -i {tun_name}"
+    logger.info(f"Flush FORWARD rules: {cmd}")
+    return cmd
+
+
+def execute_command(cmd: str) -> tuple[int, str, str]:
+    """Execute a shell command.
+
+    Args:
+        cmd: Command string to execute.
+
+    Returns:
+        Tuple of (return_code, stdout, stderr).
+    """
+    logger.info(f"Executing: {cmd}")
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def enable_nat(
+    tun_name: str,
+    outbound_if: str = "eth0",
+    execute: bool = False,
+) -> Optional[str]:
+    """Enable NAT for the TUN interface.
+
+    Args:
+        tun_name: TUN device name.
+        outbound_if: Outbound network interface.
+        execute: If False (default), only returns command. If True, executes it.
+
+    Returns:
+        Command string if execute=False, None if execute=True.
+
+    Warning:
+        Only set execute=True if you understand the system implications.
+        NAT changes affect the entire system.
+    """
+    cmd = build_enable_nat_command(tun_name, outbound_if)
+
+    if not execute:
+        logger.warning(
+            f"NAT NOT enabled. To enable manually, run:\n  {cmd}\n"
+            "Review the command carefully before executing with sudo.\n"
+            "This will enable IP forwarding and NAT for all tunnel traffic."
         )
+        return cmd
 
-    def enable(self) -> None:
-        """Enable NAT forwarding."""
-        self._enabled = True
-        logger.info("NAT forwarding enabled")
+    logger.warning(f"Executing NAT enable command: {cmd}")
+    returncode, stdout, stderr = execute_command(cmd)
+    if returncode == 0:
+        logger.info(f"NAT enabled for {tun_name} -> {outbound_if}")
+    else:
+        logger.error(f"Failed to enable NAT: {stderr}")
+    return None
 
-    def disable(self) -> None:
-        """Disable NAT forwarding."""
-        self._enabled = False
-        logger.info("NAT forwarding disabled")
 
-    def forward_packet(self, packet: bytes) -> Optional[bytes]:
-        """Forward a packet with NAT translation.
+def disable_nat(
+    tun_name: str,
+    outbound_if: str = "eth0",
+    execute: bool = False,
+) -> Optional[str]:
+    """Disable NAT for the TUN interface.
 
-        Args:
-            packet: Raw IP packet bytes.
+    Args:
+        tun_name: TUN device name.
+        outbound_if: Outbound network interface.
+        execute: If False (default), only returns command. If True, executes it.
 
-        Returns:
-            NAT-translated packet bytes, or None if dropped.
-        """
-        if not self._enabled:
-            return packet
+    Returns:
+        Command string if execute=False, None if execute=True.
+    """
+    cmd = build_disable_nat_command(tun_name, outbound_if)
 
-        if len(packet) < 20:
-            logger.warning("Packet too short for IP header")
-            return None
-
-        # Parse IP header
-        version = (packet[0] >> 4) & 0xF
-        if version != 4:
-            logger.warning(f"Only IPv4 supported, got version {version}")
-            return packet
-
-        ihl = (packet[0] & 0xF) * 4
-        total_length = struct.unpack(">H", packet[2:4])[0]
-        protocol = packet[9]
-        src_ip = packet[12:16]
-        dst_ip = packet[16:20]
-
-        # For now, just log and pass through
-        # A full implementation would:
-        # 1. Translate source IP from tunnel_ip to external_ip
-        # 2. Create mapping entry in connection table
-        # 3. Update IP checksum
-        # 4. Forward to gateway
-
-        logger.debug(
-            f"NAT: forwarding packet {socket.inet_ntoa(src_ip)} -> "
-            f"{socket.inet_ntoa(dst_ip)} (proto={protocol})"
+    if not execute:
+        logger.warning(
+            f"NAT NOT disabled. To disable manually, run:\n  {cmd}\n"
+            "Review the command carefully before executing with sudo."
         )
+        return cmd
 
-        return packet
+    logger.warning(f"Executing NAT disable command: {cmd}")
+    returncode, stdout, stderr = execute_command(cmd)
+    if returncode == 0:
+        logger.info(f"NAT disabled for {tun_name}")
+    else:
+        logger.error(f"Failed to disable NAT: {stderr}")
+    return None
 
-    def translate_packet(self, packet: bytes) -> bytes:
-        """Translate source IP in outbound packet.
 
-        Args:
-            packet: Raw IP packet.
+def show_nat_status(tun_name: str = "tun0") -> None:
+    """Show current NAT rules for the TUN device.
 
-        Returns:
-            Packet with translated source IP.
-        """
-        if len(packet) < 20:
-            raise ForwardingError("Packet too short for IP header")
-
-        version = (packet[0] >> 4) & 0xF
-        if version != 4:
-            return packet
-
-        # Parse header
-        ihl = (packet[0] & 0xF) * 4
-        header = bytearray(packet[:ihl])
-        payload = packet[ihl:]
-
-        # Convert IPs to integers
-        tunnel_ip_bytes = socket.inet_aton(self.tunnel_ip)
-        tunnel_ip_int = struct.unpack(">I", tunnel_ip_bytes)[0]
-        external_ip_bytes = socket.inet_aton(self.external_ip)
-        external_ip_int = struct.unpack(">I", external_ip_bytes)[0]
-
-        src_ip_int = struct.unpack(">I", bytes(header[12:16]))[0]
-
-        # Only translate if source matches tunnel_ip
-        if src_ip_int == tunnel_ip_int:
-            # Replace source IP
-            header[12:16] = external_ip_bytes
-
-            # Recalculate IP checksum
-            # IP checksum is at bytes 10-11 of header
-            header[10:12] = b"\x00\x00"
-            checksum = self._ip_checksum(bytes(header))
-            header[10:12] = struct.pack(">H", checksum)
-
-            logger.debug(f"NAT: translated {self.tunnel_ip} -> {self.external_ip}")
-
-        return bytes(header) + payload
-
-    def _ip_checksum(self, header: bytes) -> int:
-        """Calculate IP header checksum.
-
-        Args:
-            header: IP header bytes.
-
-        Returns:
-            Checksum value.
-        """
-        if len(header) % 2 != 0:
-            header += b"\x00"
-
-        checksum = 0
-        for i in range(0, len(header), 2):
-            word = (header[i] << 8) + header[i + 1]
-            checksum += word
-
-        while checksum >> 16:
-            checksum = (checksum & 0xFFFF) + (checksum >> 16)
-
-        return ~checksum & 0xFFFF
-
-    def __repr__(self) -> str:
-        return (
-            f"NATForwarder(tunnel={self.tunnel_ip}, "
-            f"external={self.external_ip}, gateway={self.gateway})"
-        )
+    Args:
+        tun_name: TUN device name to filter rules.
+    """
+    cmd = f"iptables -t nat -L POSTROUTING -v -n | grep {tun_name}"
+    logger.info(f"Checking NAT rules for {tun_name}")
+    returncode, stdout, stderr = execute_command(cmd)
+    if stdout:
+        logger.info(f"NAT rules:\n{stdout}")
+    else:
+        logger.info(f"No NAT rules found for {tun_name}")

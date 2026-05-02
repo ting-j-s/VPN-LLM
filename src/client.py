@@ -8,18 +8,15 @@ import signal
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-
-from common.config import load_config
-from common.logger import setup_logger
+from common.config import load_client_config
+from common.logger import get_logger
 from common.errors import VPNError
 from tun.tun_device import create_tun_device
-from transport.ssh_transport import SSHTransport
+from transport.factory import create_transport
 from core.client_core import ClientCore
 
 
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
 
 # Global client instance for signal handling
 _client: ClientCore | None = None
@@ -44,7 +41,7 @@ def main():
     parser.add_argument(
         "--mock-tun",
         action="store_true",
-        help="Use mock TUN device instead of real TUN",
+        help="Use MockTunDevice instead of LinuxTunDevice",
     )
     args = parser.parse_args()
 
@@ -52,46 +49,54 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    logger.info("=" * 50)
     logger.info("VPN Tunnel Client starting")
+    logger.info("=" * 50)
 
     try:
         # Load configuration
-        config = load_config(args.config)
-        logger.info(f"Configuration loaded from {args.config}")
+        config = load_client_config(args.config)
+        logger.info(f"Configuration loaded: {args.config}")
         logger.info(f"Transport type: {config.transport.type}")
 
         # Create TUN device
-        tun = create_tun_device(
-            name=config.tun.name,
-            mtu=config.tun.mtu,
-            use_mock=args.mock_tun,
-        )
-
-        # Create transport
-        if config.transport.type == "ssh":
-            transport = SSHTransport(
-                host=config.transport.host,
-                port=config.transport.port,
-                username=config.transport.username,
-                key_file=config.transport.key_file,
-                remote_host=config.server.host,
-                remote_port=config.server.port,
+        if args.mock_tun:
+            tun = create_tun_device(
+                name=config.client.tun_name,
+                mtu=config.client.mtu,
+                use_mock=True,
             )
+            logger.info(f"Using MockTunDevice (name={config.client.tun_name}, mtu={config.client.mtu})")
         else:
-            raise VPNError(f"Unsupported transport type: {config.transport.type}")
+            tun = create_tun_device(
+                name=config.client.tun_name,
+                mtu=config.client.mtu,
+                use_mock=False,
+            )
+            logger.info(f"Using LinuxTunDevice (name={config.client.tun_name}, mtu={config.client.mtu})")
 
-        # Create and start client core
+        # Create transport using factory
+        transport = create_transport(config)
+        logger.info(f"Transport created: {transport}")
+
+        # Create client core
         global _client
         _client = ClientCore(
             tun=tun,
             transport=transport,
-            session_id=1,
+            heartbeat_interval=config.session.heartbeat_interval,
+            heartbeat_timeout=config.session.heartbeat_timeout,
         )
+        logger.info("ClientCore created")
 
-        logger.info("Client core initialized, starting tunnel...")
+        # Start client
+        logger.info("Starting tunnel...")
         _client.start()
 
+        logger.info("=" * 50)
         logger.info("Tunnel established, running...")
+        logger.info("Press Ctrl+C to stop")
+        logger.info("=" * 50)
 
         # Keep main thread alive
         while _client.is_connected():
@@ -100,6 +105,8 @@ def main():
     except VPNError as e:
         logger.error(f"Tunnel error: {e}")
         sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt")
     except Exception as e:
         logger.exception(f"Unexpected error: {e}")
         sys.exit(1)

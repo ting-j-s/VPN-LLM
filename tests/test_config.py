@@ -80,17 +80,6 @@ server:
         assert config.server.port == 22
         assert config.transport.type == "ssh"
 
-    def test_load_missing_server_host(self, tmp_path):
-        """Test error when server.host is missing."""
-        config_file = tmp_path / "client.yaml"
-        config_file.write_text("""
-server:
-  username: testuser
-  ssh_key_path: /path/to/key
-""")
-        with pytest.raises(ConfigError, match="server.host is required"):
-            load_client_config(str(config_file))
-
     def test_load_missing_username(self, tmp_path):
         """Test error when server.username is missing."""
         config_file = tmp_path / "client.yaml"
@@ -128,7 +117,7 @@ server:
   ssh_key_path: /path/to/key
 
 transport:
-  type: tcp
+  type: http
 """)
         with pytest.raises(ConfigError, match="Invalid transport.type"):
             load_client_config(str(config_file))
@@ -194,7 +183,7 @@ forwarding:
         config_file = tmp_path / "server.yaml"
         config_file.write_text("""
 transport:
-  type: tls
+  type: http
 """)
         with pytest.raises(ConfigError, match="Invalid transport.type"):
             load_server_config(str(config_file))

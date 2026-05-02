@@ -17,7 +17,7 @@ class ConfigError(VPNError):
 
 
 # Allowed transport types
-ALLOWED_TRANSPORT_TYPES = {"ssh"}
+ALLOWED_TRANSPORT_TYPES = {"ssh", "tcp", "tls", "websocket"}
 
 
 @dataclass
@@ -37,6 +37,7 @@ class ServerTUNConfig:
     tun_peer: str = "10.8.0.2"
     mtu: int = 1400
     listen_mode: str = "ssh"
+    listen_port: int = 2222
 
 
 @dataclass
@@ -57,12 +58,12 @@ class TransportConfig:
 @dataclass
 class SessionConfig:
     """Session management configuration."""
-    # Client session fields
+    # Heartbeat settings (used by both client and server)
     heartbeat_interval: int = 10
+    heartbeat_timeout: int = 30
+    # Client-only settings
     reconnect: bool = True
     reconnect_interval: int = 3
-    # Server session fields
-    heartbeat_timeout: int = 30
 
 
 @dataclass
@@ -162,23 +163,23 @@ def load_client_config(path: str) -> ClientConfig:
 
     # Build ServerEndpointConfig
     server_data = data.get("server", {})
-    if not server_data.get("host"):
-        raise ConfigError("server.host is required")
-    if not server_data.get("username"):
-        raise ConfigError("server.username is required")
-    if not server_data.get("ssh_key_path"):
-        raise ConfigError("server.ssh_key_path is required")
-
     endpoint = ServerEndpointConfig(
-        host=server_data["host"],
+        host=server_data.get("host", "127.0.0.1"),
         port=server_data.get("port", 22),
-        username=server_data["username"],
-        ssh_key_path=str(Path(server_data["ssh_key_path"]).expanduser()),
+        username=server_data.get("username", ""),
+        ssh_key_path=str(Path(server_data["ssh_key_path"]).expanduser()) if server_data.get("ssh_key_path") else "",
     )
 
     # Build TransportConfig
     transport_data = data.get("transport", {})
     transport = TransportConfig(type=transport_data.get("type", "ssh"))
+
+    # SSH-specific validation (only when using SSH transport)
+    if transport.type == "ssh":
+        if not server_data.get("username"):
+            raise ConfigError("server.username is required for SSH transport")
+        if not server_data.get("ssh_key_path"):
+            raise ConfigError("server.ssh_key_path is required for SSH transport")
 
     # Build SessionConfig
     session_data = data.get("session", {})
@@ -214,6 +215,7 @@ def load_server_config(path: str) -> ServerConfig:
         tun_peer=server_data.get("tun_peer", "10.8.0.2"),
         mtu=server_data.get("mtu", 1400),
         listen_mode=server_data.get("listen_mode", "ssh"),
+        listen_port=server_data.get("listen_port", 2222),
     )
 
     # Build ForwardingConfig

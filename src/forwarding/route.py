@@ -1,112 +1,188 @@
 """Routing Module.
 
-Provides routing table and forwarding logic for tunnel traffic.
+Provides utilities for managing routing table entries for the VPN tunnel.
+All functions return commands to be executed manually by the user.
 """
 
-import logging
-import socket
-import struct
+import subprocess
 from typing import Optional
 
-from ..common.logger import setup_logger
+from ..common.logger import get_logger
 
 
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
 
 
-class RoutingTable:
-    """Simple routing table for tunnel traffic.
+def build_add_route_command(
+    destination_cidr: str,
+    tun_name: str,
+    gateway: Optional[str] = None,
+) -> str:
+    """Build command to add a route through the TUN device.
 
-    Provides basic destination-based forwarding decisions.
+    Args:
+        destination_cidr: Destination network in CIDR notation (e.g., "10.0.0.0/24").
+        tun_name: TUN device name (e.g., "tun0").
+        gateway: Optional next hop gateway. If None, uses the TUN interface directly.
+
+    Returns:
+        Shell command string to add the route.
     """
+    if gateway:
+        cmd = f"ip route add {destination_cidr} via {gateway} dev {tun_name}"
+    else:
+        cmd = f"ip route add {destination_cidr} dev {tun_name}"
 
-    def __init__(self, tunnel_subnet: str = "10.0.0.0/24"):
-        """Initialize routing table.
+    logger.info(f"Route add command: {cmd}")
+    return cmd
 
-        Args:
-            tunnel_subnet: Subnet managed by the tunnel (CIDR notation).
-        """
-        self.tunnel_subnet = tunnel_subnet
-        self._routes: dict[str, str] = {}  # destination -> next_hop
 
-        # Default route through tunnel
-        self._routes["0.0.0.0/0"] = "tunnel"
+def build_delete_route_command(
+    destination_cidr: str,
+    tun_name: str,
+    gateway: Optional[str] = None,
+) -> str:
+    """Build command to delete a route through the TUN device.
 
-        logger.info(f"Routing table initialized for {tunnel_subnet}")
+    Args:
+        destination_cidr: Destination network in CIDR notation (e.g., "10.0.0.0/24").
+        tun_name: TUN device name (e.g., "tun0").
+        gateway: Optional next hop gateway.
 
-    def add_route(self, destination: str, next_hop: str) -> None:
-        """Add a route to the routing table.
+    Returns:
+        Shell command string to delete the route.
+    """
+    if gateway:
+        cmd = f"ip route delete {destination_cidr} via {gateway} dev {tun_name}"
+    else:
+        cmd = f"ip route delete {destination_cidr} dev {tun_name}"
 
-        Args:
-            destination: Destination network (CIDR notation).
-            next_hop: Next hop address ('tunnel' for local, or IP).
-        """
-        self._routes[destination] = next_hop
-        logger.info(f"Added route: {destination} -> {next_hop}")
+    logger.info(f"Route delete command: {cmd}")
+    return cmd
 
-    def remove_route(self, destination: str) -> None:
-        """Remove a route from the table.
 
-        Args:
-            destination: Destination network to remove.
-        """
-        if destination in self._routes:
-            del self._routes[destination]
-            logger.info(f"Removed route: {destination}")
+def build_default_route_command(
+    tun_name: str,
+    gateway: str,
+) -> str:
+    """Build command to set default route through the TUN device.
 
-    def lookup(self, destination_ip: str) -> Optional[str]:
-        """Look up route for a destination IP.
+    Args:
+        tun_name: TUN device name.
+        gateway: Gateway IP address.
 
-        Args:
-            destination_ip: Destination IP address.
+    Returns:
+        Shell command string to set default route.
+    """
+    cmd = f"ip route add default via {gateway} dev {tun_name}"
+    logger.info(f"Default route command: {cmd}")
+    return cmd
 
-        Returns:
-            Next hop address, or 'tunnel' if should be forwarded
-            through tunnel, or None if no route found.
-        """
-        # Simple longest prefix match
-        dest_bytes = socket.inet_aton(destination_ip)
 
-        best_match = None
-        best_prefix_len = -1
+def build_show_route_command(destination: Optional[str] = None) -> str:
+    """Build command to show routing table or specific route.
 
-        for cidr, next_hop in self._routes.items():
-            if cidr == "0.0.0.0/0":
-                # Default route
-                if best_prefix_len < 0:
-                    best_match = next_hop
-                    best_prefix_len = 0
-                continue
+    Args:
+        destination: Optional destination to look up.
 
-            # Parse CIDR
-            network, prefix_len = cidr.split("/")
-            prefix_len = int(prefix_len)
-            network_bytes = socket.inet_aton(network)
+    Returns:
+        Shell command string to show routes.
+    """
+    if destination:
+        cmd = f"ip route show {destination}"
+    else:
+        cmd = "ip route show"
+    return cmd
 
-            # Check if destination matches
-            dest_int = struct.unpack(">I", dest_bytes)[0]
-            network_int = struct.unpack(">I", network_bytes)[0]
-            mask = (0xFFFFFFFF << (32 - prefix_len)) & 0xFFFFFFFF
 
-            if (dest_int & mask) == (network_int & mask):
-                if prefix_len > best_prefix_len:
-                    best_match = next_hop
-                    best_prefix_len = prefix_len
+def execute_command(cmd: str) -> tuple[int, str, str]:
+    """Execute a shell command.
 
-        logger.debug(f"Route lookup for {destination_ip}: {best_match}")
-        return best_match
+    Args:
+        cmd: Command string to execute.
 
-    def should_forward_to_tunnel(self, destination_ip: str) -> bool:
-        """Check if packet should be forwarded through the tunnel.
+    Returns:
+        Tuple of (return_code, stdout, stderr).
+    """
+    logger.info(f"Executing: {cmd}")
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode, result.stdout, result.stderr
 
-        Args:
-            destination_ip: Destination IP address.
 
-        Returns:
-            True if packet should go through tunnel.
-        """
-        next_hop = self.lookup(destination_ip)
-        return next_hop == "tunnel"
+def add_route(
+    destination_cidr: str,
+    tun_name: str,
+    gateway: Optional[str] = None,
+    execute: bool = False,
+) -> Optional[str]:
+    """Add route through TUN device.
 
-    def __repr__(self) -> str:
-        return f"RoutingTable(subnet={self.tunnel_subnet}, routes={len(self._routes)})"
+    Args:
+        destination_cidr: Destination network in CIDR notation.
+        tun_name: TUN device name.
+        gateway: Optional next hop gateway.
+        execute: If False (default), only returns command. If True, executes it.
+
+    Returns:
+        Command string if execute=False, None if execute=True.
+
+    Warning:
+        Only set execute=True if you understand the system implications.
+        Always verify routes before applying.
+    """
+    cmd = build_add_route_command(destination_cidr, tun_name, gateway)
+
+    if not execute:
+        logger.warning(
+            f"Route NOT applied. To apply manually, run:\n  {cmd}\n"
+            "Review the command carefully before executing with sudo."
+        )
+        return cmd
+
+    logger.warning(f"Executing route add command: {cmd}")
+    returncode, stdout, stderr = execute_command(cmd)
+    if returncode == 0:
+        logger.info(f"Route added successfully: {destination_cidr} via {gateway or 'direct'}")
+    else:
+        logger.error(f"Failed to add route: {stderr}")
+    return None
+
+
+def delete_route(
+    destination_cidr: str,
+    tun_name: str,
+    gateway: Optional[str] = None,
+    execute: bool = False,
+) -> Optional[str]:
+    """Delete route through TUN device.
+
+    Args:
+        destination_cidr: Destination network in CIDR notation.
+        tun_name: TUN device name.
+        gateway: Optional next hop gateway.
+        execute: If False (default), only returns command. If True, executes it.
+
+    Returns:
+        Command string if execute=False, None if execute=True.
+    """
+    cmd = build_delete_route_command(destination_cidr, tun_name, gateway)
+
+    if not execute:
+        logger.warning(
+            f"Route NOT deleted. To delete manually, run:\n  {cmd}\n"
+            "Review the command carefully before executing with sudo."
+        )
+        return cmd
+
+    logger.warning(f"Executing route delete command: {cmd}")
+    returncode, stdout, stderr = execute_command(cmd)
+    if returncode == 0:
+        logger.info(f"Route deleted successfully: {destination_cidr}")
+    else:
+        logger.error(f"Failed to delete route: {stderr}")
+    return None
