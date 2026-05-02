@@ -134,10 +134,22 @@ Phase 5: LLM 协议框架
 3. 无 root 错误或其他 TUN 相关错误
 4. Graceful shutdown 仍然工作
 
-**需要修复**:
-- LinuxTunDevice 可能需要调整
-- 需要提供 TUN 设备创建/清理脚本
-- 可能需要考虑权限问题（CAP_NET_ADMIN）
+**当前环境限制**:
+- 当前用户 `xjr` 不是 root
+- 没有 CAP_NET_ADMIN 权限
+- 需要 sudo 或 root 才能创建 /dev/net/tun
+
+**测试方法**（需要 root 权限）:
+```bash
+# 在有 root 权限的环境执行：
+sudo python -m src.server --config config/server.yaml --transport tcp
+```
+
+**需要完成**:
+1. LinuxTunDevice 可能需要调整（non-blocking 模式）
+2. 需要 TUN 设备创建/清理脚本
+3. 需要处理 `ip addr` 和 `ip route` 命令
+4. 需要考虑权限降级方案
 
 ---
 
