@@ -8,12 +8,12 @@ import signal
 import sys
 from pathlib import Path
 
-from common.config import load_client_config
-from common.logger import get_logger
-from common.errors import VPNError
-from tun.tun_device import create_tun_device
-from transport.factory import create_transport
-from core.client_core import ClientCore
+from .common.config import load_client_config
+from .common.logger import get_logger
+from .common.errors import VPNError
+from .tun.tun_device import create_tun_device
+from .transport.factory import create_transport
+from .core.client_core import ClientCore
 
 
 logger = get_logger(__name__)
@@ -43,6 +43,12 @@ def main():
         action="store_true",
         help="Use MockTunDevice instead of LinuxTunDevice",
     )
+    parser.add_argument(
+        "--transport",
+        type=str,
+        choices=["ssh", "tcp", "tls", "websocket", "mock"],
+        help="Override transport type from config",
+    )
     args = parser.parse_args()
 
     # Setup signal handlers
@@ -58,6 +64,11 @@ def main():
         config = load_client_config(args.config)
         logger.info(f"Configuration loaded: {args.config}")
         logger.info(f"Transport type: {config.transport.type}")
+
+        # Override transport type if --transport specified
+        if args.transport:
+            config.transport.type = args.transport
+            logger.info(f"Transport type overridden to: {args.transport}")
 
         # Create TUN device
         if args.mock_tun:

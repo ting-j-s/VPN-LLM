@@ -17,7 +17,7 @@ class ConfigError(VPNError):
 
 
 # Allowed transport types
-ALLOWED_TRANSPORT_TYPES = {"ssh", "tcp", "tls", "websocket"}
+ALLOWED_TRANSPORT_TYPES = {"ssh", "tcp", "tls", "websocket", "mock"}
 
 
 @dataclass
