@@ -135,7 +135,7 @@ class TestCodeTaskManager:
         task = manager.create_task("  Add TLS transport  ")
 
         assert task.goal == "Implement: Add TLS transport"
-        assert task.goal != "Implement:   Add TLS transport"
+        assert "  Add TLS transport  " not in task.goal
 
     def test_title_truncation(self):
         """Test that long titles are truncated."""

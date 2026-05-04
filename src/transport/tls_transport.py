@@ -10,7 +10,7 @@ import struct
 import ssl
 from typing import Optional
 
-from ..common.errors import TransportError
+from ..common.errors import TransportError, TransportTimeout
 from ..common.logger import get_logger
 from .base import Transport
 
@@ -335,8 +335,25 @@ class TLSTransport(Transport):
             return data
 
         except socket.timeout:
+            raise TransportTimeout("Receive timeout")
+        except TimeoutError:
+            raise TransportTimeout("Receive timeout")
+        except ConnectionResetError:
+            self._connected = False
+            logger.debug("TLS connection reset by peer")
+            return None
+        except BrokenPipeError:
+            self._connected = False
+            logger.debug("TLS connection broken")
             return None
         except (ssl.SSLError, socket.error) as e:
+            self._connected = False
+            raise TransportError(f"Receive failed: {e}")
+        except OSError as e:
+            if e.errno == 104:  # ECONNRESET
+                self._connected = False
+                logger.debug("TLS connection reset (ECONNRESET)")
+                return None
             self._connected = False
             raise TransportError(f"Receive failed: {e}")
         finally:
@@ -359,6 +376,8 @@ class TLSTransport(Transport):
         while remaining > 0:
             try:
                 chunk = self._client_socket.recv(remaining)
+            except (socket.timeout, TimeoutError):
+                raise TransportTimeout("Receive timeout during partial read")
             except ssl.SSLError as e:
                 if e.errno == ssl.SSL_ERROR_WANT_READ:
                     continue

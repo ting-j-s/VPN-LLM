@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 
-from src.common.frame import FrameType, create_frame, encode_frame, decode_frame
+from src.common.frame import Frame, FrameType, create_frame, encode_frame, decode_frame
 from src.core.client_core import ClientCore
 from src.core.server_core import ServerCore
 from src.transport.tcp_transport import TCPTransport
@@ -387,3 +387,149 @@ class TestMockTransportLoopback:
             stop_wiring.set()
             client_core.stop()
             server_core.stop()
+
+
+class TestCoreSessionIdValidation:
+    """Test session_id validation in ClientCore and ServerCore."""
+
+    def test_client_core_drops_wrong_session_id_data(self):
+        """ClientCore should not write DATA with wrong session_id to TUN."""
+        session_id = uuid.uuid4().bytes
+        wrong_session_id = uuid.uuid4().bytes
+
+        client_tun = MockTunDevice(name="client-tun", mtu=1400)
+        client_transport = MockTransport()
+
+        client_core = ClientCore(
+            tun=client_tun,
+            transport=client_transport,
+            session_id=session_id,
+        )
+
+        # Create a DATA frame with wrong session_id
+        wrong_frame = create_frame(FrameType.DATA, wrong_session_id, b"evil data")
+        client_transport.inject(encode_frame(wrong_frame))
+
+        client_transport.connect()
+        client_core.start()
+
+        time.sleep(0.3)
+
+        # Ensure no data was written to TUN
+        packets = client_tun.get_tx_packets()
+        assert len(packets) == 0, f"Expected no packets with wrong session_id, got {len(packets)}"
+
+        client_core.stop()
+
+    def test_server_core_drops_wrong_session_id_data(self):
+        """ServerCore should not write DATA with wrong session_id to TUN."""
+        session_id = uuid.uuid4().bytes
+        wrong_session_id = uuid.uuid4().bytes
+
+        server_tun = MockTunDevice(name="server-tun", mtu=1400)
+        server_transport = MockTransport()
+
+        server_core = ServerCore(
+            tun=server_tun,
+            transport=server_transport,
+            session_id=session_id,
+        )
+
+        # Create a DATA frame with wrong session_id
+        wrong_frame = create_frame(FrameType.DATA, wrong_session_id, b"evil data")
+        server_transport.inject(encode_frame(wrong_frame))
+
+        server_transport.connect()
+        server_core.start()
+
+        time.sleep(0.3)
+
+        # Ensure no data was written to TUN
+        packets = server_tun.get_tx_packets()
+        assert len(packets) == 0, f"Expected no packets with wrong session_id, got {len(packets)}"
+
+        server_core.stop()
+
+    def test_client_core_wrong_session_id_close_does_not_stop(self):
+        """CLOSE frame with wrong session_id should not trigger stop_event."""
+        session_id = uuid.uuid4().bytes
+        wrong_session_id = uuid.uuid4().bytes
+
+        client_tun = MockTunDevice(name="client-tun", mtu=1400)
+        client_transport = MockTransport()
+
+        client_core = ClientCore(
+            tun=client_tun,
+            transport=client_transport,
+            session_id=session_id,
+        )
+
+        # Create a CLOSE frame with wrong session_id
+        wrong_close = create_frame(FrameType.CLOSE, wrong_session_id)
+        client_transport.inject(encode_frame(wrong_close))
+
+        client_transport.connect()
+        client_core.start()
+
+        time.sleep(0.3)
+
+        # Client should still be running (stop_event not triggered)
+        assert client_core.is_connected(), "Client should still be connected after wrong session_id CLOSE"
+
+        client_core.stop()
+
+    def test_server_core_wrong_session_id_close_does_not_stop(self):
+        """CLOSE frame with wrong session_id should not trigger stop_event."""
+        session_id = uuid.uuid4().bytes
+        wrong_session_id = uuid.uuid4().bytes
+
+        server_tun = MockTunDevice(name="server-tun", mtu=1400)
+        server_transport = MockTransport()
+
+        server_core = ServerCore(
+            tun=server_tun,
+            transport=server_transport,
+            session_id=session_id,
+        )
+
+        # Create a CLOSE frame with wrong session_id
+        wrong_close = create_frame(FrameType.CLOSE, wrong_session_id)
+        server_transport.inject(encode_frame(wrong_close))
+
+        server_transport.connect()
+        server_core.start()
+
+        time.sleep(0.3)
+
+        # Server should still be running (stop_event not triggered)
+        assert server_core.is_connected(), "Server should still be connected after wrong session_id CLOSE"
+
+        server_core.stop()
+
+    def test_client_core_wrong_session_id_heartbeat_ignored(self):
+        """HEARTBEAT with wrong session_id should be silently ignored."""
+        session_id = uuid.uuid4().bytes
+        wrong_session_id = uuid.uuid4().bytes
+
+        client_tun = MockTunDevice(name="client-tun", mtu=1400)
+        client_transport = MockTransport()
+
+        client_core = ClientCore(
+            tun=client_tun,
+            transport=client_transport,
+            session_id=session_id,
+        )
+
+        # Inject a HEARTBEAT frame with wrong session_id
+        wrong_hb = create_frame(FrameType.HEARTBEAT, wrong_session_id)
+        client_transport.inject(encode_frame(wrong_hb))
+
+        client_transport.connect()
+        client_core.start()
+
+        time.sleep(0.3)
+
+        # Should still be connected (HEARTBEAT with wrong session should be ignored)
+        assert client_core.is_connected()
+
+        client_core.stop()

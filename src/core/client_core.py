@@ -287,6 +287,10 @@ class ClientCore:
         Args:
             frame: Decoded frame.
         """
+        if frame.session_id != self.session_id:
+            logger.warning("Dropping frame with unexpected session_id")
+            return
+
         if frame.frame_type == FrameType.DATA:
             if frame.payload:
                 try:
