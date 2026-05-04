@@ -72,5 +72,13 @@ venv.bak/
 # mypy
 .mypy_cache/
 
-# Test artifacts
-*.log
+# API Keys and Credentials
+*.key
+*.pem
+*.crt
+.env
+.env.*
+secrets.yaml
+credentials.yaml
+api_key*
+*_key*
