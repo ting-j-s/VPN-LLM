@@ -81,7 +81,7 @@ vpn_tunnel/
 │   │   ├── ssh_transport.py # SSH 传输
 │   │   ├── tcp_transport.py # TCP 传输
 │   │   ├── tls_transport.py # TLS 传输
-│   │   └── websocket_transport.py # WebSocket 传输 (experimental)
+│   │   └── websocket_transport.py # WebSocket 传输
 │   │
 │   ├── tun/                 # TUN 设备抽象
 │   │   └── tun_device.py    # MockTunDevice / LinuxTunDevice
@@ -185,10 +185,15 @@ python3 -m src.server --config config/server.yaml --transport tls
 python3 -m src.client --config config/client.yaml --transport tls
 ```
 
-### WebSocket 模式（experimental）
+### WebSocket 模式
 
-> **⚠️ WebSocket transport is experimental and needs further integration testing.**
-> 当前实现在多线程和已有 event loop 环境里可能不稳定。
+WebSocketTransport 已通过本地 localhost client/server 基础通信测试：
+
+- ✅ 每个实例在 dedicated background asyncio event loop 中运行，不依赖调用方线程的事件循环
+- ✅ 对外提供同步 `connect` / `send` / `recv` 接口，与 Transport 抽象一致
+- ✅ `recv()` 超时时抛出 `TransportTimeout`，行为与 TCP/TLS transport 保持一致
+- ✅ 支持 client 和 server 两种模式
+- ⏳ 建议在真实网络和长时间运行场景下继续测试
 
 ```bash
 # 服务端
@@ -340,7 +345,7 @@ class Transport(ABC):
 | SSH | 基于 Paramiko | 加密传输，需 SSH 服务器，默认严格主机密钥验证 |
 | TCP | 原始 TCP | 简单直接，无加密 |
 | TLS | TLS 加密 TCP | 证书认证，默认启用服务器证书验证 |
-| WebSocket | WebSocket 协议 | 可穿透防火墙，HTTP 兼容，**experimental** |
+| WebSocket | WebSocket 协议 | 可穿透防火墙，HTTP 兼容，已通过本地基础通信测试 |
 | Mock | 内存模拟 | 无网络依赖，**仅用于单元测试，不能跨进程通信** |
 
 ### 工厂模式
