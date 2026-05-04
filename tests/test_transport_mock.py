@@ -1,66 +1,21 @@
-"""Tests for Transport module with mocks."""
+"""Tests for Transport module."""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
-from src.common.frame import Frame, FRAME_TYPE_DATA, FRAME_TYPE_HELLO, FRAME_TYPE_HELLO_ACK, FRAME_TYPE_KEEPALIVE
-from src.transport.base import BaseTransport
+import uuid
+from src.common.frame import Frame, FrameType, create_frame, encode_frame, decode_frame
+from src.transport.base import Transport, MockTransport
 from src.common.errors import TransportError
 
 
-class MockTransport(BaseTransport):
-    """Mock transport implementation for testing."""
-
-    def __init__(self):
-        self._connected = False
-        self._sent_frames: list[Frame] = []
-        self._recv_queue: list[Frame] = []
-        self.connect_called = False
-        self.disconnect_called = False
-
-    def connect(self) -> None:
-        self.connect_called = True
-        self._connected = True
-
-    def disconnect(self) -> None:
-        self.disconnect_called = True
-        self._connected = False
-
-    def send_frame(self, frame: Frame) -> None:
-        if not self._connected:
-            raise TransportError("Not connected")
-        self._sent_frames.append(frame)
-
-    def recv_frame(self, timeout=None):
-        if not self._connected:
-            raise TransportError("Not connected")
-        if self._recv_queue:
-            return self._recv_queue.pop(0)
-        return None
-
-    def is_connected(self) -> bool:
-        return self._connected
-
-    # Test helper methods
-    def queue_frame(self, frame: Frame) -> None:
-        """Queue a frame for recv_frame to return."""
-        self._recv_queue.append(frame)
-
-    def get_sent_frames(self) -> list[Frame]:
-        """Get all frames that were sent."""
-        return list(self._sent_frames)
-
-
 class TestMockTransport:
-    """Test mock transport implementation."""
+    """Test MockTransport implementation."""
 
     def test_connect(self):
         """Test connect method."""
         transport = MockTransport()
-        assert not transport.connect_called
         assert not transport.is_connected()
 
         transport.connect()
-        assert transport.connect_called
         assert transport.is_connected()
 
     def test_disconnect(self):
@@ -69,121 +24,138 @@ class TestMockTransport:
         transport.connect()
         assert transport.is_connected()
 
-        transport.disconnect()
-        assert transport.disconnect_called
+        transport.close()
         assert not transport.is_connected()
 
-    def test_send_frame(self):
-        """Test sending frames."""
+    def test_send_and_recv(self):
+        """Test basic send and recv."""
         transport = MockTransport()
         transport.connect()
 
-        frame = Frame.create_hello_frame(session_id=1)
-        transport.send_frame(frame)
+        data = b"\x00\x01\x02\x03"
+        transport.send(data)
 
-        assert len(transport._sent_frames) == 1
-        assert transport._sent_frames[0] == frame
+        received = transport.recv(timeout=0.1)
+        assert received is None  # Queue is empty
 
-    def test_send_frame_not_connected(self):
-        """Test sending frame when not connected raises error."""
-        transport = MockTransport()
+        transport.inject(data)
+        received = transport.recv(timeout=0.1)
+        assert received == data
 
-        frame = Frame.create_hello_frame(session_id=1)
-        with pytest.raises(TransportError, match="Not connected"):
-            transport.send_frame(frame)
-
-    def test_recv_frame(self):
-        """Test receiving frames."""
-        transport = MockTransport()
-        transport.connect()
-
-        frame = Frame.create_data_frame(session_id=1, payload=b"test")
-        transport.queue_frame(frame)
-
-        received = transport.recv_frame(timeout=1.0)
-        assert received == frame
-
-    def test_recv_frame_empty(self):
-        """Test recv returns None when queue empty."""
-        transport = MockTransport()
-        transport.connect()
-
-        received = transport.recv_frame(timeout=0.1)
-        assert received is None
-
-    def test_recv_frame_not_connected(self):
-        """Test recv when not connected raises error."""
+    def test_send_not_connected(self):
+        """Test send raises error when not connected."""
         transport = MockTransport()
 
         with pytest.raises(TransportError, match="Not connected"):
-            transport.recv_frame()
+            transport.send(b"\x00\x01")
+
+    def test_recv_not_connected(self):
+        """Test recv raises error when not connected."""
+        transport = MockTransport()
+
+        with pytest.raises(TransportError, match="Not connected"):
+            transport.recv(timeout=0.1)
+
+    def test_get_sent(self):
+        """Test get_sent returns all sent data."""
+        transport = MockTransport()
+        transport.connect()
+
+        transport.send(b"packet1")
+        transport.send(b"packet2")
+
+        sent = transport.get_sent()
+        assert len(sent) == 2
+        assert sent[0] == b"packet1"
+        assert sent[1] == b"packet2"
+
+    def test_inject_multiple(self):
+        """Test injecting multiple frames."""
+        transport = MockTransport()
+        transport.connect()
+
+        transport.inject(b"frame1")
+        transport.inject(b"frame2")
+        transport.inject(b"frame3")
+
+        assert transport.recv(timeout=0.1) == b"frame1"
+        assert transport.recv(timeout=0.1) == b"frame2"
+        assert transport.recv(timeout=0.1) == b"frame3"
+        assert transport.recv(timeout=0.1) is None
+
+    def test_set_send_error(self):
+        """Test send error simulation."""
+        transport = MockTransport()
+        transport.connect()
+
+        transport.set_send_error(TransportError("mock send error"))
+
+        with pytest.raises(TransportError, match="mock send error"):
+            transport.send(b"data")
+
+    def test_set_recv_error(self):
+        """Test recv error simulation."""
+        transport = MockTransport()
+        transport.connect()
+
+        transport.set_recv_error(TransportError("mock recv error"))
+
+        with pytest.raises(TransportError, match="mock recv error"):
+            transport.recv(timeout=0.1)
 
 
-class TestBaseTransportInterface:
-    """Test that BaseTransport defines required interface."""
+class TestTransportInterface:
+    """Test that Transport defines required interface."""
 
-    def test_base_transport_is_abstract(self):
-        """Test BaseTransport cannot be instantiated directly."""
+    def test_transport_is_abstract(self):
+        """Test Transport cannot be instantiated directly."""
         with pytest.raises(TypeError):
-            BaseTransport()
+            Transport()
 
     def test_required_methods_exist(self):
         """Test all required methods exist in interface."""
-        required = ['connect', 'disconnect', 'send_frame', 'recv_frame', 'is_connected']
+        required = ['connect', 'send', 'recv', 'close', 'is_connected']
         for method in required:
-            assert hasattr(BaseTransport, method)
+            assert hasattr(Transport, method)
 
 
-class TestFrameRoundtrip:
-    """Test frame serialization with transport."""
+class TestFrameRoundtripWithMockTransport:
+    """Test frame encode/decode with MockTransport."""
 
-    def test_frame_hello_roundtrip(self):
-        """Test hello frame goes through mock transport."""
+    def test_encode_decode_frame_roundtrip(self):
+        """Test that frames can be encoded, sent, received, and decoded."""
         transport = MockTransport()
         transport.connect()
 
-        hello = Frame.create_hello_frame(session_id=42)
-        transport.send_frame(hello)
+        session_id = uuid.uuid4().bytes
+        frame = create_frame(FrameType.DATA, session_id, b"test payload")
 
-        sent = transport.get_sent_frames()
-        assert len(sent) == 1
-        assert sent[0].frame_type == FRAME_TYPE_HELLO
-        assert sent[0].session_id == 42
-        assert sent[0].payload == b"HELLO"
+        # Encode and send
+        data = encode_frame(frame)
+        transport.send(data)
 
-    def test_frame_data_roundtrip(self):
-        """Test data frame roundtrip."""
+        # Inject encoded data and receive
+        transport.inject(data)
+        received_data = transport.recv(timeout=0.1)
+
+        assert received_data == data
+
+        # Decode
+        decoded = decode_frame(received_data)
+        assert decoded.frame_type == FrameType.DATA
+        assert decoded.session_id == session_id
+        assert decoded.payload == b"test payload"
+
+    def test_multiple_frame_roundtrip(self):
+        """Test multiple frames through transport."""
         transport = MockTransport()
         transport.connect()
 
-        payload = b"\x00\x01\x02\x03\x04\x05"
-        frame = Frame.create_data_frame(session_id=1, payload=payload)
-        transport.send_frame(frame)
-
-        # Simulate server returning ack
-        ack = Frame.create_hello_ack_frame(session_id=1)
-        transport.queue_frame(ack)
-
-        received = transport.recv_frame(timeout=1.0)
-        assert received is not None
-        assert received.frame_type == FRAME_TYPE_HELLO_ACK
-
-    def test_multiple_frames(self):
-        """Test sending and receiving multiple frames."""
-        transport = MockTransport()
-        transport.connect()
+        session_id = uuid.uuid4().bytes
 
         for i in range(5):
-            frame = Frame.create_data_frame(session_id=1, payload=f"packet{i}".encode())
-            transport.send_frame(frame)
+            frame = create_frame(FrameType.DATA, session_id, f"packet{i}".encode())
+            data = encode_frame(frame)
+            transport.send(data)
 
-        assert len(transport.get_sent_frames()) == 5
-
-        # Queue responses
-        for _ in range(5):
-            transport.queue_frame(Frame.create_keepalive_frame(session_id=1))
-
-        for _ in range(5):
-            received = transport.recv_frame(timeout=1.0)
-            assert received is not None
-            assert received.frame_type == FRAME_TYPE_KEEPALIVE
+        assert len(transport.get_sent()) == 5

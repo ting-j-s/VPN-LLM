@@ -1,4 +1,4 @@
-# TCP Transport Client Configuration
+# TLS Transport Client Configuration
 client:
   tun_name: tun0
   tun_ip: 10.8.0.2
@@ -7,10 +7,14 @@ client:
 
 server:
   host: 127.0.0.1
-  port: 2222
+  port: 2223
 
 transport:
-  type: tcp
+  type: tls
+  certfile: /path/to/client.crt
+  keyfile: /path/to/client.key
+  cafile: /path/to/ca.crt
+  verify_server: true
 
 session:
   heartbeat_interval: 10

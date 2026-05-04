@@ -1,126 +1,195 @@
 """LLM Client Module.
 
-Provides interface to LLM API for code generation assistance.
-Currently a stub implementation - actual LLM integration pending.
+Provides a generic LLM API client for OpenAI-style APIs.
+Used for code generation, test generation, and error analysis.
 """
 
+import os
+import time
 from typing import Optional
 
-from ..common.logger import setup_logger
+import requests
+
+from ..common.errors import VPNError
+from ..common.logger import get_logger
 
 
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
+
+
+class LLMClientError(VPNError):
+    """LLM client error."""
+    pass
 
 
 class LLMClient:
-    """Client for LLM API integration.
+    """Generic LLM API client compatible with OpenAI-style APIs.
 
-    Provides methods for:
-    - Code generation
-    - Configuration generation
-    - Error analysis and fix suggestions
-    - Test generation
+    Reads configuration from environment variables:
+        LLM_API_KEY: API key for authentication
+        LLM_BASE_URL: Base URL for the API (e.g., https://api.openai.com/v1)
+        LLM_MODEL: Model name to use (e.g., gpt-4, gpt-3.5-turbo)
 
-    Note: This is a placeholder implementation.
-    Actual LLM integration requires API keys and endpoint configuration.
+    Usage:
+        client = LLMClient()
+        response = client.ask("Hello, how are you?")
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        api_endpoint: str = "https://api.anthropic.com",
-        model: str = "claude-sonnet-4-20250514",
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
     ):
         """Initialize LLM client.
 
         Args:
-            api_key: API key for authentication.
-            api_endpoint: Base URL for API endpoint.
-            model: Model identifier to use.
-        """
-        self.api_key = api_key
-        self.api_endpoint = api_endpoint
-        self.model = model
-
-        logger.info(f"LLM client initialized (endpoint={api_endpoint}, model={model})")
-
-    def generate_code(
-        self,
-        prompt: str,
-        language: str = "python",
-        context: Optional[str] = None,
-    ) -> str:
-        """Generate code based on a prompt.
-
-        Args:
-            prompt: Description of code to generate.
-            language: Target programming language.
-            context: Optional context code for reference.
-
-        Returns:
-            Generated code as string.
+            api_key: API key. If None, reads from LLM_API_KEY env var.
+            base_url: Base URL. If None, reads from LLM_BASE_URL env var.
+            model: Model name. If None, reads from LLM_MODEL env var.
+            timeout: Request timeout in seconds.
+            max_retries: Maximum number of retry attempts.
 
         Raises:
-            NotImplementedError: LLM integration not yet implemented.
+            LLMClientError: If required environment variables are missing.
         """
-        raise NotImplementedError("LLM code generation not yet implemented")
+        self.api_key = api_key or os.environ.get("LLM_API_KEY")
+        self.base_url = base_url or os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
+        self.model = model or os.environ.get("LLM_MODEL", "gpt-4")
+        self.timeout = timeout
+        self.max_retries = max_retries
 
-    def analyze_error(
-        self,
-        error_message: str,
-        stack_trace: Optional[str] = None,
-    ) -> str:
-        """Analyze an error and suggest fixes.
+        self._validate_config()
 
-        Args:
-            error_message: Error message text.
-            stack_trace: Optional stack trace.
-
-        Returns:
-            Suggested fix description.
+    def _validate_config(self) -> None:
+        """Validate that required configuration is present.
 
         Raises:
-            NotImplementedError: LLM integration not yet implemented.
+            LLMClientError: If required config is missing.
         """
-        raise NotImplementedError("LLM error analysis not yet implemented")
+        missing = []
+        if not self.api_key:
+            missing.append("LLM_API_KEY")
+        if not self.base_url:
+            missing.append("LLM_BASE_URL")
+        if not self.model:
+            missing.append("LLM_MODEL")
 
-    def generate_tests(
-        self,
-        module_name: str,
-        test_type: str = "unit",
-    ) -> str:
-        """Generate test code for a module.
+        if missing:
+            raise LLMClientError(
+                f"Missing required environment variables: {', '.join(missing)}. "
+                f"Please set these environment variables before using the LLM client."
+            )
+
+    def ask(self, prompt: str, retry_count: int = 0) -> str:
+        """Send a prompt to the LLM and return the response.
 
         Args:
-            module_name: Name of module to test.
-            test_type: Type of tests (unit, integration, etc).
+            prompt: The prompt to send to the LLM.
+            retry_count: Current retry attempt (internal use).
 
         Returns:
-            Generated test code.
+            The LLM's response as a string.
 
         Raises:
-            NotImplementedError: LLM integration not yet implemented.
+            LLMClientError: If the API call fails after all retries.
         """
-        raise NotImplementedError("LLM test generation not yet implemented")
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
 
-    def generate_config(
-        self,
-        config_type: str,
-        requirements: str,
-    ) -> str:
-        """Generate configuration based on requirements.
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7,
+        }
 
-        Args:
-            config_type: Type of config (yaml, json, etc).
-            requirements: Configuration requirements description.
+        endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
 
-        Returns:
-            Generated configuration.
+        logger.info(f"LLM request to {endpoint} with model {self.model}")
 
-        Raises:
-            NotImplementedError: LLM integration not yet implemented.
-        """
-        raise NotImplementedError("LLM config generation not yet implemented")
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
+        except requests.Timeout:
+            raise LLMClientError(f"LLM request timed out after {self.timeout}s")
+        except requests.ConnectionError as e:
+            raise LLMClientError(f"LLM connection failed: {e}")
+
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                choices = data.get("choices", [])
+                if choices and len(choices) > 0:
+                    message = choices[0].get("message", {})
+                    content = message.get("content", "")
+                    logger.info(f"LLM response received: {len(content)} chars")
+                    return content.strip()
+                else:
+                    raise LLMClientError("LLM response had no choices")
+            except (ValueError, KeyError) as e:
+                raise LLMClientError(f"Failed to parse LLM response: {e}")
+
+        elif response.status_code == 401:
+            raise LLMClientError("Invalid API key. Please check your LLM_API_KEY.")
+
+        elif response.status_code == 429:
+            # Rate limited - try to retry with backoff
+            if retry_count < self.max_retries:
+                wait_time = 2 ** retry_count
+                logger.warning(f"Rate limited, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                return self.ask(prompt, retry_count + 1)
+            raise LLMClientError("Rate limited by LLM API after retries")
+
+        elif response.status_code >= 500:
+            # Server error - try to retry
+            if retry_count < self.max_retries:
+                wait_time = 2 ** retry_count
+                logger.warning(f"LLM server error, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                return self.ask(prompt, retry_count + 1)
+            raise LLMClientError(f"LLM server error after {self.max_retries} retries")
+
+        else:
+            raise LLMClientError(f"LLM API error ({response.status_code}): {response.text}")
 
     def __repr__(self) -> str:
-        return f"LLMClient(endpoint={self.api_endpoint}, model={self.model})"
+        return f"LLMClient(model={self.model}, base_url={self.base_url})"
+
+
+def create_llm_client(
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+    timeout: float = 60.0,
+) -> LLMClient:
+    """Create an LLM client with the given or environment-based config.
+
+    Args:
+        api_key: Optional override for LLM_API_KEY.
+        base_url: Optional override for LLM_BASE_URL.
+        model: Optional override for LLM_MODEL.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        LLMClient instance.
+
+    Raises:
+        LLMClientError: If required config is missing.
+    """
+    return LLMClient(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        timeout=timeout,
+    )

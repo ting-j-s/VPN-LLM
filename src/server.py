@@ -8,18 +8,15 @@ import signal
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-
-from common.config import load_config
-from common.logger import setup_logger
-from common.errors import TunnelError
-from tun.tun_device import create_tun_device
-from transport.ssh_transport import SSHTransport
-from core.server_core import ServerCore
+from .common.config import load_server_config
+from .common.logger import get_logger
+from .common.errors import VPNError
+from .tun.tun_device import create_tun_device
+from .transport.factory import create_transport
+from .core.server_core import ServerCore
 
 
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
 
 # Global server instance for signal handling
 _server: ServerCore | None = None
@@ -44,7 +41,13 @@ def main():
     parser.add_argument(
         "--mock-tun",
         action="store_true",
-        help="Use mock TUN device instead of real TUN",
+        help="Use MockTunDevice instead of LinuxTunDevice",
+    )
+    parser.add_argument(
+        "--transport",
+        type=str,
+        choices=["ssh", "tcp", "tls", "websocket", "mock"],
+        help="Override transport type from config",
     )
     args = parser.parse_args()
 
@@ -52,51 +55,69 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    logger.info("=" * 50)
     logger.info("VPN Tunnel Server starting")
+    logger.info("=" * 50)
 
     try:
         # Load configuration
-        config = load_config(args.config)
-        logger.info(f"Configuration loaded from {args.config}")
+        config = load_server_config(args.config)
+        logger.info(f"Configuration loaded: {args.config}")
         logger.info(f"Transport type: {config.transport.type}")
 
+        # Override transport type if --transport specified
+        if args.transport:
+            config.transport.type = args.transport
+            logger.info(f"Transport type overridden to: {args.transport}")
+
         # Create TUN device
-        tun = create_tun_device(
-            name=config.tun.name,
-            mtu=config.tun.mtu,
-            use_mock=args.mock_tun,
-        )
-
-        # Create transport (SSH server transport)
-        if config.transport.type == "ssh":
-            transport = SSHTransport(
-                host=config.transport.host,
-                port=config.transport.port,
-                key_file=config.transport.key_file,
+        if args.mock_tun:
+            tun = create_tun_device(
+                name=config.server.tun_name,
+                mtu=config.server.mtu,
+                use_mock=True,
             )
+            logger.info(f"Using MockTunDevice (name={config.server.tun_name}, mtu={config.server.mtu})")
         else:
-            raise TunnelError(f"Unsupported transport type: {config.transport.type}")
+            tun = create_tun_device(
+                name=config.server.tun_name,
+                mtu=config.server.mtu,
+                use_mock=False,
+            )
+            logger.info(f"Using LinuxTunDevice (name={config.server.tun_name}, mtu={config.server.mtu})")
 
-        # Create and start server core
+        # Create transport using factory
+        transport = create_transport(config)
+        logger.info(f"Transport created: {transport}")
+
+        # Create server core
         global _server
         _server = ServerCore(
             tun=tun,
             transport=transport,
-            session_id=1,
+            heartbeat_interval=config.session.heartbeat_interval,
+            heartbeat_timeout=config.session.heartbeat_timeout,
         )
+        logger.info("ServerCore created")
 
-        logger.info("Server core initialized, starting tunnel...")
+        # Start server
+        logger.info("Starting tunnel...")
         _server.start()
 
+        logger.info("=" * 50)
         logger.info("Tunnel listening, running...")
+        logger.info("Press Ctrl+C to stop")
+        logger.info("=" * 50)
 
         # Keep main thread alive
-        while _server.is_connected() or True:
+        while _server and _server.is_connected():
             signal.pause()
 
-    except TunnelError as e:
+    except VPNError as e:
         logger.error(f"Tunnel error: {e}")
         sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt")
     except Exception as e:
         logger.exception(f"Unexpected error: {e}")
         sys.exit(1)

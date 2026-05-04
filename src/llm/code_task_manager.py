@@ -1,195 +1,272 @@
 """Code Task Manager for LLM-Assisted Development.
 
-Manages code generation tasks and tracks implementation progress.
-Coordinates between user requirements and LLM code generation.
+Converts user requirements into structured code tasks.
+Generates coding prompts for LLM-assisted development.
+Does NOT automatically modify code - only generates task prompts.
 """
 
 import hashlib
-import json
 import time
 from dataclasses import dataclass, field
-from enum import Enum
-from pathlib import Path
 from typing import Optional
 
-from ..common.logger import setup_logger
+from ..common.logger import get_logger
 
 
-logger = setup_logger(__name__)
-
-
-class TaskStatus(Enum):
-    """Task status enumeration."""
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
+logger = get_logger(__name__)
 
 
 @dataclass
 class CodeTask:
-    """Code generation task.
+    """Structured code generation task.
 
     Attributes:
-        task_id: Unique task identifier.
-        description: Task description.
-        module_name: Target module name.
-        status: Current task status.
-        generated_code: Generated code (if completed).
-        error_message: Error message (if failed).
-        created_at: Creation timestamp.
-        completed_at: Completion timestamp.
+        title: Short title for the task.
+        goal: Clear description of what needs to be achieved.
+        files_to_modify: List of file paths to modify or create.
+        constraints: List of constraints or requirements.
+        acceptance_criteria: List of criteria to verify completion.
+        test_commands: List of commands to run for verification.
     """
-    task_id: str
-    description: str
-    module_name: str
-    status: TaskStatus = TaskStatus.PENDING
-    generated_code: Optional[str] = None
-    error_message: Optional[str] = None
-    created_at: float = field(default_factory=time.time)
-    completed_at: Optional[float] = None
+    title: str
+    goal: str
+    files_to_modify: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    acceptance_criteria: list[str] = field(default_factory=list)
+    test_commands: list[str] = field(default_factory=list)
 
 
 class CodeTaskManager:
-    """Manages code generation tasks for LLM-assisted development.
+    """Manages code generation tasks.
 
-    Provides:
-    - Task creation and tracking
-    - Task status updates
-    - Generated code storage
-    - Task history
+    Converts natural language requirements into structured tasks
+    with coding prompts for LLM-assisted development.
+    Human confirmation required before execution (Vibe Coding).
+
+    Usage:
+        manager = CodeTaskManager()
+        task = manager.create_task("Add TLS transport support")
+        print(manager.render_prompt(task))
     """
 
-    def __init__(self, storage_dir: str = ".llm_tasks"):
-        """Initialize task manager.
+    def __init__(self):
+        """Initialize task manager."""
+        logger.info("CodeTaskManager initialized")
+
+    def create_task(self, requirement: str) -> CodeTask:
+        """Convert a natural language requirement into a structured task.
 
         Args:
-            storage_dir: Directory for task storage.
-        """
-        self.storage_dir = Path(storage_dir)
-        self.storage_dir.mkdir(exist_ok=True)
-
-        self._tasks: dict[str, CodeTask] = {}
-        logger.info(f"Task manager initialized (storage={self.storage_dir})")
-
-    def create_task(
-        self,
-        description: str,
-        module_name: str,
-    ) -> CodeTask:
-        """Create a new code generation task.
-
-        Args:
-            description: Description of code to generate.
-            module_name: Target module name.
+            requirement: Natural language description of what to implement.
 
         Returns:
-            Created task object.
+            Structured CodeTask ready for prompt generation.
         """
-        # Generate task ID from description hash
-        task_id = hashlib.sha256(
-            f"{description}{module_name}{time.time()}".encode()
-        ).hexdigest()[:16]
+        requirement = requirement.strip()
+
+        # Generate task title from requirement
+        title = self._generate_title(requirement)
+
+        # Generate goal statement
+        goal = self._generate_goal(requirement)
+
+        # Identify files to modify based on requirement analysis
+        files = self._identify_files(requirement)
+
+        # Generate constraints
+        constraints = self._generate_constraints(requirement)
+
+        # Generate acceptance criteria
+        criteria = self._generate_acceptance_criteria(requirement)
+
+        # Generate test commands
+        test_commands = self._generate_test_commands(files)
 
         task = CodeTask(
-            task_id=task_id,
-            description=description,
-            module_name=module_name,
+            title=title,
+            goal=goal,
+            files_to_modify=files,
+            constraints=constraints,
+            acceptance_criteria=criteria,
+            test_commands=test_commands,
         )
 
-        self._tasks[task_id] = task
-        self._save_task(task)
-
-        logger.info(f"Created task {task_id}: {module_name}")
+        logger.info(f"Created task: {title}")
         return task
 
-    def get_task(self, task_id: str) -> Optional[CodeTask]:
-        """Retrieve a task by ID.
+    def render_prompt(self, task: CodeTask) -> str:
+        """Render a task as a markdown-formatted prompt for LLM.
 
         Args:
-            task_id: Task identifier.
+            task: The CodeTask to render.
 
         Returns:
-            Task object, or None if not found.
+            Markdown-formatted task prompt.
         """
-        if task_id in self._tasks:
-            return self._tasks[task_id]
+        lines = [
+            "# Code Task",
+            "",
+            f"## Title: {task.title}",
+            "",
+            f"## Goal",
+            task.goal,
+            "",
+        ]
 
-        # Try loading from storage
-        task_file = self.storage_dir / f"{task_id}.json"
-        if task_file.exists():
-            with open(task_file) as f:
-                data = json.load(f)
-                task = CodeTask(**data)
-                task.status = TaskStatus(task.status)
-                self._tasks[task_id] = task
-                return task
+        if task.files_to_modify:
+            lines.append("## Files to Modify")
+            lines.append("")
+            for f in task.files_to_modify:
+                lines.append(f"- `{f}`")
+            lines.append("")
 
-        return None
+        if task.constraints:
+            lines.append("## Constraints")
+            lines.append("")
+            for c in task.constraints:
+                lines.append(f"- {c}")
+            lines.append("")
 
-    def update_task_status(
-        self,
-        task_id: str,
-        status: TaskStatus,
-        generated_code: Optional[str] = None,
-        error_message: Optional[str] = None,
-    ) -> None:
-        """Update task status and results.
+        if task.acceptance_criteria:
+            lines.append("## Acceptance Criteria")
+            lines.append("")
+            for i, criteria in enumerate(task.acceptance_criteria, 1):
+                lines.append(f"{i}. {criteria}")
+            lines.append("")
 
-        Args:
-            task_id: Task identifier.
-            status: New status.
-            generated_code: Generated code (for completed tasks).
-            error_message: Error message (for failed tasks).
-        """
-        task = self.get_task(task_id)
-        if not task:
-            raise ValueError(f"Task not found: {task_id}")
+        if task.test_commands:
+            lines.append("## Test Commands")
+            lines.append("")
+            lines.append("Run these commands to verify the implementation:")
+            lines.append("")
+            for cmd in task.test_commands:
+                lines.append(f"```bash")
+                lines.append(cmd)
+                lines.append(f"```")
+            lines.append("")
 
-        task.status = status
-        if generated_code is not None:
-            task.generated_code = generated_code
-        if error_message is not None:
-            task.error_message = error_message
-        if status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
-            task.completed_at = time.time()
+        lines.append("---")
+        lines.append("")
+        lines.append("**Important**: Do NOT automatically execute code changes.")
+        lines.append("Generate the code following the constraints above.")
+        lines.append("After generation, present the code for human review.")
 
-        self._save_task(task)
-        logger.info(f"Updated task {task_id}: {status.value}")
+        return "\n".join(lines)
 
-    def list_tasks(self, status: Optional[TaskStatus] = None) -> list[CodeTask]:
-        """List all tasks, optionally filtered by status.
+    def _generate_title(self, requirement: str) -> str:
+        """Generate a short title from requirement."""
+        # Use first 60 chars of requirement, capitalized
+        title = requirement[:60]
+        if len(requirement) > 60:
+            title = title.rstrip() + "..."
+        return title.strip().capitalize()
 
-        Args:
-            status: Optional status filter.
+    def _generate_goal(self, requirement: str) -> str:
+        """Generate a clear goal statement."""
+        return f"Implement: {requirement}"
 
-        Returns:
-            List of tasks.
-        """
-        tasks = list(self._tasks.values())
-        if status is not None:
-            tasks = [t for t in tasks if t.status == status]
-        return sorted(tasks, key=lambda t: t.created_at)
+    def _identify_files(self, requirement: str) -> list[str]:
+        """Identify files to modify based on requirement keywords."""
+        requirement_lower = requirement.lower()
+        files = []
 
-    def _save_task(self, task: CodeTask) -> None:
-        """Save task to storage.
+        # Detect transport type
+        if "tls" in requirement_lower:
+            files.append("src/transport/tls_transport.py")
+            files.append("src/transport/factory.py")
+        if "websocket" in requirement_lower:
+            files.append("src/transport/websocket_transport.py")
+            files.append("src/transport/factory.py")
+        if "tcp" in requirement_lower:
+            files.append("src/transport/tcp_transport.py")
+            files.append("src/transport/factory.py")
+        if "ssh" in requirement_lower:
+            files.append("src/transport/ssh_transport.py")
+            files.append("src/transport/factory.py")
 
-        Args:
-            task: Task to save.
-        """
-        task_file = self.storage_dir / f"{task.task_id}.json"
-        with open(task_file, "w") as f:
-            data = {
-                "task_id": task.task_id,
-                "description": task.description,
-                "module_name": task.module_name,
-                "status": task.status.value,
-                "generated_code": task.generated_code,
-                "error_message": task.error_message,
-                "created_at": task.created_at,
-                "completed_at": task.completed_at,
-            }
-            json.dump(data, f, indent=2)
+        # Detect config
+        if "config" in requirement_lower or "yaml" in requirement_lower:
+            files.append("src/common/config.py")
+            if "client" in requirement_lower:
+                files.append("config/client.yaml")
+            if "server" in requirement_lower:
+                files.append("config/server.yaml")
+
+        # Detect test
+        if "test" in requirement_lower:
+            # Look for test file patterns
+            if "transport" in requirement_lower:
+                files.append("tests/test_transport.py")
+
+        return files
+
+    def _generate_constraints(self, requirement: str) -> list[str]:
+        """Generate constraints from requirement."""
+        constraints = []
+
+        requirement_lower = requirement.lower()
+
+        # Add protocol constraints based on transport type
+        if any(t in requirement_lower for t in ["tls", "websocket", "tcp", "ssh"]):
+            constraints.append("Use 4-byte length prefix for frame framing")
+            constraints.append("Handle partial reads (half-packet problem)")
+
+        # Add mode constraints
+        if "client" in requirement_lower or "server" in requirement_lower:
+            constraints.append("Support both client and server modes")
+
+        # Security constraints
+        if "tls" in requirement_lower:
+            constraints.append("Support certificate verification (optional for client)")
+            constraints.append("Support certfile, keyfile, cafile configuration")
+
+        # Error handling
+        constraints.append("Raise TransportError with clear message on failure")
+        constraints.append("Handle connection timeouts gracefully")
+
+        return constraints
+
+    def _generate_acceptance_criteria(self, requirement: str) -> list[str]:
+        """Generate acceptance criteria."""
+        criteria = []
+
+        requirement_lower = requirement.lower()
+
+        # Basic connectivity criteria
+        criteria.append("Transport can connect in client mode")
+        criteria.append("Transport can listen and accept in server mode")
+        criteria.append("Data can be sent and received via transport")
+
+        # Protocol criteria
+        if "4-byte" in requirement_lower or "length prefix" in requirement_lower:
+            criteria.append("All frames use 4-byte big-endian length prefix")
+
+        # Test criteria
+        criteria.append("All existing tests continue to pass")
+        criteria.append("New tests cover basic functionality")
+
+        # Error criteria
+        criteria.append("Proper error messages on connection failure")
+        criteria.append("Clean disconnect handling")
+
+        return criteria
+
+    def _generate_test_commands(self, files: list[str]) -> list[str]:
+        """Generate test commands based on files to modify."""
+        commands = []
+
+        # Always include the basic test command
+        commands.append("cd /data/xjr/VPN-LLM/vpn_tunnel && python3 -m pytest tests/ -v --tb=short")
+
+        # Add specific test file if transport
+        transport_files = [f for f in files if "transport" in f and f.endswith(".py")]
+        if transport_files:
+            test_file = transport_files[0].replace("src/", "tests/test_").replace(".py", ".py")
+            # Don't duplicate if same as first
+            if not any("test_transport" in c for c in commands):
+                commands.insert(0, f"cd /data/xjr/VPN-LLM/vpn_tunnel && python3 -m pytest tests/test_transport*.py -v --tb=short")
+
+        return commands[:2]  # Limit to 2 commands
 
     def __repr__(self) -> str:
-        return f"CodeTaskManager(tasks={len(self._tasks)})"
+        return "CodeTaskManager()"

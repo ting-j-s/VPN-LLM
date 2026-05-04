@@ -1,36 +1,36 @@
 """VPN Tunnel Exception Definitions."""
 
 
-class TunnelError(Exception):
-    """Base exception for tunnel-related errors."""
+class VPNError(Exception):
+    """Base exception for all VPN tunnel errors."""
     pass
 
 
-class TransportError(TunnelError):
-    """Transport layer errors."""
-    pass
-
-
-class ConnectionError(TunnelError):
-    """Connection-related errors."""
-    pass
-
-
-class FrameError(TunnelError):
-    """Frame encoding/decoding errors."""
-    pass
-
-
-class ConfigError(TunnelError):
+class ConfigError(VPNError):
     """Configuration errors."""
     pass
 
 
-class TUNError(TunnelError):
+class FrameDecodeError(VPNError):
+    """Frame decoding/encoding errors."""
+    pass
+
+
+class TransportError(VPNError):
+    """Transport layer errors."""
+    pass
+
+
+class TransportTimeout(TransportError):
+    """Transport recv timeout - not an error, just no data available."""
+    pass
+
+
+class TunDeviceError(VPNError):
     """TUN device errors."""
     pass
 
 
-class ForwardingError(TunnelError):
+class ForwardingError(VPNError):
     """Forwarding layer errors."""
     pass
