@@ -2,15 +2,15 @@
 
 Provides WebSocket-based transport for the VPN tunnel.
 Supports both client (connect) and server (bind/listen/accept) modes.
-Uses websockets library for WebSocket protocol handling.
+Uses websockets library with a dedicated background event loop per instance.
 """
 
 import asyncio
-import socket
+import concurrent.futures
 import threading
 from typing import Optional
 
-from ..common.errors import TransportError
+from ..common.errors import TransportError, TransportTimeout
 from ..common.logger import get_logger
 from .base import Transport
 
@@ -24,13 +24,18 @@ MAX_FRAME_SIZE = 10 * 1024 * 1024
 class WebSocketTransport(Transport):
     """WebSocket-based transport implementation.
 
+    Each instance owns a dedicated asyncio event loop running in a
+    background thread.  Sync send / recv / connect submit coroutines to
+    that loop via ``asyncio.run_coroutine_threadsafe``, so the transport
+    never depends on the caller's thread having an event loop.
+
     Supports two modes:
     - Client mode: connect to WebSocket server
-    - Server mode: start WebSocket server and accept connections
+    - Server mode: bind/listen, then accept a single client connection
 
     Protocol:
-        - Each send() sends binary WebSocket message
-        - Each recv() receives binary WebSocket message
+        - Each send() sends a binary WebSocket message
+        - Each recv() reads one binary WebSocket message
 
     Usage (client):
         transport = WebSocketTransport(
@@ -46,18 +51,16 @@ class WebSocketTransport(Transport):
     Usage (server):
         transport = WebSocketTransport(
             mode="server",
-            host="0.0.0.0",
+            host="127.0.0.1",
             port=2224,
             path="/vpn",
         )
-        transport.connect()  # Sets up listening socket
-        # Call accept() to get connection from client
-        transport.accept()
+        transport.connect()   # starts listening
+        transport.accept()    # waits for a client
         # ... use send/recv ...
         transport.close()
     """
 
-    # Mode constants
     MODE_CLIENT = "client"
     MODE_SERVER = "server"
 
@@ -70,18 +73,10 @@ class WebSocketTransport(Transport):
         backlog: int = 5,
         extra_headers: Optional[dict] = None,
     ):
-        """Initialize WebSocket transport.
-
-        Args:
-            mode: "client" or "server".
-            host: Host to bind or connect to.
-            port: Port number.
-            path: WebSocket path (client mode).
-            backlog: Listen backlog (server mode only).
-            extra_headers: Extra HTTP headers for WebSocket handshake.
-        """
         if mode not in (self.MODE_CLIENT, self.MODE_SERVER):
-            raise TransportError(f"Invalid mode: {mode}. Must be 'client' or 'server'")
+            raise TransportError(
+                f"Invalid mode: {mode}. Must be 'client' or 'server'"
+            )
 
         self.mode = mode
         self.host = host
@@ -90,113 +85,193 @@ class WebSocketTransport(Transport):
         self.backlog = backlog
         self.extra_headers = extra_headers or {}
 
-        self._server_sock: Optional[socket.socket] = None
-        self._ws: Optional['websockets.WebSocketProtocol'] = None  # type: ignore
+        self._ws = None
         self._connected = False
-        self._closed = False
+        self._shutting_down = False
 
-        # Server threading
-        self._server_thread: Optional[threading.Thread] = None
+        # Dedicated event loop running in a background thread
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+
+        # Server state
+        self._server = None
         self._server_ready = threading.Event()
-        self._server_error: Optional[Exception] = None
+        self._connection_event = threading.Event()
+        self._setup_error: Optional[Exception] = None
 
-    def connect(self) -> None:
-        """Connect or start listening.
+    # ------------------------------------------------------------------
+    # Event-loop management
+    # ------------------------------------------------------------------
 
-        Client mode: connect to WebSocket server.
-        Server mode: bind and listen for WebSocket connections.
+    def _ensure_loop(self) -> None:
+        """Start the background event loop if it is not already running."""
+        if self._loop is not None and not self._loop.is_closed():
+            return
+        if self._shutting_down:
+            raise TransportError("Transport is shutting down")
+
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._run_loop, daemon=True, name="ws-transport-loop"
+        )
+        self._loop_thread.start()
+
+    def _run_loop(self) -> None:
+        """Run the event loop forever.  Entry point for the background thread."""
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+        # Drain remaining tasks after the loop is stopped
+        try:
+            pending = asyncio.all_tasks(self._loop)
+            if pending:
+                self._loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+        except Exception:
+            pass
+        self._loop.close()
+
+    def _run_coro(self, coro, timeout: Optional[float] = None):
+        """Submit *coro* to the background loop and wait for its result.
 
         Raises:
-            TransportError: If connection fails.
+            TransportTimeout: if *timeout* is reached.
+            TransportError:  if the coroutine raises.
         """
+        if self._shutting_down:
+            raise TransportError("Transport is shutting down")
+        self._ensure_loop()
+        if self._loop is None or self._loop.is_closed():
+            raise TransportError("Event loop is not available")
+
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TransportTimeout("Operation timed out")
+
+    # ------------------------------------------------------------------
+    # Transport interface
+    # ------------------------------------------------------------------
+
+    def connect(self) -> None:
+        """Connect to the remote (client) or start listening (server)."""
         if self._connected:
             logger.warning("Already connected")
             return
-
-        if self._closed:
-            raise TransportError("Transport already closed, create a new instance")
+        if self._shutting_down:
+            raise TransportError("Transport is shutting down")
 
         if self.mode == self.MODE_CLIENT:
             self._connect_client()
         else:
             self._start_server()
 
-    def _get_ws_url(self) -> str:
-        """Get WebSocket URL."""
-        return f"ws://{self.host}:{self.port}{self.path}"
+    def _connect_client(self) -> None:
+        logger.info("WebSocket client connecting to %s:%d%s",
+                     self.host, self.port, self.path)
+        self._ensure_loop()
+        self._setup_error = None
+        self._connection_event.clear()
+
+        # Submit a long-running coroutine and wait for the handshake to finish
+        asyncio.run_coroutine_threadsafe(
+            self._async_connect_client(), self._loop
+        )
+
+        if not self._connection_event.wait(timeout=10.0):
+            raise TransportError("WebSocket connection timed out")
+
+        if self._setup_error:
+            err = self._setup_error
+            self._setup_error = None
+            raise TransportError(f"WebSocket connection failed: {err}")
 
     async def _async_connect_client(self) -> None:
-        """Connect as client to WebSocket server (async)."""
-        import websockets
-
-        logger.info(f"WebSocket client connecting to {self._get_ws_url()}")
+        """Client-connect coroutine — runs until the WebSocket is closed."""
+        from websockets.asyncio.client import connect
 
         extra_h = dict(self.extra_headers) if self.extra_headers else None
+        url = f"ws://{self.host}:{self.port}{self.path}"
 
         try:
-            self._ws = await websockets.connect(
-                self._get_ws_url(),
-                extra_headers=extra_h,
-            )
+            async with connect(url, additional_headers=extra_h) as ws:
+                self._ws = ws
+                self._connected = True
+                self._connection_event.set()
+                logger.info("WebSocket client connected")
+                await ws.wait_closed()
         except Exception as e:
-            raise TransportError(f"WebSocket connection failed: {e}")
-
-        self._connected = True
-        logger.info("WebSocket client connected")
-
-    async def _async_serve(self) -> None:
-        """Start WebSocket server (async)."""
-        import websockets
-        from websockets.server import serve, WebSocketServerProtocol
-
-        logger.info(f"WebSocket server binding to {self.host}:{self.port}")
-
-        self._server_ready.set()
-
-        async with serve(
-            self._ws_handler,
-            host=self.host,
-            port=self.port,
-            path=self.path if self.path != "/" else None,
-            backlog=self.backlog,
-        ) as server:
-            logger.info(f"WebSocket server listening on {self.host}:{self.port}")
-            await server.wait_closed()
-
-    async def _ws_handler(self, ws: 'WebSocketServerProtocol') -> None:  # type: ignore
-        """Handle incoming WebSocket connection."""
-        self._ws = ws
-        self._connected = True
-        logger.info(f"WebSocket connection accepted from {ws.remote_address}")
-
-    def _connect_client(self) -> None:
-        """Connect as client to server (sync wrapper)."""
-        try:
-            asyncio.get_event_loop().run_until_complete(self._async_connect_client())
-        except Exception as e:
-            raise TransportError(f"WebSocket connection failed: {e}")
+            self._setup_error = e
+            self._connection_event.set()
+            return
+        finally:
+            self._connected = False
+            logger.debug("WebSocket client connection closed")
 
     def _start_server(self) -> None:
-        """Start WebSocket server in background thread."""
-        def run_server():
+        logger.info("WebSocket server binding to %s:%d",
+                     self.host, self.port)
+        self._server_ready.clear()
+        self._setup_error = None
+        self._ensure_loop()
+
+        asyncio.run_coroutine_threadsafe(
+            self._async_start_server(), self._loop
+        )
+
+        if not self._server_ready.wait(timeout=5.0):
+            raise TransportError("WebSocket server start timed out")
+
+        if self._setup_error:
+            err = self._setup_error
+            self._setup_error = None
+            raise TransportError(f"WebSocket server failed: {err}")
+
+        logger.info("WebSocket server started on %s:%d",
+                     self.host, self.port)
+
+    async def _async_start_server(self) -> None:
+        from websockets.asyncio.server import serve
+
+        try:
+            self._server = await serve(
+                self._ws_handler,
+                self.host,
+                self.port,
+            )
+        except Exception as e:
+            self._setup_error = e
+            self._server_ready.set()
+            return
+
+        self._server_ready.set()
+        logger.info("WebSocket server listening on %s:%d",
+                     self.host, self.port)
+
+    async def _ws_handler(self, ws) -> None:
+        """Handle an incoming WebSocket connection (server mode)."""
+        if self._ws is not None:
             try:
-                asyncio.get_event_loop().run_until_complete(self._async_serve())
-            except Exception as e:
-                self._server_error = e
-                self._server_ready.set()
+                await ws.close(1013, "Already connected")
+            except Exception:
+                pass
+            return
 
-        self._server_thread = threading.Thread(target=run_server, daemon=True)
-        self._server_thread.start()
+        self._ws = ws
+        self._connected = True
+        self._connection_event.set()
+        logger.info("WebSocket connection accepted")
 
-        # Wait for server to be ready
-        self._server_ready.wait(timeout=5.0)
-        if self._server_error:
-            raise TransportError(f"WebSocket server failed: {self._server_error}")
-
-        logger.info(f"WebSocket server started on {self.host}:{self.port}")
+        try:
+            await ws.wait_closed()
+        finally:
+            self._connected = False
+            logger.debug("WebSocket server connection closed")
 
     def accept(self, timeout: Optional[float] = None) -> None:
-        """Accept incoming connection (server mode only).
+        """Wait for a client to connect (server mode only).
 
         Args:
             timeout: Maximum time to wait for connection.
@@ -207,24 +282,18 @@ class WebSocketTransport(Transport):
         if self.mode != self.MODE_SERVER:
             raise TransportError("accept() is only available in server mode")
 
-        if self._server_thread is None:
+        if self._server is None:
             raise TransportError("Server not started, call connect() first")
 
-        # Wait for connection with timeout
-        start = asyncio.get_event_loop().time() if hasattr(asyncio.get_event_loop(), 'time') else 0
-        while timeout is None or (asyncio.get_event_loop().time() - start < timeout if hasattr(asyncio.get_event_loop(), 'time') else True):
-            if self._ws is not None and self._connected:
-                return
-            import time
-            time.sleep(0.1)
+        logger.info("Waiting for WebSocket connection...")
 
-        raise TransportError("Accept timeout")
+        if not self._connected:
+            self._connection_event.clear()
+            if not self._connection_event.wait(timeout=timeout):
+                raise TransportError("Accept timeout")
 
     def send(self, data: bytes) -> None:
-        """Send data as binary WebSocket message.
-
-        Args:
-            data: Frame bytes to send.
+        """Send data as a binary WebSocket message.
 
         Raises:
             TransportError: If not connected or send fails.
@@ -232,87 +301,112 @@ class WebSocketTransport(Transport):
         if not self._connected or self._ws is None:
             raise TransportError("Not connected")
 
-        async def async_send():
-            await self._ws.send(data)
-
         try:
-            asyncio.get_event_loop().run_until_complete(async_send())
-            logger.debug(f"WebSocketTransport sent {len(data)} bytes")
+            self._run_coro(self._ws.send(data))
+            logger.debug("WebSocketTransport sent %d bytes", len(data))
+        except TransportTimeout:
+            raise
         except Exception as e:
             self._connected = False
             raise TransportError(f"Send failed: {e}")
 
     def recv(self, timeout: Optional[float] = None) -> Optional[bytes]:
-        """Receive data as binary WebSocket message.
+        """Receive a binary WebSocket message.
 
         Args:
             timeout: Maximum time to wait in seconds.
                     None = blocking, 0 = non-blocking.
 
         Returns:
-            Frame bytes, or None if no data (non-blocking).
+            Frame bytes, or None if connection closed.
 
         Raises:
-            TransportError: If receive fails or not connected.
+            TransportTimeout: If timeout expires with no data.
+            TransportError: If receive fails.
         """
-        if not self._connected or self._ws is None:
+        if self._ws is None:
             raise TransportError("Not connected")
 
-        async def async_recv():
-            try:
-                if timeout is not None and timeout > 0:
-                    return await asyncio.wait_for(
-                        self._ws.recv(),
-                        timeout=timeout
-                    )
-                else:
-                    return await self._ws.recv()
-            except asyncio.TimeoutError:
-                return None
-
         try:
-            result = asyncio.get_event_loop().run_until_complete(async_recv())
+            result = self._run_coro(self._async_recv(timeout), timeout=timeout)
             if result is None:
+                self._connected = False
                 return None
-            logger.debug(f"WebSocketTransport received {len(result)} bytes")
+            logger.debug("WebSocketTransport received %d bytes", len(result))
             return result
+        except TransportTimeout:
+            raise
         except Exception as e:
             self._connected = False
             raise TransportError(f"Receive failed: {e}")
 
+    async def _async_recv(self, timeout: Optional[float]) -> Optional[bytes]:
+        from websockets.exceptions import ConnectionClosed
+
+        try:
+            if timeout is not None:
+                if timeout <= 0:
+                    return await asyncio.wait_for(self._ws.recv(), timeout=0.01)
+                return await asyncio.wait_for(self._ws.recv(), timeout=timeout)
+            return await self._ws.recv()
+        except asyncio.TimeoutError:
+            raise TransportTimeout("Receive timeout")
+        except ConnectionClosed:
+            return None
+
     def close(self) -> None:
-        """Close the connection."""
+        """Close the connection and stop the background event loop.
+
+        Idempotent -- safe to call multiple times.
+        """
+        if self._shutting_down:
+            return
+
         logger.info("Closing WebSocket transport")
-
+        self._shutting_down = True
         self._connected = False
-        self._closed = True
+        self._server_ready.set()
+        self._connection_event.set()
 
-        if self._ws is not None:
-            async def async_close():
-                await self._ws.close()
+        loop = self._loop
 
+        # Close the WebSocket connection (grab reference first to avoid races)
+        ws = self._ws
+        self._ws = None
+        if ws is not None and loop is not None and not loop.is_closed():
             try:
-                asyncio.get_event_loop().run_until_complete(async_close())
+                asyncio.run_coroutine_threadsafe(ws.close(), loop).result(timeout=3.0)
             except Exception:
                 pass
 
-            self._ws = None
+        # Close the server
+        server = self._server
+        self._server = None
+        if server is not None and loop is not None and not loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    server.close(), loop
+                ).result(timeout=3.0)
+            except Exception:
+                pass
 
-        # Server thread will be stopped when daemon exits
-        self._server_thread = None
+        # Stop the event loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(loop.stop)
 
+        if self._loop_thread is not None and self._loop_thread.is_alive():
+            self._loop_thread.join(timeout=5.0)
+
+        self._loop = None
+        self._loop_thread = None
         logger.info("WebSocket transport closed")
 
     def is_connected(self) -> bool:
-        """Check if transport is connected.
-
-        Returns:
-            True if connected, False otherwise.
-        """
         return self._connected
 
     def __repr__(self) -> str:
         return (
-            f"WebSocketTransport(mode={self.mode}, host={self.host}, port={self.port}, "
-            f"path={self.path}, connected={self._connected})"
+            f"WebSocketTransport(mode={self.mode}, host={self.host}, "
+            f"port={self.port}, path={self.path}, "
+            f"connected={self._connected})"
         )
