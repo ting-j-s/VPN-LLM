@@ -72,6 +72,9 @@ venv.bak/
 # mypy
 .mypy_cache/
 
+# Claude Code
+.claude/
+
 # API Keys and Credentials
 *.key
 *.pem

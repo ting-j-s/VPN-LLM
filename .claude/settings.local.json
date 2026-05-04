@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3 -m pytest tests/test_frame.py -v --tb=short)",
-      "Bash(python3 -m pytest tests/ -v --tb=short)"
-    ]
-  }
-}
