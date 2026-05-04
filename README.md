@@ -592,6 +592,28 @@ print(nat.generate_rules('tun0', '10.8.0.0/24'))
 
 ---
 
+## 13. Current Status / 当前状态
+
+- **Test baseline**: 143 passed, 6 skipped, 0 failed
+- **Current stable branch**: `test-2`
+- **Current stable commit**: `fda32246307fe2deb4f9a5292b405010d2c7d03e`
+
+### Transport Status
+
+| Transport | Status |
+|---|---|
+| TCP | Implemented and tested |
+| TLS | Implemented, timeout semantics aligned with TCP |
+| WebSocket | Implemented with dedicated background asyncio event loop and localhost client/server tests |
+| SSH | Client-side implementation available, server-side integration still needs further work |
+
+### Documentation
+
+- [docs/stage_status.md](docs/stage_status.md) — 阶段成果状态报告
+- [docs/test_report.md](docs/test_report.md) — 测试报告
+
+---
+
 ## 参考资料
 
 - [OpenVPN 协议分析](https://openvpn.net/)
