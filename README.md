@@ -665,6 +665,26 @@ print(nat.generate_rules('tun0', '10.8.0.0/24'))
 
 ---
 
+## 14. Phase 10: Replacement Smoke Validation
+
+项目支持通过 LLM Agent 辅助修改外层协议（Transport）和 VPN 内核（Core）。
+修改后可以用 **smoke replacement matrix** 做最小可运行性验证：
+
+```bash
+# Run smoke matrix for stable transports
+python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,websocket --cores default
+
+# Full matrix with TLS
+python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,tls,websocket --cores default --json
+```
+
+输出一个 Transport × Core 矩阵，标记每个组合的 pass/fail/skip 状态。
+这为"LLM 驱动的外层协议替换 / Core 替换"提供了统一的验证入口。
+
+详细说明见 [docs/phase10_replacement_smoke_matrix.md](docs/phase10_replacement_smoke_matrix.md)。
+
+---
+
 ## 参考资料
 
 - [OpenVPN 协议分析](https://openvpn.net/)
