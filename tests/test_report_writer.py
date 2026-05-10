@@ -445,3 +445,97 @@ class TestReportWriterApplySection:
             },
         )
         assert "All validation checks passed" in report
+
+
+class TestReportWriterCommitAdviceSection:
+    """Test that Commit Advice section appears when commit_message is provided."""
+
+    def test_no_commit_advice_when_not_provided(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Compile Check": _make_result(0, "", ""),
+                "Full Test Suite": _make_result(0, "", ""),
+            },
+        )
+        assert "Commit Advice" not in report
+
+    def test_no_commit_advice_when_apply_failed(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            apply_result=_make_result(1, "", "apply failed"),
+            post_apply_validation={},
+            commit_message=None,
+            commit_changed_files=None,
+        )
+        assert "Commit Advice" not in report
+
+    def test_commit_advice_section_when_provided(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Compile Check": _make_result(0, "", ""),
+                "Full Test Suite": _make_result(0, "", ""),
+            },
+            commit_message="feat(websocket): switch transport",
+            commit_changed_files=["config/server.yaml", "src/transport/websocket_transport.py"],
+        )
+        assert "Commit Advice" in report
+        assert "Commit was suggested but NOT created" in report
+        assert "Push was NOT performed" in report
+        assert "feat(websocket): switch transport" in report
+        assert "config/server.yaml" in report
+
+    def test_commit_advice_without_changed_files(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Full Test Suite": _make_result(0, "", ""),
+            },
+            commit_message="docs: update readme",
+            commit_changed_files=None,
+        )
+        assert "Commit Advice" in report
+        assert "docs: update readme" in report
+
+    def test_commit_advice_shows_manual_review_guidance(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Full Test Suite": _make_result(0, "", ""),
+            },
+            commit_message="feat: test",
+            commit_changed_files=["a.py"],
+        )
+        assert "Review the changes manually" in report
+        assert "do not push automatically" in report.lower()
+
+    def test_commit_advice_does_not_contain_api_key(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Full Test Suite": _make_result(0, "", ""),
+            },
+            commit_message="feat: test",
+            commit_changed_files=["a.py"],
+        )
+        assert "API_KEY" not in report
+        assert "sk-" not in report.lower()
+        assert "password" not in report.lower()

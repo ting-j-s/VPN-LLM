@@ -135,6 +135,66 @@ class TaskRecordManager:
                 }
         self._write_file(task_id, "post_apply_validation.json", json.dumps(serialized, indent=2, ensure_ascii=False))
 
+    def save_commit_advice(self, task_id: str, advice: dict) -> None:
+        """Write commit advice files to the task directory.
+
+        Args:
+            task_id: The task identifier.
+            advice: dict with keys: message, changed_files, diff_stat, validation_passed.
+        """
+        msg = advice.get("message", "")
+        self._write_file(task_id, "suggested_commit_message.txt", msg + "\n")
+        summary = self._build_commit_summary(advice)
+        self._write_file(task_id, "commit_summary.md", summary)
+
+    @staticmethod
+    def _build_commit_summary(advice: dict) -> str:
+        """Build commit_summary.md content from advice dict."""
+        message = advice.get("message", "")
+        changed_files = advice.get("changed_files", [])
+        diff_stat = advice.get("diff_stat", "")
+        validation_passed = advice.get("validation_passed", False)
+
+        lines = [
+            "# Commit Summary",
+            "",
+            "## Suggested Commit Message",
+            "",
+            "```",
+            message,
+            "```",
+            "",
+            "## Changed Files",
+            "",
+        ]
+        if changed_files:
+            for fp in changed_files:
+                lines.append(f"- `{fp}`")
+        else:
+            lines.append("- _(no changes detected)_")
+
+        lines.append("")
+        lines.append("## Diff Stat")
+        lines.append("")
+        if diff_stat:
+            lines.append("```")
+            for line in diff_stat.splitlines():
+                lines.append(line)
+            lines.append("```")
+        else:
+            lines.append("_(no diff stat available)_")
+
+        lines.append("")
+        lines.append("## Important Notes")
+        lines.append("")
+        lines.append("- **Commit was suggested but NOT created.**")
+        lines.append("- **Push was NOT performed.**")
+        lines.append("- Review the changes manually before committing.")
+        if not validation_passed:
+            lines.append("- **Validation did not fully pass.** Review failures before committing.")
+
+        return "\n".join(lines) + "\n"
+
     def save_report(self, task_id: str, report: str) -> None:
         """Write report.md."""
         self._write_file(task_id, "report.md", report)

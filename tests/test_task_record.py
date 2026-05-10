@@ -263,3 +263,80 @@ class TestTaskRecordSafety:
         mgr.save_apply_result(task_id, apply_result, post_results)
         post_data = json.load(open(os.path.join(tmp_path, task_id, "post_apply_validation.json")))
         assert post_data["Targeted Tests"] is None
+
+    def test_save_commit_advice_writes_files(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test commit advice")
+        advice = {
+            "message": "feat(websocket): switch transport",
+            "changed_files": ["config/server.yaml", "src/transport/websocket_transport.py"],
+            "diff_stat": " config/server.yaml | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
+            "validation_passed": True,
+        }
+        mgr.save_commit_advice(task_id, advice)
+
+        task_dir = os.path.join(tmp_path, task_id)
+        msg_path = os.path.join(task_dir, "suggested_commit_message.txt")
+        summary_path = os.path.join(task_dir, "commit_summary.md")
+
+        assert os.path.isfile(msg_path)
+        assert os.path.isfile(summary_path)
+
+        msg_content = open(msg_path).read()
+        assert "feat(websocket): switch transport" in msg_content
+
+        summary_content = open(summary_path).read()
+        assert "# Commit Summary" in summary_content
+        assert "Commit was suggested but NOT created" in summary_content
+        assert "Push was NOT performed" in summary_content
+        assert "config/server.yaml" in summary_content
+        assert "websocket_transport.py" in summary_content
+
+    def test_save_commit_advice_validation_failed(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test failed validation")
+        advice = {
+            "message": "[DO NOT COMMIT] fix: bug",
+            "changed_files": ["src/main.py"],
+            "diff_stat": "",
+            "validation_passed": False,
+        }
+        mgr.save_commit_advice(task_id, advice)
+
+        task_dir = os.path.join(tmp_path, task_id)
+        msg_content = open(os.path.join(task_dir, "suggested_commit_message.txt")).read()
+        assert "[DO NOT COMMIT]" in msg_content
+
+        summary_content = open(os.path.join(task_dir, "commit_summary.md")).read()
+        assert "Validation did not fully pass" in summary_content
+
+    def test_save_commit_advice_no_api_key_in_output(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test no secrets")
+        advice = {
+            "message": "feat: test",
+            "changed_files": ["a.py"],
+            "diff_stat": "",
+            "validation_passed": True,
+        }
+        mgr.save_commit_advice(task_id, advice)
+
+        summary_content = open(os.path.join(tmp_path, task_id, "commit_summary.md")).read().lower()
+        assert "api_key" not in summary_content
+        assert "sk-" not in summary_content
+        assert "token" not in summary_content
+        assert "password" not in summary_content
+
+    def test_save_commit_advice_empty_changed_files(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test empty files")
+        advice = {
+            "message": "chore: cleanup",
+            "changed_files": [],
+            "diff_stat": "",
+            "validation_passed": True,
+        }
+        mgr.save_commit_advice(task_id, advice)
+
+        summary_content = open(os.path.join(tmp_path, task_id, "commit_summary.md")).read()
+        assert "no changes detected" in summary_content

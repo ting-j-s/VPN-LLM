@@ -18,6 +18,8 @@ def write_report(
     git_apply_check_result=None,
     apply_result=None,
     post_apply_validation: dict | None = None,
+    commit_message: str | None = None,
+    commit_changed_files: list[str] | None = None,
 ) -> str:
     """Generate a Markdown validation report.
 
@@ -35,6 +37,8 @@ def write_report(
         git_apply_check_result: ValidationResult from git apply --check, or None.
         apply_result: ValidationResult from git apply, or None if not applied.
         post_apply_validation: Dict of label -> ValidationResult for post-apply checks.
+        commit_message: Suggested commit message, or None.
+        commit_changed_files: List of changed file paths from diff summary, or None.
 
     Returns:
         Markdown report string.
@@ -154,6 +158,30 @@ def write_report(
     else:
         lines.append("Some validation checks failed. See failure summary above.")
     lines.append("")
+
+    # Commit advice section (only when commit advice was generated)
+    commit_advice = commit_message is not None
+    if commit_advice:
+        lines.append("## Commit Advice")
+        lines.append("")
+        lines.append("- **Commit was suggested but NOT created.**")
+        lines.append("- **Push was NOT performed.**")
+        if commit_message:
+            lines.append("")
+            lines.append("### Suggested Commit Message")
+            lines.append("")
+            lines.append("```")
+            lines.append(commit_message)
+            lines.append("```")
+        if commit_changed_files:
+            lines.append("")
+            lines.append("### Changed Files")
+            lines.append("")
+            for fp in commit_changed_files:
+                lines.append(f"- `{fp}`")
+        lines.append("")
+        lines.append("> Review the changes manually. Commit when ready. **Do not push automatically.**")
+        lines.append("")
 
     if patch_was_applied:
         if post_apply_all_pass:

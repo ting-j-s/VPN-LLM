@@ -409,6 +409,106 @@ When `--apply-patch` is used, the task directory additionally contains:
 - `apply_result.json` — git apply result
 - `post_apply_validation.json` — post-apply validation results
 
+## Phase 9.10: Commit Advice Generation
+
+### Overview
+
+After a successful patch application and post-apply validation, the system can
+generate a commit message suggestion and change summary. **The commit is NEVER
+created automatically.** The human remains the final authority on all
+version-control actions.
+
+### Key Design Decisions
+
+- **Explicit opt-in**: `--suggest-commit` is required. Without it, no commit
+  advice is generated.
+- **Strict pre-condition gating**: Commit advice is only generated when ALL of
+  these are true:
+  1. `--suggest-commit` is passed
+  2. `--apply-patch` is passed (enforced by CLI)
+  3. Patch application succeeded (`git apply` returncode == 0)
+  4. All post-apply validation checks passed
+- **Rule-based message generation**: The first version uses a simple rule-based
+  approach (no real LLM call) to generate the commit message. This ensures
+  deterministic, predictable output.
+- **No auto-commit, no auto-push**: The system writes `suggested_commit_message.txt`
+  and `commit_summary.md` to the task directory. All committing and pushing is
+  manual.
+- **Validation failure blocks advice**: If any post-apply check fails, the
+  suggested commit message is prefixed with `[DO NOT COMMIT]`.
+
+### Commit Message Format
+
+The commit message follows the Conventional Commits format:
+
+| Task Type | Prefix | Example |
+|-----------|--------|---------|
+| `transport_change` | `feat(transport)` | `feat(websocket): switch default transport` |
+| `config_change` | `config` | `config: update server port` |
+| `test_addition` | `test` | `test: add websocket transport tests` |
+| `docs_update` | `docs` | `docs: update transport documentation` |
+| `bugfix` | `fix` | `fix: correct websocket frame handling` |
+| `refactor` | `refactor` | `refactor: extract transport base class` |
+| `unknown` | `chore` | `chore: apply changes` |
+
+The scope `(transport)` is included when `target_transport` is set. The subject
+line is taken from the task plan description (truncated to 72 chars).
+
+### Module: `src/llm/commit_advisor.py`
+
+- `CommitAdvisor` — read-only class, never modifies the repository
+- `collect_diff_summary()` → dict — runs `git diff --stat` and `git diff --name-only`
+- `suggest_commit_message(task_plan, changed_files, validation_passed)` → str
+- `write_commit_advice(task_dir, advice)` — writes `suggested_commit_message.txt`
+  and `commit_summary.md`
+
+### Module: `src/llm/task_record.py`
+
+New method:
+- `save_commit_advice(task_id, advice)` — persists commit advice files
+
+### Module: `src/llm/report_writer.py`
+
+Extended `write_report()` parameters:
+- `commit_message` — suggested commit message, or None
+- `commit_changed_files` — list of changed file paths, or None
+
+A **Commit Advice** section appears in the report when commit advice was
+generated, containing:
+- "Commit was suggested but NOT created" notice
+- "Push was NOT performed" notice
+- Suggested commit message in a code block
+- Changed file list
+- Manual review guidance
+
+### CLI Usage
+
+```bash
+# Default: no commit advice (even with apply)
+python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch --apply-patch
+
+# Generate commit advice after successful apply
+python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch --apply-patch --suggest-commit
+
+# Error: --suggest-commit requires --apply-patch
+python3 scripts/llm_task.py --request "switch to websocket" --suggest-commit
+# Error: --suggest-commit requires --apply-patch
+```
+
+### Artifacts
+
+When `--suggest-commit` is used and all conditions are met, the task directory
+additionally contains:
+- `suggested_commit_message.txt` — one-line conventional commit message
+- `commit_summary.md` — markdown summary with changed files, diff stat, and guidance
+
+### Safety
+
+- The `CommitAdvisor` class never runs `git add`, `git commit`, or `git push`
+- All git commands are read-only: `git diff --stat` and `git diff --name-only`
+- Commit advice files are written to the task directory (under `.llm_tasks/`),
+  never to arbitrary paths
+
 ## Future Extensions
 
 - Failure-feedback loop (retry on validation failure, max 3)

@@ -85,6 +85,10 @@ def main():
         "--allow-dirty-worktree", action="store_true",
         help="Allow patch application even if the working tree has uncommitted changes."
     )
+    parser.add_argument(
+        "--suggest-commit", action="store_true",
+        help="Generate commit message suggestion after successful patch apply. Requires --apply-patch. No auto-commit or auto-push."
+    )
     args = parser.parse_args()
 
     if args.generate_patch and not args.use_llm_planner:
@@ -93,6 +97,10 @@ def main():
 
     if args.apply_patch and not args.generate_patch:
         print("Error: --apply-patch requires --generate-patch")
+        sys.exit(1)
+
+    if args.suggest_commit and not args.apply_patch:
+        print("Error: --suggest-commit requires --apply-patch")
         sys.exit(1)
 
     print(f"Request: {args.request}")
@@ -339,6 +347,63 @@ def main():
                 print(">>> Do not commit until failures are fixed. <<<")
             print()
 
+    # 6.6 Commit advice generation (optional, only after successful apply + post-apply validation)
+    commit_message = None
+    commit_changed_files = None
+
+    if args.suggest_commit:
+        from src.llm.commit_advisor import CommitAdvisor
+
+        print()
+        print("=== Commit Advice ===")
+
+        apply_succeeded = apply_result is not None and apply_result.success
+        post_all_pass = apply_succeeded and all(
+            r.success for r in (post_apply_validation or {}).values() if r is not None
+        )
+
+        if not apply_succeeded:
+            print("Commit advice skipped: patch application did not succeed.")
+        elif not post_all_pass:
+            print("Commit advice skipped: post-apply validation did not fully pass.")
+        else:
+            advisor = CommitAdvisor()
+            diff_summary = advisor.collect_diff_summary()
+            commit_changed_files = diff_summary["files"]
+
+            commit_message = advisor.suggest_commit_message(
+                plan, commit_changed_files, validation_passed=True,
+            )
+
+            print(f"Suggested commit message:")
+            print(f"  {commit_message}")
+            if commit_changed_files:
+                print(f"Changed files:")
+                for f in commit_changed_files:
+                    print(f"  {f}")
+
+            task_dir = record_mgr.get_task_dir(task_id)
+            advisor.write_commit_advice(task_dir, {
+                "message": commit_message,
+                "changed_files": commit_changed_files,
+                "diff_stat": diff_summary["diff_stat"],
+                "validation_passed": True,
+            })
+
+            record_mgr.save_commit_advice(task_id, {
+                "message": commit_message,
+                "changed_files": commit_changed_files,
+                "diff_stat": diff_summary["diff_stat"],
+                "validation_passed": True,
+            })
+
+            print(f"Commit advice saved to: {task_dir}/suggested_commit_message.txt")
+            print(f"Commit summary saved to: {task_dir}/commit_summary.md")
+            print()
+            print(">>> Commit was suggested but NOT created. <<<")
+            print(">>> Push was NOT performed. <<<")
+            print()
+
     # 7. Generate report
     report = write_report(
         task_id=task_id,
@@ -354,6 +419,8 @@ def main():
         git_apply_check_result=git_apply_check_result,
         apply_result=apply_result,
         post_apply_validation=post_apply_validation,
+        commit_message=commit_message,
+        commit_changed_files=commit_changed_files,
     )
 
     # 8. Save all artifacts
