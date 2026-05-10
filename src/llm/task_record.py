@@ -135,6 +135,27 @@ class TaskRecordManager:
                 }
         self._write_file(task_id, "post_apply_validation.json", json.dumps(serialized, indent=2, ensure_ascii=False))
 
+    def save_replacement_validation(self, task_id: str, result) -> None:
+        """Serialize a ReplacementValidationResult to replacement_validation.json.
+
+        Args:
+            task_id: The task identifier.
+            result: ReplacementValidationResult instance.
+        """
+        serialized = result.to_dict() if hasattr(result, "to_dict") else {
+            "success": result.success,
+            "returncode": result.returncode,
+            "transports": result.transports,
+            "cores": result.cores,
+            "summary": result.summary,
+            "results": result.results,
+            "error": result.error,
+        }
+        self._write_file(
+            task_id, "replacement_validation.json",
+            json.dumps(serialized, indent=2, ensure_ascii=False),
+        )
+
     def save_commit_advice(self, task_id: str, advice: dict) -> None:
         """Write commit advice files to the task directory.
 

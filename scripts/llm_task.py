@@ -89,6 +89,22 @@ def main():
         "--suggest-commit", action="store_true",
         help="Generate commit message suggestion after successful patch apply. Requires --apply-patch. No auto-commit or auto-push."
     )
+    parser.add_argument(
+        "--run-replacement-smoke", action="store_true",
+        help="Run replacement smoke matrix after successful patch apply. Requires --apply-patch."
+    )
+    parser.add_argument(
+        "--replacement-smoke-timeout", type=int, default=5,
+        help="Timeout for replacement smoke checks (default: 5)."
+    )
+    parser.add_argument(
+        "--include-tls-smoke", action="store_true",
+        help="Always include TLS in replacement smoke matrix."
+    )
+    parser.add_argument(
+        "--include-ssh-smoke", action="store_true",
+        help="Include SSH in replacement smoke matrix (expected skip without sshd)."
+    )
     args = parser.parse_args()
 
     if args.generate_patch and not args.use_llm_planner:
@@ -101,6 +117,10 @@ def main():
 
     if args.suggest_commit and not args.apply_patch:
         print("Error: --suggest-commit requires --apply-patch")
+        sys.exit(1)
+
+    if args.run_replacement_smoke and not args.apply_patch:
+        print("Error: --run-replacement-smoke requires --apply-patch")
         sys.exit(1)
 
     print(f"Request: {args.request}")
@@ -250,6 +270,7 @@ def main():
     # 6.5 Patch application (optional, only after explicit --apply-patch)
     apply_result = None
     post_apply_validation = None
+    replacement_smoke_result = None
 
     if args.apply_patch:
         from src.llm.patch_generator import LLMPatchGeneratorError
@@ -347,6 +368,61 @@ def main():
                 print(">>> Do not commit until failures are fixed. <<<")
             print()
 
+            # 6.5.5 Replacement smoke validation (optional, after apply + post-apply)
+            if args.run_replacement_smoke:
+                from src.llm.replacement_validator import ReplacementValidator
+
+                print("=== Replacement Smoke Validation ===")
+                print()
+
+                validator = ReplacementValidator()
+                apply_ok = apply_result is not None and apply_result.success
+                post_ok = all(
+                    r.success for r in (post_apply_validation or {}).values()
+                    if r is not None
+                )
+
+                if not apply_ok:
+                    print("Replacement smoke skipped: patch application did not succeed.")
+                elif not post_ok:
+                    print("Replacement smoke skipped: post-apply validation did not fully pass.")
+                else:
+                    replacement_smoke_result = validator.validate(
+                        plan,
+                        timeout=args.replacement_smoke_timeout,
+                        include_tls=args.include_tls_smoke,
+                        include_ssh=args.include_ssh_smoke,
+                    )
+
+                    print(f"Transports: {', '.join(replacement_smoke_result.transports)}")
+                    print(f"Cores: {', '.join(replacement_smoke_result.cores)}")
+                    print(f"Return code: {replacement_smoke_result.returncode}")
+
+                    s = replacement_smoke_result.summary
+                    print(f"Summary: {s.get('passed', 0)} passed, "
+                          f"{s.get('failed', 0)} failed, "
+                          f"{s.get('skipped', 0)} skipped")
+
+                    for r in replacement_smoke_result.results:
+                        status = r["status"].upper()
+                        name = f"{r['transport']}/{r['core']}"
+                        err = f" — {r['error']}" if r.get("error") else ""
+                        print(f"  [{status}] {name}{err}")
+
+                    if replacement_smoke_result.success:
+                        print()
+                        print(">>> All replacement smokes passed. <<<")
+                    else:
+                        print()
+                        print(">>> Do not commit until replacement smoke failures are fixed. <<<")
+
+                    # Save to task record
+                    record_mgr.save_replacement_validation(
+                        task_id, replacement_smoke_result,
+                    )
+
+                    print()
+
     # 6.6 Commit advice generation (optional, only after successful apply + post-apply validation)
     commit_message = None
     commit_changed_files = None
@@ -421,6 +497,7 @@ def main():
         post_apply_validation=post_apply_validation,
         commit_message=commit_message,
         commit_changed_files=commit_changed_files,
+        replacement_smoke_result=replacement_smoke_result,
     )
 
     # 8. Save all artifacts

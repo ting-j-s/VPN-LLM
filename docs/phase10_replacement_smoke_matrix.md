@@ -155,19 +155,56 @@ ssh/default        SKIP     (requires external SSH server)
 
 ## Integration with LLM Agent
 
-The smoke matrix is designed to be called by the LLM Agent validation pipeline:
+The smoke matrix is integrated into the LLM Agent post-apply validation pipeline
+via `ReplacementValidator` (`src/llm/replacement_validator.py`).
+
+### Explicit invocation
+
+The replacement smoke runs **only** when explicitly requested:
+
+```bash
+python3 scripts/llm_task.py \
+    --request "switch transport to websocket" \
+    --use-llm-planner \
+    --generate-patch --apply-patch \
+    --run-replacement-smoke
+```
+
+Without `--run-replacement-smoke`, the matrix is not executed — it is opt-in.
+
+### Transport selection rules
+
+`ReplacementValidator` automatically selects transports based on the task plan:
+
+| Task condition | Transports selected |
+|---|---|
+| `target_transport` = websocket | mock, websocket |
+| `target_transport` = tcp | mock, tcp |
+| `target_transport` = tls | mock, tls |
+| `target_transport` = ssh | mock, ssh |
+| `task_type` = core_change | mock, tcp, tls, websocket |
+| `task_type` = refactor | mock, tcp, tls, websocket |
+| `task_type` = bugfix | mock, tcp, tls, websocket |
+| `task_type` = unknown | mock, tcp, tls, websocket |
+| All other types | mock, tcp, websocket (default) |
+
+Use `--include-tls-smoke` or `--include-ssh-smoke` to force TLS/SSH regardless
+of the task plan.
+
+### Agent workflow
 
 1. Agent proposes a Transport or Core patch
 2. `git apply --check` passes
 3. Human confirms `--apply-patch`
-4. **Post-apply validation** calls the smoke matrix:
-   ```bash
-   python3 scripts/smoke_replacement_matrix.py --transports <new_transport> --cores <new_core> --json
-   ```
-5. If `summary.failed == 0`, the replacement is minimally runnable
-6. If `summary.failed > 0`, the Agent reports the failure and the human reviews
-
-This fits between the existing post-apply validation and commit advice steps.
+4. Post-apply validation passes
+5. **`--run-replacement-smoke`** triggers `ReplacementValidator`:
+   - Selects transports based on `target_transport` and `task_type`
+   - Runs `smoke_replacement_matrix.py --json`
+   - Parses JSON output
+   - Reports pass/fail/skip per transport
+6. Results are saved to `.llm_tasks/<task_id>/replacement_validation.json`
+7. Results appear in the report under "Replacement Smoke Validation"
+8. If any smoke fails, the report states: "Do not commit until replacement smoke failures are fixed."
 
 ## Future Extensions
 

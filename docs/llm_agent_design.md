@@ -509,6 +509,86 @@ additionally contains:
 - Commit advice files are written to the task directory (under `.llm_tasks/`),
   never to arbitrary paths
 
+## Phase 10.1: Replacement Smoke Validation Matrix
+
+See [docs/phase10_replacement_smoke_matrix.md](phase10_replacement_smoke_matrix.md) for full details.
+
+`scripts/smoke_replacement_matrix.py` is a unified smoke matrix that validates
+minimal runnability of Transport × Core combinations. It is designed as the
+first runtime validation gate for LLM-driven Transport or Core replacement.
+
+Supported transports: mock, tcp, tls, websocket, ssh (always skip).
+Supported cores: default (extensible via `CORE_SMOKE_REGISTRY`).
+
+Output is available as text or JSON (`--json`). Exit code 0 = all pass/skip,
+exit code 1 = any fail.
+
+## Phase 10.2: Replacement Smoke Integration with LLM Agent
+
+### Overview
+
+Glues the Phase 10.1 smoke matrix into the LLM Agent post-apply validation
+pipeline. When the human passes `--run-replacement-smoke`, the agent
+automatically:
+
+1. Selects appropriate transports based on `target_transport` and `task_type`
+2. Runs `smoke_replacement_matrix.py --json`
+3. Parses results
+4. Saves `replacement_validation.json` to the task directory
+5. Includes a "Replacement Smoke Validation" section in the report
+6. If any smoke fails, the report states: "Do not commit until replacement smoke failures are fixed."
+
+Explicit opt-in only — never runs by default.
+
+### New Modules
+
+| Module | Purpose |
+|---|---|
+| `src/llm/replacement_validator.py` | `ReplacementValidator` — selects transports, runs smoke matrix, parses JSON |
+| `src/llm/task_planner.py` | Added `core_change` task type with keyword detection |
+| `src/llm/llm_task_planner.py` | Added `core_change` to valid task type whitelist and system prompt |
+| `src/llm/task_record.py` | Added `save_replacement_validation()` |
+| `src/llm/report_writer.py` | Added "Replacement Smoke Validation" report section |
+| `scripts/llm_task.py` | Added `--run-replacement-smoke`, `--include-tls-smoke`, `--include-ssh-smoke` |
+
+### CLI Usage
+
+```bash
+# Transport change + replacement smoke
+python3 scripts/llm_task.py \
+    --request "switch transport to websocket" \
+    --use-llm-planner \
+    --generate-patch --apply-patch \
+    --run-replacement-smoke
+
+# Core change + replacement smoke (runs broad matrix: mock,tcp,tls,websocket)
+python3 scripts/llm_task.py \
+    --request "replace the VPN core session validation strategy" \
+    --use-llm-planner \
+    --generate-patch --apply-patch \
+    --run-replacement-smoke
+```
+
+### Transport Selection Rules
+
+| Condition | Selected Transports |
+|---|---|
+| `target_transport` = websocket | mock, websocket |
+| `target_transport` = tcp | mock, tcp |
+| `target_transport` = tls | mock, tls |
+| `target_transport` = ssh | mock, ssh |
+| `task_type` = core_change / refactor / bugfix / unknown | mock, tcp, tls, websocket |
+| All other types | mock, tcp, websocket |
+
+### Safety
+
+- Never runs without explicit `--run-replacement-smoke`
+- No real SSH connection (SSH always skip unless `--include-ssh-smoke`)
+- No real TUN device (uses MockTunDevice in core smoke)
+- TLS certs are ephemeral (tempfile.mkdtemp, cleaned up immediately)
+- No LLM API call, no config/llm_agent.yaml read
+- Still never auto git add, commit, or push
+
 ## Future Extensions
 
 - Failure-feedback loop (retry on validation failure, max 3)

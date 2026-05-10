@@ -164,6 +164,26 @@ class TestLLMTaskPlannerValid:
             result = planner.plan("test")
             assert result.task_type == task_type
 
+    def test_core_change_is_valid_task_type(self):
+        assert "core_change" in VALID_TASK_TYPES
+
+    def test_core_change_plan_accepted(self, monkeypatch, tmp_path):
+        config = tmp_path / "cfg.yaml"
+        config.write_text(
+            "base_url: http://127.0.0.1:4000/v1\nmodel: test\napi_key_env: LLM_API_KEY\n"
+        )
+        plan_json = json.dumps({
+            **_valid_plan_json(),
+            "task_type": "core_change",
+            "target_transport": None,
+            "candidate_files": ["src/core/client_core.py", "src/core/server_core.py"],
+            "summary": "Replace session validation in Core",
+        })
+        planner = _make_planner(monkeypatch, str(config), response_text=plan_json)
+        result = planner.plan("replace the VPN core session validation strategy")
+        assert result.task_type == "core_change"
+        assert result.target_transport is None
+
     def test_strips_markdown_code_fences(self, monkeypatch, tmp_path):
         config = tmp_path / "cfg.yaml"
         config.write_text(

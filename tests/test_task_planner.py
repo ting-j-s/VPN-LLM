@@ -7,6 +7,9 @@ from src.llm.task_planner import (
     TASK_CONFIG_CHANGE,
     TASK_TEST_ADDITION,
     TASK_DOCS_UPDATE,
+    TASK_CORE_CHANGE,
+    TASK_BUGFIX,
+    TASK_REFACTOR,
     TASK_UNKNOWN,
 )
 
@@ -101,6 +104,57 @@ class TestTaskPlannerOtherTypes:
         plan = TaskPlanner.plan("do something amazing with this project")
         assert plan.task_type == TASK_UNKNOWN
         assert plan.target_transport is None
+
+
+class TestTaskPlannerCoreChange:
+    """Test classification of core change requests."""
+
+    def test_detect_core_change_session_chinese(self):
+        plan = TaskPlanner.plan("替换 VPN Core 的会话校验策略")
+        assert plan.task_type == TASK_CORE_CHANGE
+        assert "src/core/" in plan.affected_areas
+        assert "tests/test_core.py" in plan.affected_areas
+
+    def test_detect_core_change_forwarding_english(self):
+        plan = TaskPlanner.plan("replace the VPN core forwarding strategy")
+        assert plan.task_type == TASK_CORE_CHANGE
+
+    def test_detect_core_change_frame_codec(self):
+        plan = TaskPlanner.plan("修改 Frame 的编码方式")
+        assert plan.task_type == TASK_CORE_CHANGE
+
+    def test_detect_core_change_nat(self):
+        plan = TaskPlanner.plan("update the NAT routing logic in the core")
+        assert plan.task_type == TASK_CORE_CHANGE
+
+    def test_core_change_affected_areas(self):
+        plan = TaskPlanner.plan("替换 Tun 设备的处理逻辑")
+        assert "src/core/" in plan.affected_areas
+        assert "src/common/" in plan.affected_areas
+
+
+class TestTaskPlannerRefactorAndBugfix:
+    """Test classification of refactor and bugfix requests."""
+
+    def test_detect_bugfix(self):
+        plan = TaskPlanner.plan("fix memory leak in transport layer")
+        assert plan.task_type == TASK_BUGFIX
+
+    def test_detect_bugfix_chinese(self):
+        plan = TaskPlanner.plan("修复 transport 中的崩溃 bug")
+        assert plan.task_type == TASK_BUGFIX
+
+    def test_detect_refactor(self):
+        plan = TaskPlanner.plan("refactor the transport factory to use registry pattern")
+        assert plan.task_type == TASK_REFACTOR
+
+    def test_detect_refactor_chinese(self):
+        plan = TaskPlanner.plan("重构 transport factory 模块")
+        assert plan.task_type == TASK_REFACTOR
+
+    def test_detect_refactor_pure(self):
+        plan = TaskPlanner.plan("rewrite the utility helpers with cleaner code")
+        assert plan.task_type == TASK_REFACTOR
 
 
 class TestTaskPlannerEdgeCases:

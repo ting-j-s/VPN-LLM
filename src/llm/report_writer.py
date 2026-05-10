@@ -20,6 +20,7 @@ def write_report(
     post_apply_validation: dict | None = None,
     commit_message: str | None = None,
     commit_changed_files: list[str] | None = None,
+    replacement_smoke_result=None,
 ) -> str:
     """Generate a Markdown validation report.
 
@@ -109,6 +110,41 @@ def write_report(
                     lines.append("")
         lines.append("")
 
+    # Replacement Smoke Validation section
+    rs_result = replacement_smoke_result
+    if rs_result is not None:
+        lines.append("## Replacement Smoke Validation")
+        lines.append("")
+        lines.append(f"- **Transports**: {', '.join(rs_result.transports)}")
+        lines.append(f"- **Cores**: {', '.join(rs_result.cores)}")
+        lines.append(f"- **Return Code**: {rs_result.returncode}")
+        s = rs_result.summary
+        if s:
+            lines.append(f"- **Summary**: {s.get('passed', 0)} passed, "
+                         f"{s.get('failed', 0)} failed, "
+                         f"{s.get('skipped', 0)} skipped")
+        if rs_result.error:
+            lines.append(f"- **Error**: {rs_result.error}")
+        lines.append("")
+        if rs_result.results:
+            lines.append("### Per-Transport Results")
+            lines.append("")
+            lines.append("| Transport | Core | Status | Duration | Error |")
+            lines.append("|---|---|---|---|---|")
+            for r in rs_result.results:
+                dur = f"{r.get('duration_sec', 0):.2f}s"
+                err = r.get("error") or ""
+                lines.append(
+                    f"| {r['transport']} | {r['core']} | "
+                    f"{r['status'].upper()} | {dur} | {err} |"
+                )
+            lines.append("")
+        if rs_result.success:
+            lines.append("All replacement smokes passed.")
+        else:
+            lines.append("Some replacement smokes failed. Do not commit until fixed.")
+        lines.append("")
+
     # Failure summary
     all_checks = [
         ("Compile Check", compile_result),
@@ -123,6 +159,11 @@ def write_report(
             for label, result in post_apply_validation.items():
                 if result is not None:
                     all_checks.append((f"Post-Apply {label}", result))
+        if rs_result is not None and not rs_result.success:
+            all_checks.append(("Replacement Smoke", type("_", (), {
+                "success": False, "returncode": rs_result.returncode,
+                "stderr": rs_result.error or "",
+            })()))
     failures = [(label, result) for label, result in all_checks if result is not None and not result.success]
 
     lines.append("## Failure Summary")
@@ -150,6 +191,8 @@ def write_report(
                 if result is not None and not result.success:
                     all_pass = False
                     post_apply_all_pass = False
+    if rs_result is not None and not rs_result.success:
+        all_pass = False
 
     lines.append("## Conclusion")
     lines.append("")

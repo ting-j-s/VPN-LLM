@@ -683,6 +683,10 @@ python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,tls,websocket 
 
 详细说明见 [docs/phase10_replacement_smoke_matrix.md](docs/phase10_replacement_smoke_matrix.md)。
 
+LLM Agent can optionally run replacement smoke validation after human-confirmed
+patch application via `--run-replacement-smoke`. This is the first runtime
+gate for LLM-driven Transport or Core replacement.
+
 ---
 
 ## 参考资料

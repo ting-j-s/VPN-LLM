@@ -148,6 +148,41 @@ class TestTaskRecordManager:
         for fname in ("request.txt", "plan.json", "validation.json", "status.json", "report.md"):
             assert os.path.isfile(os.path.join(task_dir, fname)), f"Missing: {fname}"
 
+    def test_save_replacement_validation_writes_json(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test replacement smoke")
+
+        class FakeRSResult:
+            success = True
+            returncode = 0
+            transports = ["mock", "websocket"]
+            cores = ["default"]
+            summary = {"passed": 2, "failed": 0, "skipped": 0}
+            results = [
+                {"transport": "mock", "core": "default", "status": "pass",
+                 "duration_sec": 0.01, "error": None},
+                {"transport": "websocket", "core": "default", "status": "pass",
+                 "duration_sec": 0.05, "error": None},
+            ]
+            error = None
+
+            def to_dict(self):
+                return {
+                    "success": self.success, "returncode": self.returncode,
+                    "transports": self.transports, "cores": self.cores,
+                    "summary": self.summary, "results": self.results,
+                    "error": self.error,
+                }
+
+        mgr.save_replacement_validation(task_id, FakeRSResult())
+        val_path = os.path.join(tmp_path, task_id, "replacement_validation.json")
+        assert os.path.isfile(val_path)
+        data = json.load(open(val_path))
+        assert data["success"] is True
+        assert "mock" in data["transports"]
+        assert "websocket" in data["transports"]
+        assert data["summary"]["passed"] == 2
+
     def test_unique_task_ids(self, tmp_path):
         mgr = TaskRecordManager(str(tmp_path))
         id1 = mgr.create_task("first")

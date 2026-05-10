@@ -539,3 +539,137 @@ class TestReportWriterCommitAdviceSection:
         assert "API_KEY" not in report
         assert "sk-" not in report.lower()
         assert "password" not in report.lower()
+
+
+# ---------------------------------------------------------------------------
+# Replacement Smoke Validation section
+# ---------------------------------------------------------------------------
+
+def _make_rs_result(success=True, transports=None, cores=None,
+                    summary=None, results=None, error=None):
+    """Build a lightweight ReplacementValidationResult-like object."""
+    return type("_RSR", (), {
+        "success": success,
+        "returncode": 0 if success else 1,
+        "transports": transports or ["mock", "websocket"],
+        "cores": cores or ["default"],
+        "summary": summary or {"passed": 2, "failed": 0, "skipped": 0},
+        "results": results or [
+            {"transport": "mock", "core": "default", "status": "pass",
+             "duration_sec": 0.01, "error": None},
+            {"transport": "websocket", "core": "default", "status": "pass",
+             "duration_sec": 0.05, "error": None},
+        ],
+        "error": error,
+    })()
+
+
+class TestReplacementSmokeSection:
+    """Test Replacement Smoke Validation report section."""
+
+    def test_no_section_when_not_provided(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+        )
+        assert "Replacement Smoke" not in report
+
+    def test_section_when_provided(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            replacement_smoke_result=_make_rs_result(),
+        )
+        assert "Replacement Smoke Validation" in report
+        assert "mock" in report
+        assert "websocket" in report
+
+    def test_shows_transports_and_cores(self):
+        plan = _make_plan()
+        rs = _make_rs_result(transports=["mock", "tcp"], cores=["default"])
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            replacement_smoke_result=rs,
+        )
+        assert "mock" in report
+        assert "tcp" in report
+        assert "default" in report
+
+    def test_shows_summary_counts(self):
+        plan = _make_plan()
+        rs = _make_rs_result(
+            summary={"passed": 3, "failed": 0, "skipped": 1},
+        )
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            replacement_smoke_result=rs,
+        )
+        assert "3 passed" in report
+        assert "0 failed" in report
+        assert "1 skipped" in report
+
+    def test_success_message(self):
+        plan = _make_plan()
+        rs = _make_rs_result(success=True)
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            replacement_smoke_result=rs,
+        )
+        assert "All replacement smokes passed" in report
+
+    def test_failure_message(self):
+        plan = _make_plan()
+        rs = _make_rs_result(
+            success=False,
+            summary={"passed": 1, "failed": 1, "skipped": 0},
+            results=[
+                {"transport": "mock", "core": "default", "status": "pass",
+                 "duration_sec": 0.01, "error": None},
+                {"transport": "tcp", "core": "default", "status": "fail",
+                 "duration_sec": 0.1, "error": "connection refused"},
+            ],
+        )
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            replacement_smoke_result=rs,
+        )
+        assert "Do not commit" in report
+        assert "connection refused" in report
+
+    def test_shows_ssh_skip(self):
+        plan = _make_plan()
+        rs = _make_rs_result(
+            summary={"passed": 1, "failed": 0, "skipped": 1},
+            results=[
+                {"transport": "mock", "core": "default", "status": "pass",
+                 "duration_sec": 0.01, "error": None},
+                {"transport": "ssh", "core": "default", "status": "skip",
+                 "duration_sec": 0.0, "error": "requires external SSH server"},
+            ],
+        )
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            replacement_smoke_result=rs,
+        )
+        assert "SKIP" in report
+        assert "ssh" in report
+
+    def test_shows_error_message(self):
+        plan = _make_plan()
+        rs = _make_rs_result(
+            success=False, error="script not found",
+            summary={}, results=[],
+        )
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            replacement_smoke_result=rs,
+        )
+        assert "script not found" in report

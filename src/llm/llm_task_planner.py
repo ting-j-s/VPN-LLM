@@ -23,6 +23,7 @@ VALID_TASK_TYPES = frozenset({
     "config_change",
     "test_addition",
     "docs_update",
+    "core_change",
     "bugfix",
     "refactor",
     "unknown",
@@ -105,7 +106,7 @@ class LLMTaskPlanner:
         "Analyze the user's natural language request and output a JSON plan.\n\n"
         "Rules:\n"
         "- Output ONLY valid JSON. No markdown, no explanation, no code fences.\n"
-        "- task_type: one of transport_change, config_change, test_addition, docs_update, bugfix, refactor, unknown\n"
+        "- task_type: one of transport_change, config_change, test_addition, docs_update, core_change, bugfix, refactor, unknown\n"
         "- target_transport: one of tcp, tls, ssh, websocket, mock, or null\n"
         "- summary: one-sentence summary of what the user wants\n"
         "- candidate_files: list of file paths that might need changes (empty list if unknown)\n"

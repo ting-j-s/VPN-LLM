@@ -12,6 +12,9 @@ TASK_TRANSPORT_CHANGE = "transport_change"
 TASK_CONFIG_CHANGE = "config_change"
 TASK_TEST_ADDITION = "test_addition"
 TASK_DOCS_UPDATE = "docs_update"
+TASK_CORE_CHANGE = "core_change"
+TASK_BUGFIX = "bugfix"
+TASK_REFACTOR = "refactor"
 TASK_UNKNOWN = "unknown"
 
 TRANSPORT_KEYWORDS = {
@@ -21,6 +24,11 @@ TRANSPORT_KEYWORDS = {
     "ssh": "ssh",
     "mock": "mock",
 }
+
+CORE_KEYWORDS = (
+    "core", "内核", "session", "会话", "forwarding", "转发",
+    "frame", "帧", "codec", "编码", "tun", "nat", "route", "路由",
+)
 
 
 @dataclass
@@ -72,6 +80,9 @@ class TaskPlanner:
         if any(kw in request_lower for kw in TRANSPORT_KEYWORDS):
             return TASK_TRANSPORT_CHANGE
 
+        if any(kw in request_lower for kw in CORE_KEYWORDS):
+            return TASK_CORE_CHANGE
+
         if any(kw in request_lower for kw in ("config", "configuration", "设置", "配置")):
             return TASK_CONFIG_CHANGE
 
@@ -80,6 +91,12 @@ class TaskPlanner:
 
         if any(kw in request_lower for kw in ("doc", "readme", "文档", "documentation")):
             return TASK_DOCS_UPDATE
+
+        if any(kw in request_lower for kw in ("fix", "bug", "修复", "bugfix", "修理")):
+            return TASK_BUGFIX
+
+        if any(kw in request_lower for kw in ("refactor", "重构", "rewrite", "重写")):
+            return TASK_REFACTOR
 
         return TASK_UNKNOWN
 
@@ -101,11 +118,21 @@ class TaskPlanner:
             areas.append("config/")
             if transport:
                 areas.append(f"src/transport/{transport}_transport.py")
+        elif task_type == TASK_CORE_CHANGE:
+            areas.append("src/core/")
+            areas.append("src/common/")
+            areas.append("tests/test_core.py")
         elif task_type == TASK_CONFIG_CHANGE:
             areas.append("config/")
         elif task_type == TASK_TEST_ADDITION:
             areas.append("tests/")
         elif task_type == TASK_DOCS_UPDATE:
             areas.append("docs/")
+        elif task_type == TASK_BUGFIX:
+            areas.append("src/")
+            areas.append("tests/")
+        elif task_type == TASK_REFACTOR:
+            areas.append("src/")
+            areas.append("tests/")
 
         return areas
