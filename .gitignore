@@ -91,3 +91,7 @@ secrets.yaml
 credentials.yaml
 api_key*
 *_key*
+
+# Phase 10 netns/TUN validation artifacts (pcap files in repo)
+*.pcap
+*.pcapng

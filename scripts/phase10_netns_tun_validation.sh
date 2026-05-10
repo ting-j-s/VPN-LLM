@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Phase 10.3: Linux netns + TUN validation for Transport/Core replacement.
+# Phase 10.3/10.4: Linux netns + TUN validation for Transport/Core replacement.
 #
 # Sets up isolated network namespaces with veth pairs and real TUN devices,
 # then starts server/client to verify the replacement is minimally runnable
 # with real IP packets. This is the SECOND validation gate after the local
 # smoke matrix - requiring root/CAP_NET_ADMIN and real kernel TUN support.
 #
+# Default mode (Phase 10.3): environment, TUN creation, process health checks.
+# --e2e-ping mode (Phase 10.4): real IP packet forwarding verification via ping.
+#
 # Usage:
 #   sudo ./scripts/phase10_netns_tun_validation.sh
 #   sudo ./scripts/phase10_netns_tun_validation.sh --transport websocket
-#   sudo ./scripts/phase10_netns_tun_validation.sh --keep --verbose
+#   sudo ./scripts/phase10_netns_tun_validation.sh --keep --verbose --e2e-ping
 #
 # Exit codes:
 #   0 - all checks passed, or skipped due to missing prerequisites
@@ -24,17 +27,28 @@ TRANSPORT="${TRANSPORT:-tcp}"
 TIMEOUT="${TIMEOUT:-15}"
 KEEP=false
 VERBOSE=false
+E2E_PING=false
+PING_COUNT=2
+PING_TIMEOUT=5
+TCPDUMP=false
 
 _usage() {
     cat <<'EOF'
 Usage: phase10_netns_tun_validation.sh [OPTIONS]
 
 Options:
-  --transport TYPE   Transport to validate: tcp (default) or websocket
-  --timeout SECONDS  Max wait for server startup (default: 15)
-  --keep             Keep namespaces and TUN devices after validation
-  --verbose          Print detailed status and logs
-  -h, --help         Show this help
+  --transport TYPE    Transport to validate: tcp (default) or websocket
+  --timeout SECONDS   Max wait for server startup (default: 15)
+  --keep              Keep namespaces and TUN devices after validation
+  --verbose           Print detailed status and logs
+  --e2e-ping          Enable end-to-end TUN ping verification (Phase 10.4)
+  --ping-count N      Number of ping packets (default: 2, only with --e2e-ping)
+  --ping-timeout SEC  Ping timeout in seconds (default: 5, only with --e2e-ping)
+  --tcpdump           Enable packet capture for diagnostics (only with --e2e-ping)
+  -h, --help          Show this help
+
+Default mode: environment + TUN + process health check (Phase 10.3)
+--e2e-ping mode: also runs real IP packet ping through the TUN tunnel (Phase 10.4)
 
 Exit codes:
   0  All checks passed, or prerequisites not met (skip)
@@ -52,6 +66,14 @@ while [[ $# -gt 0 ]]; do
             KEEP=true; shift ;;
         --verbose|-v)
             VERBOSE=true; shift ;;
+        --e2e-ping)
+            E2E_PING=true; shift ;;
+        --ping-count)
+            PING_COUNT="$2"; shift 2 ;;
+        --ping-timeout)
+            PING_TIMEOUT="$2"; shift 2 ;;
+        --tcpdump)
+            TCPDUMP=true; shift ;;
         -h|--help)
             _usage; exit 0 ;;
         *)
@@ -66,9 +88,33 @@ if [[ "$TRANSPORT" != "tcp" && "$TRANSPORT" != "websocket" ]]; then
     exit 1
 fi
 
+# Validate ping-count is a positive integer
+if ! [[ "$PING_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: --ping-count must be a positive integer, got '$PING_COUNT'" >&2
+    exit 1
+fi
+
+# Validate ping-timeout is a positive integer
+if ! [[ "$PING_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: --ping-timeout must be a positive integer, got '$PING_TIMEOUT'" >&2
+    exit 1
+fi
+
+# --tcpdump requires --e2e-ping
+if $TCPDUMP && ! $E2E_PING; then
+    echo "ERROR: --tcpdump requires --e2e-ping" >&2
+    exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_PID=""
 CLIENT_PID=""
+SERVER_LOG=""
+CLIENT_LOG=""
+TCPDUMP_SRV_TUN_PID=""
+TCPDUMP_CLI_TUN_PID=""
+TCPDUMP_SRV_VETH_PID=""
+PCAP_DIR=""
 NS_SRV="vpn_srv_validation"
 NS_CLI="vpn_cli_validation"
 
@@ -104,7 +150,6 @@ _preflight() {
 
     # Check root or CAP_NET_ADMIN
     if [[ $EUID -ne 0 ]]; then
-        # Check for CAP_NET_ADMIN on the current process
         if command -v capsh >/dev/null 2>&1; then
             if capsh --print 2>/dev/null | grep -q 'cap_net_admin'; then
                 : # ok
@@ -118,6 +163,18 @@ _preflight() {
         fi
     fi
 
+    # e2e-ping extra checks
+    if $E2E_PING; then
+        command -v ping >/dev/null 2>&1 || missing+=("ping")
+        if $TCPDUMP; then
+            command -v tcpdump >/dev/null 2>&1 || missing+=("tcpdump")
+        fi
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "SKIP: e2e-ping requires: ${missing[*]}"
+            exit 0
+        fi
+    fi
+
     _info "pre-flight checks passed: Linux, ip, python3, /dev/net/tun, privileges"
 }
 
@@ -125,8 +182,31 @@ _preflight() {
 # Cleanup
 # ---------------------------------------------------------------------------
 _cleanup() {
+    # Kill tcpdump processes first
+    if [[ -n "${TCPDUMP_SRV_TUN_PID:-}" ]] && kill -0 "$TCPDUMP_SRV_TUN_PID" 2>/dev/null; then
+        kill "$TCPDUMP_SRV_TUN_PID" 2>/dev/null || true
+        wait "$TCPDUMP_SRV_TUN_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${TCPDUMP_CLI_TUN_PID:-}" ]] && kill -0 "$TCPDUMP_CLI_TUN_PID" 2>/dev/null; then
+        kill "$TCPDUMP_CLI_TUN_PID" 2>/dev/null || true
+        wait "$TCPDUMP_CLI_TUN_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${TCPDUMP_SRV_VETH_PID:-}" ]] && kill -0 "$TCPDUMP_SRV_VETH_PID" 2>/dev/null; then
+        kill "$TCPDUMP_SRV_VETH_PID" 2>/dev/null || true
+        wait "$TCPDUMP_SRV_VETH_PID" 2>/dev/null || true
+    fi
+
     if $KEEP; then
-        _info "--keep: preserving namespaces and TUN devices"
+        _info "--keep: preserving namespaces, TUN devices, logs, and pcaps"
+        if [[ -n "${PCAP_DIR:-}" && -d "$PCAP_DIR" ]]; then
+            _info "pcap files: $PCAP_DIR/"
+        fi
+        if [[ -n "${SERVER_LOG:-}" && -f "$SERVER_LOG" ]]; then
+            _info "server log: $SERVER_LOG"
+        fi
+        if [[ -n "${CLIENT_LOG:-}" && -f "$CLIENT_LOG" ]]; then
+            _info "client log: $CLIENT_LOG"
+        fi
         return
     fi
 
@@ -148,6 +228,9 @@ _cleanup() {
     # Delete namespaces (veth pairs are auto-deleted with namespace)
     ip netns delete "$NS_CLI" 2>/dev/null || true
     ip netns delete "$NS_SRV" 2>/dev/null || true
+
+    # Clean up temp logs
+    rm -f /tmp/vpn_server_validation.*.log /tmp/vpn_client_validation.*.log
 
     _info "cleanup complete"
 }
@@ -208,20 +291,18 @@ _verify_underlay() {
 _start_server() {
     _info "starting VPN server in $NS_SRV (transport=$TRANSPORT)..."
 
-    local server_log
-    server_log="$(mktemp /tmp/vpn_server_validation.XXXXXX.log)"
+    SERVER_LOG="$(mktemp /tmp/vpn_server_validation.XXXXXX.log)"
 
     # Run server in background within namespace.
-    # The netns config uses tcp by default; --transport overrides it.
     ip netns exec "$NS_SRV" \
         env VPN_LLM_LOG_LEVEL="${VPN_LLM_LOG_LEVEL:-INFO}" \
         python3 -m src.server \
             --config config/server_netns.yaml \
             --transport "$TRANSPORT" \
-        >"$server_log" 2>&1 &
+        >"$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
 
-    _verbose "server PID=$SERVER_PID, log=$server_log"
+    _verbose "server PID=$SERVER_PID, log=$SERVER_LOG"
 
     # Wait for server to be ready
     local t0
@@ -241,7 +322,7 @@ _start_server() {
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             _fail "server process died during startup"
             _info "--- server log ---"
-            cat "$server_log"
+            cat "$SERVER_LOG"
             return 1
         fi
 
@@ -255,7 +336,7 @@ _start_server() {
 
         # For WebSocket: check log for "listening" or "running" keywords
         if [[ "$TRANSPORT" == "websocket" ]]; then
-            if grep -qE "(listening|running|Tunnel)" "$server_log" 2>/dev/null; then
+            if grep -qE "(listening|running|Tunnel)" "$SERVER_LOG" 2>/dev/null; then
                 ready=true
                 break
             fi
@@ -265,7 +346,7 @@ _start_server() {
     if ! $ready; then
         _fail "server did not become ready within ${TIMEOUT}s"
         _info "--- server log ---"
-        cat "$server_log"
+        cat "$SERVER_LOG"
         return 1
     fi
 
@@ -279,18 +360,17 @@ _start_server() {
 _start_client() {
     _info "starting VPN client in $NS_CLI (transport=$TRANSPORT)..."
 
-    local client_log
-    client_log="$(mktemp /tmp/vpn_client_validation.XXXXXX.log)"
+    CLIENT_LOG="$(mktemp /tmp/vpn_client_validation.XXXXXX.log)"
 
     ip netns exec "$NS_CLI" \
         env VPN_LLM_LOG_LEVEL="${VPN_LLM_LOG_LEVEL:-INFO}" \
         python3 -m src.client \
             --config config/client_netns.yaml \
             --transport "$TRANSPORT" \
-        >"$client_log" 2>&1 &
+        >"$CLIENT_LOG" 2>&1 &
     CLIENT_PID=$!
 
-    _verbose "client PID=$CLIENT_PID, log=$client_log"
+    _verbose "client PID=$CLIENT_PID, log=$CLIENT_LOG"
 
     # Wait for client to connect
     local t0
@@ -310,12 +390,12 @@ _start_client() {
         if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
             _fail "client process died during startup"
             _info "--- client log ---"
-            cat "$client_log"
+            cat "$CLIENT_LOG"
             return 1
         fi
 
         # Check log for tunnel established
-        if grep -qE "(Tunnel established|tunnel established|running)" "$client_log" 2>/dev/null; then
+        if grep -qE "(Tunnel established|tunnel established|running)" "$CLIENT_LOG" 2>/dev/null; then
             connected=true
             break
         fi
@@ -324,7 +404,7 @@ _start_client() {
     if ! $connected; then
         _fail "client did not connect within ${TIMEOUT}s"
         _info "--- client log ---"
-        cat "$client_log"
+        cat "$CLIENT_LOG"
         return 1
     fi
 
@@ -343,8 +423,6 @@ _verify_tun_devices() {
         _fail "server TUN device (tun0) not found in $NS_SRV"
         return 1
     fi
-    local srv_up
-    srv_up=$(ip netns exec "$NS_SRV" ip link show tun0 | grep -c "UP" || true)
     _pass "server TUN device: tun0 present in $NS_SRV"
 
     # Client TUN (tun1)
@@ -363,13 +441,23 @@ _verify_tun_devices() {
 _configure_tun_ips() {
     _info "configuring TUN IP addresses..."
 
-    ip netns exec "$NS_SRV" ip addr add 10.8.0.1/24 dev tun0 2>/dev/null || true
+    # Use point-to-point configuration for better routing semantics.
+    # peer /32 avoids the kernel creating a subnet route that can cause
+    # local delivery of packets instead of routing through the TUN fd.
+    ip netns exec "$NS_SRV" ip addr add 10.8.0.1 peer 10.8.0.2/32 dev tun0 2>/dev/null || true
     ip netns exec "$NS_SRV" ip link set tun0 up 2>/dev/null || true
 
-    ip netns exec "$NS_CLI" ip addr add 10.8.0.2/24 dev tun1 2>/dev/null || true
+    ip netns exec "$NS_CLI" ip addr add 10.8.0.2 peer 10.8.0.1/32 dev tun1 2>/dev/null || true
     ip netns exec "$NS_CLI" ip link set tun1 up 2>/dev/null || true
 
-    _pass "TUN IPs configured: tun0=10.8.0.1/24, tun1=10.8.0.2/24"
+    _pass "TUN IPs configured: tun0=10.8.0.1 peer 10.8.0.2, tun1=10.8.0.2 peer 10.8.0.1"
+
+    if $E2E_PING; then
+        # Add explicit routes to ensure packets go through TUN devices
+        ip netns exec "$NS_SRV" ip route add 10.8.0.2 dev tun0 2>/dev/null || true
+        ip netns exec "$NS_CLI" ip route add 10.8.0.1 dev tun1 2>/dev/null || true
+        _verbose "explicit TUN routes added"
+    fi
 
     if $VERBOSE; then
         _verbose "server routes:"
@@ -380,13 +468,231 @@ _configure_tun_ips() {
 }
 
 # ---------------------------------------------------------------------------
+# Start packet capture for diagnostics (--tcpdump)
+# ---------------------------------------------------------------------------
+_start_tcpdump() {
+    if ! $TCPDUMP; then
+        return 0
+    fi
+
+    PCAP_DIR="$(mktemp -d /tmp/vpn_validation_pcap.XXXXXX)"
+    _info "starting tcpdump captures in $PCAP_DIR..."
+
+    # Capture on server TUN (tun0) — ICMP packets
+    ip netns exec "$NS_SRV" \
+        tcpdump -i tun0 -n -w "$PCAP_DIR/server_tun0.pcap" \
+        >/dev/null 2>&1 &
+    TCPDUMP_SRV_TUN_PID=$!
+    _verbose "tcpdump server tun0 PID=$TCPDUMP_SRV_TUN_PID"
+
+    # Capture on client TUN (tun1) — ICMP packets
+    ip netns exec "$NS_CLI" \
+        tcpdump -i tun1 -n -w "$PCAP_DIR/client_tun1.pcap" \
+        >/dev/null 2>&1 &
+    TCPDUMP_CLI_TUN_PID=$!
+    _verbose "tcpdump client tun1 PID=$TCPDUMP_CLI_TUN_PID"
+
+    # Capture on server veth (underlay tunnel traffic)
+    ip netns exec "$NS_SRV" \
+        tcpdump -i veth_srv -n -w "$PCAP_DIR/server_veth_srv.pcap" \
+        >/dev/null 2>&1 &
+    TCPDUMP_SRV_VETH_PID=$!
+    _verbose "tcpdump server veth_srv PID=$TCPDUMP_SRV_VETH_PID"
+
+    # Give tcpdump processes time to start
+    sleep 0.5
+    _pass "tcpdump captures started"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Diagnostics output on e2e ping failure
+# ---------------------------------------------------------------------------
+_diagnostics() {
+    local reason="${1:-unknown}"
+
+    echo ""
+    echo "============================================================"
+    echo "  E2E Ping Diagnostics"
+    echo "============================================================"
+    echo "Failure reason: $reason"
+    echo ""
+
+    echo "--- Network Namespaces ---"
+    ip netns list 2>/dev/null || echo "(none)"
+
+    echo ""
+    echo "--- Server Namespace ($NS_SRV): ip addr ---"
+    ip netns exec "$NS_SRV" ip addr show 2>/dev/null || echo "(namespace not found)"
+
+    echo ""
+    echo "--- Client Namespace ($NS_CLI): ip addr ---"
+    ip netns exec "$NS_CLI" ip addr show 2>/dev/null || echo "(namespace not found)"
+
+    echo ""
+    echo "--- Server Namespace ($NS_SRV): ip route ---"
+    ip netns exec "$NS_SRV" ip route show 2>/dev/null || echo "(namespace not found)"
+
+    echo ""
+    echo "--- Client Namespace ($NS_CLI): ip route ---"
+    ip netns exec "$NS_CLI" ip route show 2>/dev/null || echo "(namespace not found)"
+
+    echo ""
+    echo "--- Process Status ---"
+    if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "Server PID $SERVER_PID: running"
+    else
+        echo "Server PID ${SERVER_PID:-N/A}: not running"
+    fi
+    if [[ -n "${CLIENT_PID:-}" ]] && kill -0 "$CLIENT_PID" 2>/dev/null; then
+        echo "Client PID $CLIENT_PID: running"
+    else
+        echo "Client PID ${CLIENT_PID:-N/A}: not running"
+    fi
+
+    echo ""
+    echo "--- Server Log (last 20 lines) ---"
+    if [[ -n "${SERVER_LOG:-}" && -f "$SERVER_LOG" ]]; then
+        tail -20 "$SERVER_LOG" 2>/dev/null || echo "(empty)"
+    else
+        echo "(no server log)"
+    fi
+
+    echo ""
+    echo "--- Client Log (last 20 lines) ---"
+    if [[ -n "${CLIENT_LOG:-}" && -f "$CLIENT_LOG" ]]; then
+        tail -20 "$CLIENT_LOG" 2>/dev/null || echo "(empty)"
+    else
+        echo "(no client log)"
+    fi
+
+    if $TCPDUMP && [[ -n "${PCAP_DIR:-}" && -d "$PCAP_DIR" ]]; then
+        echo ""
+        echo "--- tcpdump captures ---"
+        echo "  Server TUN (tun0):       $PCAP_DIR/server_tun0.pcap"
+        echo "  Client TUN (tun1):       $PCAP_DIR/client_tun1.pcap"
+        echo "  Server veth (underlay):  $PCAP_DIR/server_veth_srv.pcap"
+        echo ""
+        echo "  Inspect with:"
+        echo "    tcpdump -r $PCAP_DIR/server_tun0.pcap -n"
+        echo "    tcpdump -r $PCAP_DIR/server_veth_srv.pcap -n"
+        echo "    tcpdump -r $PCAP_DIR/client_tun1.pcap -n"
+    fi
+
+    echo ""
+    echo "--- Common Causes for E2E Ping Failure ---"
+    echo ""
+    echo "1. Session ID mismatch (KNOWN LIMITATION):"
+    echo "   src/server.py and src/client.py each auto-generate independent"
+    echo "   session_id values. Both ServerCore and ClientCore drop frames"
+    echo "   with mismatched session IDs. The test suite works because it"
+    echo "   passes a shared session_id to both cores."
+    echo ""
+    echo "   To verify: grep for 'Dropping frame' in server/client logs."
+    echo ""
+    echo "2. TUN routing / local delivery:"
+    echo "   The kernel may route TUN-subnet packets locally rather than"
+    echo "   through the TUN fd. Use 'ip route get <dst>' in the namespace"
+    echo "   to check where the packet goes."
+    echo ""
+    echo "3. Transport-level issue:"
+    echo "   If the TCP/WebSocket tunnel is not established, underlay ping"
+    echo "   would have failed earlier. Check veth connectivity first."
+    echo ""
+    echo "4. TUN fd not reading/writing:"
+    echo "   Enable DEBUG logging (VPN_LLM_LOG_LEVEL=DEBUG) and look for"
+    echo "   'TUN->Transport READ' and 'Transport->TUN WROTE' messages."
+    echo ""
+    echo "Recommended next steps:"
+    echo "  - Re-run with --keep --verbose and inspect logs manually"
+    echo "  - Re-run with --tcpdump to capture packet traces"
+    echo "  - See docs/phase10_netns_tun_validation.md for details"
+    echo "  - See docs/phase3_netns_validation.md for deep troubleshooting"
+    echo "============================================================"
+}
+
+# ---------------------------------------------------------------------------
+# End-to-end TUN ping validation (Phase 10.4)
+# ---------------------------------------------------------------------------
+_e2e_ping_validation() {
+    echo ""
+    echo "--- Phase 10.4: E2E TUN Ping Validation ---"
+    echo "Ping count:   $PING_COUNT"
+    echo "Ping timeout: ${PING_TIMEOUT}s"
+    echo ""
+
+    # Start tcpdump if requested
+    _start_tcpdump || true
+
+    local ping_ok=true
+    local failures=""
+
+    # --- Client -> Server ping ---
+    _info "ping: client TUN (10.8.0.2) -> server TUN (10.8.0.1) ..."
+    if ip netns exec "$NS_CLI" ping -c "$PING_COUNT" -W "$PING_TIMEOUT" -I tun1 10.8.0.1; then
+        _pass "client -> server ping OK"
+    else
+        ping_ok=false
+        _fail "client -> server ping FAILED"
+        failures="$failures  - client -> server: no reply\n"
+    fi
+
+    # --- Server -> Client ping ---
+    _info "ping: server TUN (10.8.0.1) -> client TUN (10.8.0.2) ..."
+    if ip netns exec "$NS_SRV" ping -c "$PING_COUNT" -W "$PING_TIMEOUT" -I tun0 10.8.0.2; then
+        _pass "server -> client ping OK"
+    else
+        ping_ok=false
+        _fail "server -> client ping FAILED"
+        failures="$failures  - server -> client: no reply\n"
+    fi
+
+    if $ping_ok; then
+        echo ""
+        _pass "E2E TUN ping validation: ALL PASSED"
+        echo ""
+        echo "Both directions of IP packet forwarding through the TUN tunnel work."
+        return 0
+    else
+        echo ""
+        _fail "E2E TUN ping validation: FAILED"
+        echo ""
+        echo "Failure summary:"
+        echo -n "$failures"
+        echo ""
+        echo "Note: E2E ping failure does NOT necessarily mean the Transport/Core"
+        echo "replacement is broken. Common causes include TUN routing, session ID"
+        echo "mismatch (known limitation), or kernel local delivery. See diagnostics below."
+        echo ""
+
+        # Check for session ID mismatch in logs
+        if [[ -n "${SERVER_LOG:-}" && -f "$SERVER_LOG" ]]; then
+            if grep -q "Dropping frame" "$SERVER_LOG" 2>/dev/null; then
+                _warn "Detected 'Dropping frame' in server log — this indicates"
+                _warn "session ID mismatch: server and client generate independent session IDs."
+                _warn "This is a known limitation of the current src/server.py and src/client.py entry points."
+            fi
+        fi
+
+        _diagnostics "ping did not receive replies"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-echo "=== Phase 10.3: netns + TUN Validation ==="
-echo "Transport:  $TRANSPORT"
-echo "Timeout:    ${TIMEOUT}s"
-echo "Keep:       $KEEP"
+echo "=== Phase 10.3/10.4: netns + TUN Validation ==="
+echo "Transport:   $TRANSPORT"
+echo "Timeout:     ${TIMEOUT}s"
+echo "Keep:        $KEEP"
+echo "E2E Ping:    $E2E_PING"
+if $E2E_PING; then
+    echo "Ping count:  $PING_COUNT"
+    echo "Ping timeout: ${PING_TIMEOUT}s"
+    echo "Tcpdump:     $TCPDUMP"
+fi
 echo ""
 
 _preflight
@@ -402,22 +708,33 @@ _start_client || exit 1
 _verify_tun_devices || exit 1
 _configure_tun_ips || exit 1
 
+if $E2E_PING; then
+    _e2e_ping_validation || exit 1
+fi
+
 echo ""
 echo "=== netns + TUN validation complete ==="
 echo ""
 echo "Namespaces: $NS_SRV, $NS_CLI"
 echo "TUN devices: tun0=$NS_SRV, tun1=$NS_CLI"
 echo ""
-echo "Server and client are running. To verify real IP packet flow manually:"
-echo ""
-echo "  # Terminal 1: tcpdump on server TUN"
-echo "  sudo ip netns exec $NS_SRV tcpdump -i tun0 -n icmp"
-echo ""
-echo "  # Terminal 2: tcpdump on client TUN"
-echo "  sudo ip netns exec $NS_CLI tcpdump -i tun1 -n icmp"
-echo ""
-echo "  # Terminal 3: ping through the tunnel"
-echo "  sudo ip netns exec $NS_CLI ping -I tun1 10.8.0.1"
+if $E2E_PING; then
+    echo "E2E ping validation: completed"
+else
+    echo "Server and client are running. To verify real IP packet flow manually:"
+    echo ""
+    echo "  # Terminal 1: tcpdump on server TUN"
+    echo "  sudo ip netns exec $NS_SRV tcpdump -i tun0 -n icmp"
+    echo ""
+    echo "  # Terminal 2: tcpdump on client TUN"
+    echo "  sudo ip netns exec $NS_CLI tcpdump -i tun1 -n icmp"
+    echo ""
+    echo "  # Terminal 3: ping through the tunnel"
+    echo "  sudo ip netns exec $NS_CLI ping -I tun1 10.8.0.1"
+    echo ""
+    echo "  Or use --e2e-ping for automated verification:"
+    echo "  sudo bash scripts/phase10_netns_tun_validation.sh --transport $TRANSPORT --e2e-ping"
+fi
 echo ""
 echo "For detailed troubleshooting, see docs/phase10_netns_tun_validation.md"
 echo "and docs/phase3_netns_validation.md"

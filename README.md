@@ -690,7 +690,9 @@ gate for LLM-driven Transport or Core replacement.
 ### netns + TUN Validation (Gate 2)
 
 After the local smoke matrix (Gate 1) passes, use Linux network namespaces and
-real TUN devices for the second validation gate:
+real TUN devices for the second validation gate. The script has two modes:
+
+**Default mode** (Phase 10.3) — environment, TUN, underlay, and process health:
 
 ```bash
 # Requires root or CAP_NET_ADMIN — skips gracefully otherwise
@@ -703,6 +705,24 @@ sudo scripts/phase10_netns_tun_validation.sh --transport websocket
 sudo scripts/phase10_netns_tun_validation.sh --keep --verbose
 ```
 
+**E2E ping mode** (Phase 10.4) — real IP packet forwarding through the TUN tunnel:
+
+```bash
+# Automated ping through the tunnel (bidirectional)
+sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping
+
+# With packet capture for diagnostics
+sudo scripts/phase10_netns_tun_validation.sh --transport websocket --e2e-ping --verbose --tcpdump
+
+# Custom ping parameters
+sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping --ping-count 5 --ping-timeout 3
+```
+
+> **Known limitation**: The current `src/server.py` and `src/client.py` entry points
+> each auto-generate independent session IDs. E2E ping will fail due to session ID
+> mismatch until a shared session ID mechanism is added. See the diagnostics output
+> and [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md) for details.
+
 This sets up isolated namespaces (`vpn_srv_validation`, `vpn_cli_validation`),
 veth pairs, and real TUN devices, then starts server/client to verify the
 replacement is minimally runnable with real IP packets.
@@ -714,7 +734,8 @@ replacement is minimally runnable with real IP packets.
 | Gate | Script | Requires | Automated |
 |---|---|---|---|
 | 1 — Smoke matrix | `smoke_replacement_matrix.py` | Python deps | Yes (CI) |
-| 2 — netns + TUN | `phase10_netns_tun_validation.sh` | root, Linux, /dev/net/tun | Semi |
+| 2a — netns + TUN | `phase10_netns_tun_validation.sh` | root, Linux, /dev/net/tun | Semi |
+| 2b — e2e ping | `phase10_netns_tun_validation.sh --e2e-ping` | root, Linux, /dev/net/tun | Semi |
 | 3 — Multi-machine | Lab setup | Physical/virtual hosts | Manual |
 
 ---

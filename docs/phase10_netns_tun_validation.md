@@ -1,4 +1,4 @@
-# Phase 10.3: netns + TUN Validation for Transport/Core Replacement
+# Phase 10.3/10.4: netns + TUN Validation for Transport/Core Replacement
 
 ## Goal
 
@@ -14,6 +14,13 @@ replacement. It is the **second validation gate** in the LLM Agent replacement p
 Gate 1 answers: "Does the replacement survive basic send/recv?"  
 Gate 2 answers: "Does the replacement work with real kernel TUN devices and IP packets?"  
 Gate 3 answers: "Does the replacement work under real network conditions?"
+
+Gate 2 has two modes:
+
+| Mode | Flag | What it validates |
+|---|---|---|
+| **Default** (Phase 10.3) | _(none)_ | Environment, TUN creation, underlay connectivity, process health |
+| **E2E Ping** (Phase 10.4) | `--e2e-ping` | Real IP packet forwarding through the TUN tunnel via ping |
 
 ## When to run Gate 2
 
@@ -109,6 +116,10 @@ sudo ip netns delete vpn_srv_validation
 | `--timeout SECONDS` | `15` | Max wait for server/client startup |
 | `--keep` | false | Preserve namespaces after validation |
 | `--verbose` | false | Print detailed status and route tables |
+| `--e2e-ping` | false | Enable end-to-end TUN ping verification (Phase 10.4) |
+| `--ping-count N` | `2` | Number of ping packets (only with `--e2e-ping`) |
+| `--ping-timeout SEC` | `5` | Ping timeout in seconds (only with `--e2e-ping`) |
+| `--tcpdump` | false | Enable packet capture for diagnostics (only with `--e2e-ping`) |
 | `-h`, `--help` | — | Show help |
 
 ## What the script validates
@@ -203,6 +214,143 @@ knowledge and adds:
 
 For deep troubleshooting of TUN/ping issues, always refer to Phase 3 documentation.
 
+## E2E Ping Mode (Phase 10.4)
+
+### Enabling e2e ping
+
+```bash
+# Basic e2e ping with TCP
+sudo ./scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping
+
+# With verbose output and packet capture
+sudo ./scripts/phase10_netns_tun_validation.sh --transport websocket --e2e-ping --verbose --tcpdump
+
+# Custom ping parameters
+sudo ./scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping --ping-count 5 --ping-timeout 3
+```
+
+### What e2e ping validates
+
+The `--e2e-ping` mode adds the following checks after the default mode:
+
+1. **Explicit TUN routing**: Configures point-to-point TUN IPs (`peer /32` notation) and
+   adds explicit routes (`ip route add 10.8.0.x dev tunX`).
+2. **Client → Server ping**: `ping -I tun1 -c $PING_COUNT -W $PING_TIMEOUT 10.8.0.1`
+3. **Server → Client ping**: `ping -I tun0 -c $PING_COUNT -W $PING_TIMEOUT 10.8.0.2`
+
+### What ping success means
+
+If ping succeeds:
+- The Transport tunnel is carrying real IP packets
+- ClientCore correctly reads ICMP from tun1 and sends DATA frames
+- ServerCore correctly receives DATA frames and writes ICMP to tun0
+- The kernel routes the ICMP reply back through tun0 → ServerCore → Transport → ClientCore → tun1
+- **This confirms end-to-end IP packet forwarding through the replacement Transport/Core**
+
+### What ping failure means
+
+Ping failure does **NOT** necessarily mean the Transport/Core replacement is broken.
+Common causes:
+
+| Cause | Diagnostic signal |
+|---|---|
+| **Session ID mismatch** (known limitation) | `grep "Dropping frame" server.log` shows drops |
+| **Kernel local delivery** | `ip route get 10.8.0.1` in client ns shows `local` |
+| **TUN routing missing** | `ip route get 10.8.0.1` shows no route or wrong device |
+| **Transport tunnel broken** | Underlay veth ping would have failed earlier |
+| **TUN fd not reading** | No `TUN->Transport READ` in DEBUG server/client logs |
+
+### Known limitation: session ID mismatch
+
+The current `src/server.py` and `src/client.py` entry points each auto-generate
+independent `session_id` values via `uuid.uuid4().bytes`. Both `ServerCore._handle_frame()`
+and `ClientCore._handle_frame()` drop frames whose `session_id` does not match their own.
+
+**Impact**: The server drops all DATA frames from the client, and vice versa.
+TUN ping packets are read from the TUN fd, framed, and sent through the transport,
+but the receiving end drops them due to `session_id` mismatch.
+
+**Why the test suite works**: Tests in `tests/test_core.py` pass the **same** `session_id`
+object to both `ServerCore` and `ClientCore`, so frame validation passes.
+
+**How to fix** (future work):
+1. Implement session ID negotiation (e.g., server sends its session ID in a handshake,
+   client adopts it).
+2. Or add a CLI parameter `--session-id` to both server and client entry points.
+3. Or relax session ID validation during initial connection setup.
+
+For now, the `--e2e-ping` mode detects the `"Dropping frame"` log pattern and reports
+this known limitation in the diagnostics output.
+
+### Key differences: default vs e2e-ping mode
+
+| Aspect | Default mode | `--e2e-ping` mode |
+|---|---|---|
+| Environment setup | Yes | Yes |
+| Underlay veth ping | Yes | Yes |
+| TUN creation check | Yes | Yes |
+| TUN IP configuration | `/24` subnet | `peer /32` point-to-point |
+| Process health check | Yes | Yes |
+| Explicit TUN routes | No | Yes |
+| Real IP ping through tunnel | No | Yes (bidirectional) |
+| tcpdump capture | No | Optional (`--tcpdump`) |
+| Failure diagnostics | Basic | Full (ip addr, ip route, logs, pcaps) |
+| Session ID mismatch detection | No | Yes (auto-detected from logs) |
+
+### tcpdump auxiliary diagnosis
+
+When `--tcpdump` is enabled, three packet captures are created:
+
+```
+/tmp/vpn_validation_pcap.XXXXXX/
+├── server_tun0.pcap      # ICMP on server TUN
+├── client_tun1.pcap      # ICMP on client TUN
+└── server_veth_srv.pcap  # Tunnel traffic on underlay
+```
+
+Inspect with:
+```bash
+tcpdump -r /tmp/vpn_validation_pcap.XXXXXX/server_tun0.pcap -n
+tcpdump -r /tmp/vpn_validation_pcap.XXXXXX/server_veth_srv.pcap -n
+tcpdump -r /tmp/vpn_validation_pcap.XXXXXX/client_tun1.pcap -n
+```
+
+**Expected for success**:
+- `server_veth_srv.pcap`: TCP/WebSocket frames carrying encapsulated DATA
+- `server_tun0.pcap`: ICMP echo request (in) and echo reply (out)
+- `client_tun1.pcap`: ICMP echo request (out) and echo reply (in)
+
+**Expected when session ID mismatch**:
+- `server_veth_srv.pcap`: TCP/WebSocket frames visible (transport works)
+- `server_tun0.pcap`: Empty (server drops frames, never writes to tun0)
+- `client_tun1.pcap`: ICMP echo request (out) only, no reply (in)
+
+### Common diagnostic steps
+
+1. **Check session ID**:
+   ```bash
+   grep -E "(session_id=|Dropping frame)" /tmp/vpn_server_validation.*.log
+   grep -E "(session_id=|Dropping frame)" /tmp/vpn_client_validation.*.log
+   ```
+
+2. **Check TUN routing in each namespace**:
+   ```bash
+   sudo ip netns exec vpn_srv_validation ip route show
+   sudo ip netns exec vpn_cli_validation ip route get 10.8.0.1
+   ```
+
+3. **Check process health**:
+   ```bash
+   sudo ip netns exec vpn_srv_validation ss -tlnp | grep 2222
+   sudo ip netns exec vpn_cli_validation ss -tnp | grep 2222
+   ```
+
+4. **Enable DEBUG logging for TUN fd visibility**:
+   ```bash
+   sudo VPN_LLM_LOG_LEVEL=DEBUG bash scripts/phase10_netns_tun_validation.sh --transport tcp --keep --verbose
+   # Then inspect logs for TUN->Transport READ / Transport->TUN WROTE
+   ```
+
 ## Integration with LLM Agent workflow
 
 The netns validation is a manual step in the LLM Agent replacement pipeline:
@@ -213,13 +361,16 @@ LLM generates patch
   → human confirms --apply-patch
   → post-apply validation
   → --run-replacement-smoke (Gate 1: automated, CI-safe)
-  → phase10_netns_tun_validation.sh (Gate 2: manual, requires root)
+  → phase10_netns_tun_validation.sh (Gate 2a: default mode, requires root)
+  → phase10_netns_tun_validation.sh --e2e-ping (Gate 2b: e2e ping, requires root)
   → commit advice
 ```
 
-The script is intentionally NOT invoked automatically by the LLM Agent — it requires
-root privileges and kernel TUN support, which are not available in CI or typical
-developer environments without explicit setup.
+Gate 2a (default mode) verifies the infrastructure: namespaces, TUN devices, underlay
+connectivity, and process health. Gate 2b (e2e-ping) adds real IP packet forwarding
+verification. Both require explicit human invocation — the script is intentionally
+NOT invoked automatically by the LLM Agent because root privileges and kernel TUN
+support are not available in CI or typical developer environments without explicit setup.
 
 ## Files
 

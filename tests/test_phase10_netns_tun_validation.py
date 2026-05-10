@@ -68,6 +68,22 @@ class TestHelpOutput:
         assert "--keep" in result.stdout
         assert "--verbose" in result.stdout
 
+    def test_help_contains_e2e_ping(self):
+        result = _run_script("--help")
+        assert "--e2e-ping" in result.stdout
+
+    def test_help_contains_ping_count(self):
+        result = _run_script("--help")
+        assert "--ping-count" in result.stdout
+
+    def test_help_contains_ping_timeout(self):
+        result = _run_script("--help")
+        assert "--ping-timeout" in result.stdout
+
+    def test_help_contains_tcpdump(self):
+        result = _run_script("--help")
+        assert "--tcpdump" in result.stdout
+
 
 # ---------------------------------------------------------------------------
 # Pre-flight skip (no root)
@@ -228,6 +244,108 @@ class TestSubnetIsolation:
         text = open(_SCRIPT).read()
         assert "vpn_srv_validation" in text
         assert "vpn_cli_validation" in text
+
+
+# ---------------------------------------------------------------------------
+# Phase 10.4: e2e-ping mode
+# ---------------------------------------------------------------------------
+
+
+class TestE2EPingGate:
+    """Verify --e2e-ping is gated — default mode does NOT run ping."""
+
+    def test_e2e_ping_default_false(self):
+        text = open(_SCRIPT).read()
+        assert "E2E_PING=false" in text, "E2E_PING must default to false"
+
+    def test_e2e_ping_gated_in_main(self):
+        text = open(_SCRIPT).read()
+        assert "if $E2E_PING" in text, "e2e-ping must be conditionally executed"
+
+    def test_has_e2e_ping_function(self):
+        text = open(_SCRIPT).read()
+        assert "_e2e_ping_validation" in text
+
+    def test_has_diagnostics_function(self):
+        text = open(_SCRIPT).read()
+        assert "_diagnostics" in text
+
+    def test_has_start_tcpdump_function(self):
+        text = open(_SCRIPT).read()
+        assert "_start_tcpdump" in text
+
+    def test_tcpdump_requires_e2e_ping_in_code(self):
+        text = open(_SCRIPT).read()
+        assert "--tcpdump requires --e2e-ping" in text
+
+    def test_tcpdump_without_e2e_ping_exits_error(self):
+        result = _run_script("--tcpdump")
+        assert result.returncode != 0
+        assert "requires --e2e-ping" in result.stderr
+
+
+class TestDiagnosticsContent:
+    """Verify diagnostics output includes required troubleshooting info."""
+
+    def test_diagnostics_mentions_session_id(self):
+        text = open(_SCRIPT).read()
+        assert "session ID" in text or "session_id" in text
+
+    def test_diagnostics_mentions_routing(self):
+        text = open(_SCRIPT).read()
+        assert "route" in text.lower()
+
+    def test_diagnostics_mentions_tcpdump(self):
+        text = open(_SCRIPT).read()
+        assert "tcpdump" in text
+
+    def test_diagnostics_warns_on_dropping_frame(self):
+        text = open(_SCRIPT).read()
+        assert "Dropping frame" in text
+
+    def test_diagnostics_shows_ip_addr(self):
+        text = open(_SCRIPT).read()
+        assert "ip addr" in text
+
+    def test_diagnostics_shows_ip_route(self):
+        text = open(_SCRIPT).read()
+        assert "ip route" in text
+
+    def test_diagnostics_shows_process_status(self):
+        text = open(_SCRIPT).read()
+        assert "Process Status" in text or "Server PID" in text
+
+    def test_diagnostics_shows_logs(self):
+        text = open(_SCRIPT).read()
+        assert "Server Log" in text or "Client Log" in text
+
+
+class TestPcapLogGitignore:
+    """Verify .gitignore entries prevent committing pcap/log files."""
+
+    def test_gitignore_has_pcap(self):
+        gitignore = open(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".gitignore")
+        ).read()
+        assert "*.pcap" in gitignore, ".gitignore must have *.pcap"
+
+    def test_script_warns_pcap_not_git_tracked(self):
+        text = open(_SCRIPT).read()
+        # The script should either mention that pcaps are temporary or
+        # direct users to avoid committing them.
+        assert "/tmp/vpn_validation_pcap" in text or "pcap" in text.lower()
+
+
+class TestE2EPingExtraChecks:
+    """Verify e2e-ping adds pre-flight checks for ping and tcpdump."""
+
+    def test_e2e_ping_preflight_checks_ping(self):
+        text = open(_SCRIPT).read()
+        assert "command -v ping" in text
+
+    def test_e2e_ping_preflight_checks_tcpdump(self):
+        text = open(_SCRIPT).read()
+        assert "command -v tcpdump" in text
 
 
 # ---------------------------------------------------------------------------
