@@ -687,6 +687,36 @@ LLM Agent can optionally run replacement smoke validation after human-confirmed
 patch application via `--run-replacement-smoke`. This is the first runtime
 gate for LLM-driven Transport or Core replacement.
 
+### netns + TUN Validation (Gate 2)
+
+After the local smoke matrix (Gate 1) passes, use Linux network namespaces and
+real TUN devices for the second validation gate:
+
+```bash
+# Requires root or CAP_NET_ADMIN — skips gracefully otherwise
+sudo scripts/phase10_netns_tun_validation.sh
+
+# Test with WebSocket transport
+sudo scripts/phase10_netns_tun_validation.sh --transport websocket
+
+# Keep environment for manual tcpdump/ping verification
+sudo scripts/phase10_netns_tun_validation.sh --keep --verbose
+```
+
+This sets up isolated namespaces (`vpn_srv_validation`, `vpn_cli_validation`),
+veth pairs, and real TUN devices, then starts server/client to verify the
+replacement is minimally runnable with real IP packets.
+
+详细说明见 [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md)。
+
+**Validation gates summary:**
+
+| Gate | Script | Requires | Automated |
+|---|---|---|---|
+| 1 — Smoke matrix | `smoke_replacement_matrix.py` | Python deps | Yes (CI) |
+| 2 — netns + TUN | `phase10_netns_tun_validation.sh` | root, Linux, /dev/net/tun | Semi |
+| 3 — Multi-machine | Lab setup | Physical/virtual hosts | Manual |
+
 ---
 
 ## 参考资料
