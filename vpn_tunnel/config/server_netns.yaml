@@ -1,0 +1,19 @@
+# TCP Transport Server Configuration for Network Namespace Testing
+# Use with: sudo ip netns exec vpn_srv python -m src.server --config config/server_netns.yaml --transport tcp
+
+server:
+  tun_name: tun0
+  tun_ip: 10.8.0.1
+  tun_peer: 10.8.0.2
+  mtu: 1400
+  listen_port: 2222
+
+forwarding:
+  enable_nat: false
+  enable_route: true
+
+transport:
+  type: tcp
+
+session:
+  heartbeat_timeout: 30

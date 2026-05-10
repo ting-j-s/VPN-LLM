@@ -1,0 +1,18 @@
+# TCP Transport Server Configuration
+server:
+  tun_name: tun0
+  tun_ip: 10.8.0.1
+  tun_peer: 10.8.0.2
+  mtu: 1400
+  listen_mode: tcp
+  listen_port: 2222
+
+forwarding:
+  enable_nat: false
+  enable_route: true
+
+transport:
+  type: tcp
+
+session:
+  heartbeat_timeout: 30
