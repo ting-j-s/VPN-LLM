@@ -146,6 +146,72 @@ quick validation entry point for the LLM agent framework.
 - No automatic `git commit` or `git push`
 - All safety boundaries enforced
 
+## Phase 9.7: Optional LLM-Based Task Planner
+
+### Overview
+
+An optional LLM-based task planner (`LLMTaskPlanner`) that uses an
+OpenAI-compatible API for **request understanding, task decomposition,
+candidate file prediction, and validation command suggestion**.
+
+**The LLM is ONLY used for planning — it cannot execute commands, write files,
+modify code, commit, or push.**
+
+### Key Design Decisions
+
+- **Default OFF**: `agent.use_llm_planner` is `false`. Users must explicitly
+  pass `--use-llm-planner` to the CLI.
+- **API key from environment only**: The API key is read from an environment
+  variable (e.g. `LLM_API_KEY`), never from config files or code.
+- **Schema validation on ALL LLM output**: Every field is type-checked and
+  whitelist-validated before acceptance.
+- **SafetyGuard on ALL LLM output**: Every candidate file path is checked
+  by `SafetyGuard.validate_write_path()`. Every validation command is checked
+  by `SafetyGuard.validate_command()`. Any violation raises
+  `LLMTaskPlannerError` — the plan is rejected, nothing is written.
+- **Config file is git-ignored**: `config/llm_agent.yaml` is in `.gitignore`.
+  Only the example file `config/llm_agent.yaml.example` is committed.
+
+### LLM Output Schema
+
+The LLM must return a JSON object with these fields:
+
+| Field | Type | Validation |
+|-------|------|------------|
+| `task_type` | string | Must be in: transport_change, config_change, test_addition, docs_update, bugfix, refactor, unknown |
+| `target_transport` | string or null | Must be in: tcp, tls, ssh, websocket, mock, or null |
+| `summary` | string | Must be non-empty |
+| `candidate_files` | list of strings | Each path checked by SafetyGuard.validate_write_path() |
+| `validation_commands` | list of strings | Each command checked by SafetyGuard.validate_command() |
+| `risk_level` | string | Must be in: low, medium, high |
+
+### Failure Modes
+
+If the LLM returns:
+- **Invalid JSON** → `LLMTaskPlannerError("not valid JSON")`
+- **Missing fields** → `LLMTaskPlannerError("missing required fields: [...]")`
+- **Illegal task_type** → `LLMTaskPlannerError("Invalid task_type")`
+- **Illegal transport** → `LLMTaskPlannerError("Invalid target_transport")`
+- **Dangerous file path** → `LLMTaskPlannerError("unsafe file path")`
+- **Dangerous command** → `LLMTaskPlannerError("unsafe command")`
+
+All failures are hard errors — the system never silently accepts invalid or
+dangerous LLM output.
+
+### Configuration
+
+See `config/llm_agent.yaml.example` for the full configuration format.
+
+### CLI Usage
+
+```
+# Rule-based (default, no network)
+python3 scripts/llm_task.py --request "..."
+
+# LLM-based
+python3 scripts/llm_task.py --request "..." --use-llm-planner
+```
+
 ## Future Extensions
 
 - Real LLM integration for plan/code generation

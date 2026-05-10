@@ -1,0 +1,21 @@
+# LLM Agent Configuration Example
+# Copy this file to config/llm_agent.yaml and customize for your environment.
+# config/llm_agent.yaml is git-ignored and must NOT be committed.
+
+# API provider (currently only openai_compatible)
+provider: openai_compatible
+
+# Base URL for the OpenAI-compatible API endpoint
+base_url: http://127.0.0.1:4000/v1
+
+# Model name to use for task planning
+model: your-model-name
+
+# Environment variable that holds the API key
+# The actual key is read from os.environ, NEVER hardcoded in this file.
+api_key_env: LLM_API_KEY
+
+# Agent behavior flags
+agent.use_llm_planner: false   # Set to true to enable LLM-based planning
+agent.max_retries: 1           # Max retries on LLM API failure
+agent.request_timeout: 30      # HTTP request timeout in seconds

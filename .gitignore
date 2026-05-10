@@ -78,6 +78,9 @@ venv.bak/
 # LLM Task records
 .llm_tasks/
 
+# LLM Agent config (contains API endpoint, not key — but keep local)
+config/llm_agent.yaml
+
 # API Keys and Credentials
 *.key
 *.pem
