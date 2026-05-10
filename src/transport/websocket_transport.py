@@ -10,6 +10,8 @@ import concurrent.futures
 import threading
 from typing import Optional
 
+import websockets
+
 from ..common.errors import TransportError, TransportTimeout
 from ..common.logger import get_logger
 from .base import Transport
@@ -19,6 +21,12 @@ logger = get_logger(__name__)
 
 # Max frame size: 10MB
 MAX_FRAME_SIZE = 10 * 1024 * 1024
+
+# websockets API changed across major versions:
+#   v10.x: from websockets import connect/serve, parameter=extra_headers
+#   v16.x: from websockets import connect/serve, parameter=additional_headers
+_WS_MAJOR = int(websockets.__version__.split(".")[0])
+_HEADER_KW = "additional_headers" if _WS_MAJOR >= 16 else "extra_headers"
 
 
 class WebSocketTransport(Transport):
@@ -199,9 +207,10 @@ class WebSocketTransport(Transport):
         url = f"ws://{self.host}:{self.port}{self.path}"
 
         try:
-            from websockets.asyncio.client import connect
+            from websockets import connect
 
-            async with connect(url, additional_headers=extra_h) as ws:
+            _kw = {_HEADER_KW: extra_h} if extra_h else {}
+            async with connect(url, **_kw) as ws:
                 self._ws = ws
                 self._connected = True
                 self._connection_event.set()
@@ -239,7 +248,7 @@ class WebSocketTransport(Transport):
 
     async def _async_start_server(self) -> None:
         try:
-            from websockets.asyncio.server import serve
+            from websockets import serve
 
             self._server = await serve(
                 self._ws_handler,

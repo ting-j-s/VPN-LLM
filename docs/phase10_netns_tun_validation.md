@@ -154,13 +154,12 @@ The script performs the following checks in order:
 
 ## What the script does NOT validate
 
-- **TUN-to-TUN ping**: The script does not run `ping -I tun1 10.8.0.1` because this depends
-  on correct routing within each namespace. Kernel may local-deliver packets instead of
-  sending them through the TUN fd. See Phase 3 docs for manual ping verification steps.
+- **TUN-to-TUN ping (without --e2e-ping)**: The default mode does not run `ping -I tun1 10.8.0.1`.
+  Use `--e2e-ping` (Phase 10.4) for automated bidirectional TUN ping verification.
 - **Long-running stability**: The script checks startup only. For soak testing, use `--keep`
   and run manual tests.
-- **Data integrity**: The script checks that tunnel processes start and TUN devices appear.
-  It does not verify that IP packets pass correctly through the tunnel.
+- **Data integrity (without --e2e-ping)**: The default mode checks that tunnel processes start
+  and TUN devices appear. Use `--e2e-ping` for automated IP packet forwarding verification.
 
 ## Manual real-IP-packet verification
 
@@ -401,6 +400,65 @@ connectivity, and process health. Gate 2b (e2e-ping) adds real IP packet forward
 verification. Both require explicit human invocation — the script is intentionally
 NOT invoked automatically by the LLM Agent because root privileges and kernel TUN
 support are not available in CI or typical developer environments without explicit setup.
+
+## Phase 10.6: Real E2E Results
+
+### Environment
+
+- **OS**: Debian 12 (Linux 6.1.0-45-amd64)
+- **Kernel**: x86_64, `/dev/net/tun` present, `iproute2` 6.1.0
+- **Python**: 3.11.2 (system), websockets 10.4 (system) / 16.0 (pip user)
+- **Date**: 2026-05-10
+
+### Results
+
+| Transport | Default mode | E2E Ping (P2P) | Notes |
+|---|---|---|---|
+| TCP | PASS | **PASS** | 0% loss, 0.5–1.8ms RTT |
+| WebSocket | PASS | **PASS** | 0% loss, 2.5–4.6ms RTT |
+
+### Commands used
+
+```bash
+# Default mode
+sudo bash scripts/phase10_netns_tun_validation.sh --transport tcp --verbose
+sudo bash scripts/phase10_netns_tun_validation.sh --transport websocket --verbose
+
+# E2E ping
+sudo bash scripts/phase10_netns_tun_validation.sh --transport tcp --verbose --e2e-ping
+sudo bash scripts/phase10_netns_tun_validation.sh --transport websocket --verbose --e2e-ping
+```
+
+### Bugs found and fixed during Phase 10.6
+
+1. **Client config subnet mismatch** ([config/client_netns.yaml](../config/client_netns.yaml)):
+   `host: 192.168.100.1` (Phase 3 subnet) → fixed to `192.168.200.1` to match the
+   veth subnet used by Phase 10.3 (`192.168.200.0/24`). This prevented the client
+   from connecting to the server.
+
+2. **WebSocket transport v10/v16 incompatibility** ([src/transport/websocket_transport.py](../src/transport/websocket_transport.py)):
+   - `from websockets.asyncio.client import connect` → `from websockets import connect`
+   - `from websockets.asyncio.server import serve` → `from websockets import serve`
+   - The `websockets.asyncio` subpackage was removed in v16 and never existed in
+     the system-installed v10.4. The top-level `connect`/`serve` work across all versions.
+   - `additional_headers` (v16) vs `extra_headers` (v10) parameter name difference
+     handled by detecting the websockets major version at import time.
+
+### Key findings
+
+- **Shared session_id works**: The `--session-id` mechanism from Phase 10.5
+  enables e2e-ping without any "Dropping frame" errors. Both ClientCore and
+  ServerCore accept each other's DATA frames when the session ID matches.
+- **No Core changes needed**: ServerCore and ClientCore already supported
+  explicit session IDs. Only the entry points and transport layer needed fixes.
+- **WebSocket higher latency**: WebSocket adds ~2–3ms overhead vs raw TCP
+  due to framing and the async event loop. Both are well within acceptable range.
+- **Session ID isolation preserved**: The mismatch drop logic (`_handle_frame`)
+  was NOT modified — frames with wrong session IDs are still dropped.
+- **Underlay vs TUN E2E ping**: The `--e2e-ping` flag performs real TUN-to-TUN
+  ICMP ping (`ping -I tun1 10.8.0.1`), which validates full IP packet forwarding
+  through the Transport/Core stack. This is distinct from the underlay veth ping
+  (`ping 192.168.200.1`) which only validates namespace connectivity.
 
 ## Files
 

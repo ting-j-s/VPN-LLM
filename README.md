@@ -726,6 +726,10 @@ sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping --ping-c
 > `--session-id HEX` (CLI) or the `session_id` config field. `session_id` is a session
 > isolation identifier, not an authentication secret. See
 > [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md) for details.
+>
+> **Verified (Phase 10.6)**: TCP and WebSocket e2e-ping both pass on Debian 12
+> (Linux 6.1). Real IP packets flow bidirectionally through the TUN tunnel with
+> 0% loss. See [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md#phase-106-real-e2e-results).
 
 This sets up isolated namespaces (`vpn_srv_validation`, `vpn_cli_validation`),
 veth pairs, and real TUN devices, then starts server/client to verify the

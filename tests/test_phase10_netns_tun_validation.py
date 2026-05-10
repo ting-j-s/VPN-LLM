@@ -448,3 +448,84 @@ class TestSecurityBoundaries:
         assert "git add" not in text
         assert "git commit" not in text
         assert "git push" not in text
+
+
+# ---------------------------------------------------------------------------
+# Phase 10.6: config subnet alignment
+# ---------------------------------------------------------------------------
+
+
+class TestClientConfigSubnet:
+    """Verify client_netns.yaml uses the correct Phase 10.3 veth subnet."""
+
+    def test_client_config_uses_veth_subnet(self):
+        import yaml
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config",
+            "client_netns.yaml",
+        )
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        host = config["server"]["host"]
+        assert host == "192.168.200.1", (
+            f"client_netns.yaml server.host must be 192.168.200.1 (Phase 10.3 subnet), "
+            f"got {host}"
+        )
+
+    def test_server_config_listen_port(self):
+        import yaml
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config",
+            "server_netns.yaml",
+        )
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        assert config["server"]["listen_port"] == 2222
+
+
+# ---------------------------------------------------------------------------
+# Phase 10.6: websocket transport v10/v16 compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketTransportCompatibility:
+    """Verify websocket_transport.py works with websockets v10.x and v16.x."""
+
+    def test_uses_top_level_connect_import(self):
+        ws_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "src",
+            "transport",
+            "websocket_transport.py",
+        )
+        text = open(ws_file).read()
+        # Must use top-level import (compatible with v10 and v16)
+        assert "from websockets import connect" in text
+        # Must NOT use asyncio subpackage (removed in v16, absent in v10)
+        assert "from websockets.asyncio.client import connect" not in text
+
+    def test_uses_top_level_serve_import(self):
+        ws_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "src",
+            "transport",
+            "websocket_transport.py",
+        )
+        text = open(ws_file).read()
+        assert "from websockets import serve" in text
+        assert "from websockets.asyncio.server import serve" not in text
+
+    def test_has_version_detection(self):
+        ws_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "src",
+            "transport",
+            "websocket_transport.py",
+        )
+        text = open(ws_file).read()
+        assert "_WS_MAJOR" in text
+        assert "_HEADER_KW" in text
+        assert "additional_headers" in text
+        assert "extra_headers" in text
