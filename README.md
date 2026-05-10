@@ -721,10 +721,11 @@ sudo scripts/phase10_netns_tun_validation.sh --transport websocket --e2e-ping --
 sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping --ping-count 5 --ping-timeout 3
 ```
 
-> **Known limitation**: The current `src/server.py` and `src/client.py` entry points
-> each auto-generate independent session IDs. E2E ping will fail due to session ID
-> mismatch until a shared session ID mechanism is added. See the diagnostics output
-> and [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md) for details.
+> **Shared session ID**: The netns e2e validation script automatically passes a fixed
+> test `--session-id` to both server and client. For manual invocation, use
+> `--session-id HEX` (CLI) or the `session_id` config field. `session_id` is a session
+> isolation identifier, not an authentication secret. See
+> [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md) for details.
 
 This sets up isolated namespaces (`vpn_srv_validation`, `vpn_cli_validation`),
 veth pairs, and real TUN devices, then starts server/client to verify the

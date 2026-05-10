@@ -113,6 +113,10 @@ if $TCPDUMP && ! $E2E_PING; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Fixed test session ID shared by server and client for e2e validation.
+# This is NOT an authentication secret — it is a session isolation identifier
+# used to ensure both endpoints accept each other's frames.
+SESSION_ID_HEX="00112233445566778899aabbccddeeff"
 SERVER_PID=""
 CLIENT_PID=""
 SERVER_LOG=""
@@ -350,6 +354,7 @@ _start_server() {
         python3 -m src.server \
             --config config/server_netns.yaml \
             --transport "$TRANSPORT" \
+            --session-id "$SESSION_ID_HEX" \
         >"$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
 
@@ -418,6 +423,7 @@ _start_client() {
         python3 -m src.client \
             --config config/client_netns.yaml \
             --transport "$TRANSPORT" \
+            --session-id "$SESSION_ID_HEX" \
         >"$CLIENT_LOG" 2>&1 &
     CLIENT_PID=$!
 
@@ -633,11 +639,11 @@ _diagnostics() {
     echo ""
     echo "--- Common Causes for E2E Ping Failure ---"
     echo ""
-    echo "1. Session ID mismatch (KNOWN LIMITATION):"
-    echo "   src/server.py and src/client.py each auto-generate independent"
-    echo "   session_id values. Both ServerCore and ClientCore drop frames"
-    echo "   with mismatched session IDs. The test suite works because it"
-    echo "   passes a shared session_id to both cores."
+    echo "1. Session ID mismatch:"
+    echo "   This script passes a shared --session-id to both server and client."
+    echo "   If running manually without --session-id, server and client each"
+    echo "   auto-generate independent session IDs and will drop each other's"
+    echo "   frames. The 'Dropping frame' log pattern is the diagnostic signal."
     echo ""
     echo "   To verify: grep for 'Dropping frame' in server/client logs."
     echo ""
@@ -720,8 +726,8 @@ _e2e_ping_validation() {
         if [[ -n "${SERVER_LOG:-}" && -f "$SERVER_LOG" ]]; then
             if grep -q "Dropping frame" "$SERVER_LOG" 2>/dev/null; then
                 _warn "Detected 'Dropping frame' in server log — this indicates"
-                _warn "session ID mismatch: server and client generate independent session IDs."
-                _warn "This is a known limitation of the current src/server.py and src/client.py entry points."
+                _warn "session ID mismatch. This script passes --session-id to both endpoints,"
+                _warn "so this may indicate a different issue or a version mismatch."
             fi
         fi
 

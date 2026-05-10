@@ -75,6 +75,8 @@ class SessionConfig:
     # Client-only settings
     reconnect: bool = True
     reconnect_interval: int = 3
+    # Optional shared session identifier (32-char hex, not a secret/key)
+    session_id: Optional[str] = None
 
 
 @dataclass
@@ -207,6 +209,7 @@ def load_client_config(path: str) -> ClientConfig:
         heartbeat_interval=session_data.get("heartbeat_interval", 10),
         reconnect=session_data.get("reconnect", True),
         reconnect_interval=session_data.get("reconnect_interval", 3),
+        session_id=session_data.get("session_id"),
     )
 
     return ClientConfig(client=tun, server=endpoint, transport=transport, session=session)
@@ -262,6 +265,7 @@ def load_server_config(path: str) -> ServerConfig:
     session_data = data.get("session", {})
     session = SessionConfig(
         heartbeat_timeout=session_data.get("heartbeat_timeout", 30),
+        session_id=session_data.get("session_id"),
     )
 
     return ServerConfig(server=tun, forwarding=forwarding, transport=transport, session=session)

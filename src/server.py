@@ -11,6 +11,7 @@ from pathlib import Path
 from .common.config import load_server_config
 from .common.logger import get_logger
 from .common.errors import VPNError
+from .common.session import parse_session_id, mask_session_id
 from .tun.tun_device import create_tun_device
 from .transport.factory import create_transport
 from .core.server_core import ServerCore
@@ -48,6 +49,13 @@ def main():
         type=str,
         choices=["ssh", "tcp", "tls", "websocket", "mock"],
         help="Override transport type from config",
+    )
+    parser.add_argument(
+        "--session-id",
+        type=str,
+        default=None,
+        metavar="HEX",
+        help="32-char hex session ID for shared session isolation",
     )
     args = parser.parse_args()
 
@@ -90,11 +98,31 @@ def main():
         transport = create_transport(config)
         logger.info(f"Transport created: {transport}")
 
+        # Resolve session ID: CLI --session-id > config session_id > random
+        session_id_bytes = None
+        session_id_source = "random"
+        try:
+            if args.session_id:
+                session_id_bytes = parse_session_id(args.session_id)
+                session_id_source = "cli"
+            elif config.session.session_id:
+                session_id_bytes = parse_session_id(config.session.session_id)
+                session_id_source = "config"
+        except ValueError as e:
+            logger.error(f"Invalid session_id: {e}")
+            sys.exit(1)
+
+        if session_id_bytes is not None:
+            logger.info(f"Session ID: {mask_session_id(session_id_bytes)} (source={session_id_source})")
+        else:
+            logger.info(f"Session ID: auto-generated (source={session_id_source})")
+
         # Create server core
         global _server
         _server = ServerCore(
             tun=tun,
             transport=transport,
+            session_id=session_id_bytes,
             heartbeat_interval=config.session.heartbeat_interval,
             heartbeat_timeout=config.session.heartbeat_timeout,
         )

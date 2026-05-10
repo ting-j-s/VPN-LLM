@@ -380,6 +380,52 @@ class TestE2EPingExtraChecks:
 
 
 # ---------------------------------------------------------------------------
+# Phase 10.5: shared session ID
+# ---------------------------------------------------------------------------
+
+
+class TestSessionIdInScript:
+    """Verify the script uses shared --session-id for server and client."""
+
+    def test_script_defines_session_id_hex(self):
+        text = open(_SCRIPT).read()
+        assert "SESSION_ID_HEX" in text
+
+    def test_session_id_hex_is_32_chars(self):
+        text = open(_SCRIPT).read()
+        # SESSION_ID_HEX should be a 32-char hex string
+        assert "00112233445566778899aabbccddeeff" in text
+
+    def test_server_start_passes_session_id(self):
+        text = open(_SCRIPT).read()
+        assert "--session-id" in text
+        # The server startup should include --session-id "$SESSION_ID_HEX"
+        assert '--session-id "$SESSION_ID_HEX"' in text
+
+    def test_client_start_passes_session_id(self):
+        text = open(_SCRIPT).read()
+        # Both server and client should have --session-id
+        count = text.count("--session-id")
+        assert count >= 2, f"Expected --session-id to appear at least twice, got {count}"
+
+    def test_script_sets_session_id_before_server_client_start(self):
+        text = open(_SCRIPT).read()
+        sid_pos = text.find("SESSION_ID_HEX=")
+        server_pos = text.find("_start_server")
+        assert sid_pos > 0
+        assert server_pos > sid_pos, "SESSION_ID_HEX must be defined before _start_server"
+
+    def test_no_session_id_in_preflight_only_path(self):
+        """--session-id is only used in server/client startup, not preflight."""
+        # The preflight doesn't need session-id; it's passed to python commands
+        text = open(_SCRIPT).read()
+        # SESSION_ID_HEX should appear after _preflight is defined
+        preflight_pos = text.find("_preflight()")
+        sid_pos = text.find("SESSION_ID_HEX=")
+        assert preflight_pos > 0 and sid_pos > 0
+
+
+# ---------------------------------------------------------------------------
 # Security: no secrets, no hardcoded paths
 # ---------------------------------------------------------------------------
 

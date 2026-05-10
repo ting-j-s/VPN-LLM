@@ -250,10 +250,12 @@ sudo ./scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping --ping
 
 The `--e2e-ping` mode adds the following checks after the default mode:
 
-1. **Explicit TUN routing**: Configures point-to-point TUN IPs (`peer /32` notation) and
+1. **Shared session ID**: The script passes a fixed test `--session-id` to both server
+   and client, ensuring they share the same session identifier and accept each other's frames.
+2. **Explicit TUN routing**: Configures point-to-point TUN IPs (`peer /32` notation) and
    adds explicit routes (`ip route add 10.8.0.x dev tunX`).
-2. **Client → Server ping**: `ping -I tun1 -c $PING_COUNT -W $PING_TIMEOUT 10.8.0.1`
-3. **Server → Client ping**: `ping -I tun0 -c $PING_COUNT -W $PING_TIMEOUT 10.8.0.2`
+3. **Client → Server ping**: `ping -I tun1 -c $PING_COUNT -W $PING_TIMEOUT 10.8.0.1`
+4. **Server → Client ping**: `ping -I tun0 -c $PING_COUNT -W $PING_TIMEOUT 10.8.0.2`
 
 ### What ping success means
 
@@ -271,33 +273,43 @@ Common causes:
 
 | Cause | Diagnostic signal |
 |---|---|
-| **Session ID mismatch** (known limitation) | `grep "Dropping frame" server.log` shows drops |
+| **Session ID mismatch** | `grep "Dropping frame" server.log` shows drops. The script passes shared `--session-id`, so this typically means manual invocation without matching IDs. |
 | **Kernel local delivery** | `ip route get 10.8.0.1` in client ns shows `local` |
 | **TUN routing missing** | `ip route get 10.8.0.1` shows no route or wrong device |
 | **Transport tunnel broken** | Underlay veth ping would have failed earlier |
 | **TUN fd not reading** | No `TUN->Transport READ` in DEBUG server/client logs |
 
-### Known limitation: session ID mismatch
+### Session ID sharing
 
-The current `src/server.py` and `src/client.py` entry points each auto-generate
-independent `session_id` values via `uuid.uuid4().bytes`. Both `ServerCore._handle_frame()`
-and `ClientCore._handle_frame()` drop frames whose `session_id` does not match their own.
+`ServerCore` and `ClientCore` each validate that incoming frames carry their own
+`session_id`. When the server and client generate independent session IDs (the default),
+every frame is dropped by the receiving end — including TUN ping packets.
 
-**Impact**: The server drops all DATA frames from the client, and vice versa.
-TUN ping packets are read from the TUN fd, framed, and sent through the transport,
-but the receiving end drops them due to `session_id` mismatch.
+**Shared session ID**: The `--session-id HEX` CLI flag and `session_id` config field
+allow both endpoints to use the same 16-byte session identifier:
 
-**Why the test suite works**: Tests in `tests/test_core.py` pass the **same** `session_id`
-object to both `ServerCore` and `ClientCore`, so frame validation passes.
+```bash
+# Via CLI (priority: CLI > config > random)
+python3 -m src.server --config config/server_netns.yaml --session-id 00112233445566778899aabbccddeeff
+python3 -m src.client --config config/client_netns.yaml --session-id 00112233445566778899aabbccddeeff
 
-**How to fix** (future work):
-1. Implement session ID negotiation (e.g., server sends its session ID in a handshake,
-   client adopts it).
-2. Or add a CLI parameter `--session-id` to both server and client entry points.
-3. Or relax session ID validation during initial connection setup.
+# Via config
+session_id: "00112233445566778899aabbccddeeff"
+```
 
-For now, the `--e2e-ping` mode detects the `"Dropping frame"` log pattern and reports
-this known limitation in the diagnostics output.
+**Priority**: CLI `--session-id` > config `session_id` > auto-generated (random).
+
+The netns validation script (`phase10_netns_tun_validation.sh`) automatically passes
+a fixed test `--session-id` to both server and client, so e2e ping works with shared
+session isolation.
+
+> **Note**: `session_id` is a session isolation identifier, not an authentication
+> secret or cryptographic key. In production, the session ID should be negotiated
+> or distributed by the control plane.
+
+**`Dropping frame` as a diagnostic signal**: If `"Dropping frame"` appears in logs
+during e2e ping, it means the endpoints are using different session IDs — check that
+`--session-id` matches on both sides.
 
 ### Key differences: default vs e2e-ping mode
 
@@ -306,6 +318,7 @@ this known limitation in the diagnostics output.
 | Environment setup | Yes | Yes |
 | Underlay veth ping | Yes | Yes |
 | TUN creation check | Yes | Yes |
+| Shared session ID | No | Yes (auto-passed via `--session-id`) |
 | TUN IP configuration | `/24` subnet | `peer /32` point-to-point |
 | Process health check | Yes | Yes |
 | Explicit TUN routes | No | Yes |
@@ -346,8 +359,8 @@ tcpdump -r /tmp/vpn_validation_pcap.XXXXXX/client_tun1.pcap -n
 
 1. **Check session ID**:
    ```bash
-   grep -E "(session_id=|Dropping frame)" /tmp/vpn_server_validation.*.log
-   grep -E "(session_id=|Dropping frame)" /tmp/vpn_client_validation.*.log
+   grep -E "(session_id=|Dropping frame|Session ID:)" /tmp/vpn_server_validation.*.log
+   grep -E "(session_id=|Dropping frame|Session ID:)" /tmp/vpn_client_validation.*.log
    ```
 
 2. **Check TUN routing in each namespace**:
