@@ -59,11 +59,33 @@
 
 ## 3. 目录结构
 
+以下结构以仓库根目录 `VPN-LLM/` 为准，而不是 `vpn_tunnel/` 子目录。
+当前主要源码与测试均在仓库根目录下的 `src/`、`tests/`、`config/` 中维护。
+
 ```
-vpn_tunnel/
+VPN-LLM/
 ├── config/                    # 配置文件
 │   ├── client.yaml           # 默认 TCP 客户端配置
-│   └── server.yaml           # 默认 TCP 服务端配置
+│   ├── client_tcp.yaml       # TCP 客户端配置
+│   ├── client_tls.yaml       # TLS 客户端配置
+│   ├── client_websocket.yaml # WebSocket 客户端配置
+│   ├── server.yaml           # 默认 TCP 服务端配置
+│   ├── server_tcp.yaml       # TCP 服务端配置
+│   ├── server_tls.yaml       # TLS 服务端配置
+│   ├── server_websocket.yaml # WebSocket 服务端配置
+│   ├── client_netns.yaml     # netns 客户端配置
+│   ├── server_netns.yaml     # netns 服务端配置
+│   └── llm_agent.yaml.example # LLM Agent 配置示例（不提交）
+│
+├── docs/                      # 文档
+│   ├── llm_agent_design.md    # LLM Agent 框架设计文档
+│   ├── stage_status.md        # 阶段成果状态报告
+│   └── test_report.md         # 测试报告
+│
+├── scripts/                   # 脚本
+│   ├── llm_task.py            # LLM Agent 任务入口
+│   ├── validate_llm_task.sh   # LLM 框架验证脚本
+│   └── phase3_netns/          # Phase 3 network namespace 脚本
 │
 ├── src/
 │   ├── client.py            # 客户端入口
@@ -97,9 +119,18 @@ vpn_tunnel/
 │   ├── evaluation/          # 评估工具
 │   │   └── stats.py         # 流量统计
 │   │
-│   └── llm/                 # LLM 辅助工具
+│   └── llm/                 # LLM Agent 框架
 │       ├── llm_client.py    # OpenAI 风格 API 客户端
-│       └── code_task_manager.py # 代码任务管理器
+│       ├── code_task_manager.py # 代码任务管理器
+│       ├── safety_guard.py       # 安全检查
+│       ├── task_planner.py       # 规则引擎任务规划
+│       ├── llm_task_planner.py   # LLM 任务规划
+│       ├── validation_runner.py  # 验证执行器
+│       ├── task_record.py        # 任务记录管理
+│       ├── report_writer.py      # 报告生成器
+│       ├── patch_generator.py    # Patch 生成器
+│       ├── commit_advisor.py     # 提交建议生成器
+│       └── __init__.py
 │
 ├── tests/                   # 测试套件 (pytest 运行查看实际数量)
 │   ├── test_frame.py
@@ -108,13 +139,31 @@ vpn_tunnel/
 │   ├── test_tls_transport.py
 │   ├── test_websocket_transport.py
 │   ├── test_transport_mock.py
-│   ├── test_core.py         # Core 端到端测试
+│   ├── test_core.py
+│   ├── test_tun_device.py
+│   ├── test_code_task_manager.py
 │   ├── test_llm_client.py
-│   └── test_code_task_manager.py
+│   ├── test_safety_guard.py
+│   ├── test_task_planner.py
+│   ├── test_llm_task_planner.py
+│   ├── test_validation_runner.py
+│   ├── test_task_record.py
+│   ├── test_report_writer.py
+│   ├── test_patch_generator.py
+│   ├── test_llm_task_apply_flow.py
+│   ├── test_commit_advisor.py
+│   └── test_llm_task_commit_advice_flow.py
 │
+├── .github/workflows/       # CI 配置
+├── vpn_tunnel/              # 历史遗留快照（不再更新，保留供参考）
 ├── requirements.txt         # Python 依赖
+├── .gitignore
 └── README.md               # 本文档
 ```
+
+> **关于 `vpn_tunnel/`**：该目录为项目早期阶段的代码快照，包含旧版 `src/`、`tests/`、
+> `config/` 等的副本。当前开发以仓库根目录下的 `src/`、`tests/`、`config/` 为准，
+> `vpn_tunnel/` 不再更新，仅保留供历史参考和兼容性对照。
 
 ## 4. 运行方式
 
