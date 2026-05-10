@@ -75,6 +75,9 @@ venv.bak/
 # Claude Code
 .claude/
 
+# LLM Task records
+.llm_tasks/
+
 # API Keys and Credentials
 *.key
 *.pem
