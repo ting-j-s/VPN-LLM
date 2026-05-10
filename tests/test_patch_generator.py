@@ -2,10 +2,13 @@
 
 All tests use mock HTTP responses — no real network calls are made.
 No files are written to the working tree.
+
+Test files are created in tmp_path — no dependency on real repo config content.
 """
 
 import json
 import os
+import pathlib
 import urllib.request
 
 import pytest
@@ -20,6 +23,22 @@ from src.llm.llm_task_planner import LLMTaskPlan
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+TEST_SERVER_YAML = (
+    "transport:\n"
+    "  type: websocket\n"
+    "  host: 127.0.0.1\n"
+    "  port: 8080\n"
+)
+
+
+def _setup_test_root(tmp_path) -> pathlib.Path:
+    """Create isolated test root with config/server.yaml."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "server.yaml").write_text(TEST_SERVER_YAML)
+    return tmp_path
+
 
 def _valid_diff() -> str:
     return """diff --git a/config/server.yaml b/config/server.yaml
@@ -41,11 +60,7 @@ diff --git a/src/transport/websocket_transport.py b/src/transport/websocket_tran
 
 
 def _valid_edits() -> str:
-    """FIND/REPLACE format output for generate() tests.
-
-    Uses the current on-disk state of config/server.yaml so the FIND
-    substring matches reality — generate() reads the real file.
-    """
+    """FIND/REPLACE targeting the isolated test fixture (TEST_SERVER_YAML)."""
     return """FILE: config/server.yaml
 <<<FIND
   type: websocket
@@ -95,8 +110,9 @@ def _make_api_response(choices_text: str, status=200):
     return FakeResponse()
 
 
-def _make_generator(monkeypatch, config_path, api_key="test-key", response_text=None):
-    """Create an LLMPatchGenerator with a mock API key env var and mock HTTP."""
+def _make_generator(monkeypatch, config_path, api_key="test-key",
+                    response_text=None, root_dir="."):
+    """Create an LLMPatchGenerator with mock HTTP and optional root_dir."""
     monkeypatch.setenv("LLM_API_KEY", api_key)
 
     if response_text is not None:
@@ -106,7 +122,7 @@ def _make_generator(monkeypatch, config_path, api_key="test-key", response_text=
 
         monkeypatch.setattr(urllib.request, "urlopen", _mock_open)
 
-    return LLMPatchGenerator(config_path)
+    return LLMPatchGenerator(config_path, root_dir=root_dir)
 
 
 CONFIG_PATH = "config/llm_agent.yaml.example"
@@ -312,10 +328,16 @@ class TestScanForSecrets:
 # ---------------------------------------------------------------------------
 
 class TestGenerate:
-    """Test generate() with mock HTTP, using FIND/REPLACE format."""
+    """Test generate() with mock HTTP, using FIND/REPLACE format.
+
+    All tests that reach _generate_diff use tmp_path with a controlled
+    test fixture — no dependency on real config/server.yaml content.
+    """
 
     def test_generates_valid_patch(self, monkeypatch, tmp_path):
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_edits())
+        root = _setup_test_root(tmp_path)
+        gen = _make_generator(monkeypatch, CONFIG_PATH,
+                              response_text=_valid_edits(), root_dir=str(root))
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
         assert "diff --git" in patch
@@ -359,16 +381,20 @@ new
         assert "blocked" in str(excinfo.value).lower()
 
     def test_rejects_diff_with_secret_content(self, monkeypatch, tmp_path):
+        root = _setup_test_root(tmp_path)
         bad_edits = _valid_edits() + "\n+-----BEGIN RSA PRIVATE KEY-----\n+content\n+-----END RSA PRIVATE KEY-----"
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=bad_edits)
+        gen = _make_generator(monkeypatch, CONFIG_PATH,
+                              response_text=bad_edits, root_dir=str(root))
         plan = _valid_plan()
         with pytest.raises(LLMPatchGeneratorError) as excinfo:
             gen.generate("bad patch", plan, "context")
         assert "private key" in str(excinfo.value)
 
     def test_strips_markdown_fences_from_llm_output(self, monkeypatch, tmp_path):
+        root = _setup_test_root(tmp_path)
         raw = "```\n" + _valid_edits() + "\n```"
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=raw)
+        gen = _make_generator(monkeypatch, CONFIG_PATH,
+                              response_text=raw, root_dir=str(root))
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
         assert "```" not in patch
@@ -388,7 +414,6 @@ class TestConfig:
             LLMPatchGenerator("config/nonexistent_llm_agent.yaml")
 
     def test_raises_when_api_key_missing(self, monkeypatch, tmp_path):
-        # Ensure the env var is not set
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         with pytest.raises(LLMPatchGeneratorError) as excinfo:
             LLMPatchGenerator(CONFIG_PATH)
@@ -403,15 +428,20 @@ class TestNoSideEffects:
     """Verify patch generation does not modify the working tree."""
 
     def test_does_not_write_source_files(self, monkeypatch, tmp_path):
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_edits())
+        root = _setup_test_root(tmp_path)
+        gen = _make_generator(monkeypatch, CONFIG_PATH,
+                              response_text=_valid_edits(), root_dir=str(root))
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
         assert isinstance(patch, str)
+        # Real config/server.yaml untouched
         assert os.path.exists("config/server.yaml")
 
     def test_does_not_call_git_apply(self, monkeypatch, tmp_path):
         """generate() only returns diff text — it does not call git apply."""
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_edits())
+        root = _setup_test_root(tmp_path)
+        gen = _make_generator(monkeypatch, CONFIG_PATH,
+                              response_text=_valid_edits(), root_dir=str(root))
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
         assert "diff --git" in patch

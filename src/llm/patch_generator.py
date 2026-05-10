@@ -83,7 +83,7 @@ class LLMPatchGenerator:
 
     BLOCKED_PATCH_EXTENSIONS = frozenset({".key", ".pem", ".crt"})
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, root_dir: str = "."):
         self._config = self._load_config(config_path)
         self._api_key = os.environ.get(self._config["api_key_env"], "")
         if not self._api_key:
@@ -93,6 +93,7 @@ class LLMPatchGenerator:
         self._base_url = self._config["base_url"].rstrip("/")
         self._model = self._config["model"]
         self._timeout = int(self._config.get("agent.request_timeout", 30))
+        self._root_dir = root_dir
 
     # ------------------------------------------------------------------
     # Public API
@@ -252,18 +253,18 @@ class LLMPatchGenerator:
 
         return edits
 
-    @staticmethod
-    def _generate_diff(edits: list[tuple[str, str, str]]) -> str:
+    def _generate_diff(self, edits: list[tuple[str, str, str]]) -> str:
         """Generate a correct unified diff from edit blocks using difflib."""
         import difflib
 
         parts = []
         for filepath, find_str, replace_str in edits:
-            if not os.path.isfile(filepath):
+            full_path = os.path.join(self._root_dir, filepath)
+            if not os.path.isfile(full_path):
                 raise LLMPatchGeneratorError(
                     f"Cannot patch non-existent file: {filepath}"
                 )
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(full_path, "r", encoding="utf-8") as f:
                 original = f.read()
 
             if find_str not in original:
@@ -284,9 +285,6 @@ class LLMPatchGenerator:
             )
             diff_text = "".join(diff)
             if not had_newline:
-                # File lacks trailing newline — insert the standard marker
-                # so git apply can match context and multi-file patches
-                # have clean separation.
                 diff_text += "\n\\ No newline at end of file\n"
             elif diff_text and not diff_text.endswith("\n"):
                 diff_text += "\n"
