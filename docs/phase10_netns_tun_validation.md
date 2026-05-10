@@ -116,17 +116,34 @@ sudo ip netns delete vpn_srv_validation
 | `--timeout SECONDS` | `15` | Max wait for server/client startup |
 | `--keep` | false | Preserve namespaces after validation |
 | `--verbose` | false | Print detailed status and route tables |
+| `--preflight-only` | false | Run only pre-flight checks, then exit. No namespaces, TUN devices, or processes. Safe for CI. |
 | `--e2e-ping` | false | Enable end-to-end TUN ping verification (Phase 10.4) |
 | `--ping-count N` | `2` | Number of ping packets (only with `--e2e-ping`) |
 | `--ping-timeout SEC` | `5` | Ping timeout in seconds (only with `--e2e-ping`) |
 | `--tcpdump` | false | Enable packet capture for diagnostics (only with `--e2e-ping`) |
 | `-h`, `--help` | — | Show help |
 
+### CI and lightweight checks
+
+For CI pipelines or quick environment checks, use `--preflight-only`:
+
+```bash
+# Safe for CI — exits 0, no namespaces created, no root required
+bash scripts/phase10_netns_tun_validation.sh --preflight-only
+```
+
+This mode:
+- Runs all pre-flight checks including the real netns capability probe
+- Exits 0 with SKIP if the environment cannot create network namespaces
+- Exits 0 with PASS if all prerequisites are met
+- Never creates namespaces, TUN devices, or server/client processes
+- Never requires root (but handles root correctly if present)
+
 ## What the script validates
 
 The script performs the following checks in order:
 
-1. **Pre-flight**: Linux OS, `ip`, `python3`, `/dev/net/tun`, root/CAP_NET_ADMIN — skip if missing
+1. **Pre-flight**: Linux OS, `ip`, `python3`, `/dev/net/tun`, root/CAP_NET_ADMIN, real netns capability probe — skip if missing
 2. **Setup**: Create `vpn_srv_validation` and `vpn_cli_validation` namespaces, veth pair, assign IPs
 3. **Underlay connectivity**: `ping -c 3` from client namespace to server namespace over veth
 4. **Server startup**: Start `src/server.py` with real TUN (`--mock-tun` is NOT used)

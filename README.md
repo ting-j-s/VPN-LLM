@@ -703,6 +703,9 @@ sudo scripts/phase10_netns_tun_validation.sh --transport websocket
 
 # Keep environment for manual tcpdump/ping verification
 sudo scripts/phase10_netns_tun_validation.sh --keep --verbose
+
+# Safe for CI — pre-flight check only, no namespaces created
+bash scripts/phase10_netns_tun_validation.sh --preflight-only
 ```
 
 **E2E ping mode** (Phase 10.4) — real IP packet forwarding through the TUN tunnel:

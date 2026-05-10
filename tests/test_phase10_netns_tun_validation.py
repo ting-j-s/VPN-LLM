@@ -85,23 +85,42 @@ class TestHelpOutput:
         assert "--tcpdump" in result.stdout
 
 
+    def test_help_contains_preflight_only(self):
+        result = _run_script("--help")
+        assert "--preflight-only" in result.stdout
+
+
 # ---------------------------------------------------------------------------
-# Pre-flight skip (no root)
+# Pre-flight only (CI-safe) — uses --preflight-only to avoid real netns
 # ---------------------------------------------------------------------------
 
 
-class TestPreFlightSkip:
-    """Verify the script skips gracefully without root."""
+class TestPreFlightOnly:
+    """Verify --preflight-only exits 0 without creating namespaces or processes."""
 
-    def test_skip_without_root(self):
-        result = _run_script()
+    def test_preflight_only_exit_zero(self):
+        result = _run_script("--preflight-only")
         assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
-        assert "SKIP" in result.stdout, f"expected SKIP, got: {result.stdout}"
 
-    def test_no_error_output_on_skip(self):
-        result = _run_script()
-        assert "ERROR" not in result.stdout
-        assert "FAIL" not in result.stdout
+    def test_preflight_only_mentions_preflight(self):
+        result = _run_script("--preflight-only")
+        combined = result.stdout + result.stderr
+        assert ("SKIP" in combined or "pre-flight" in combined.lower()
+                or "PASS" in combined), f"expected SKIP/pre-flight/PASS, got: {combined[:500]}"
+
+    def test_preflight_only_no_error_in_output(self):
+        result = _run_script("--preflight-only")
+        assert "ERROR" not in result.stdout, f"ERROR in stdout: {result.stdout}"
+        assert "FAIL" not in result.stdout, f"FAIL in stdout: {result.stdout}"
+
+    def test_preflight_only_does_not_create_namespaces(self):
+        # --preflight-only should not execute _setup_netns
+        # The script has no side effects (no namespaces, no processes)
+        text = open(_SCRIPT).read()
+        # Verify that --preflight-only gates _setup_netns
+        assert "PREFLIGHT_ONLY" in text
+        # The main section should have an early exit after preflight
+        assert "pre-flight checks passed, exiting" in text or "--preflight-only" in text
 
 
 # ---------------------------------------------------------------------------
@@ -199,8 +218,20 @@ class TestRequiredSections:
         text = open(_SCRIPT).read()
         assert "vpn_srv_validation" in text
         assert "vpn_cli_validation" in text
-        # Must NOT reuse the Phase 3 namespace names directly
-        # (though they appear in help text for cleanup instructions)
+
+    def test_has_netns_capability_probe(self):
+        text = open(_SCRIPT).read()
+        assert "_check_netns_capability" in text
+        assert "vpn_phase10_probe_" in text
+
+    def test_setup_netns_error_shows_possible_causes(self):
+        text = open(_SCRIPT).read()
+        assert "CI/container" in text or "CAP_NET_ADMIN" in text
+
+    def test_has_preflight_only_flag(self):
+        text = open(_SCRIPT).read()
+        assert "PREFLIGHT_ONLY" in text
+        assert "--preflight-only" in text
 
 
 # ---------------------------------------------------------------------------

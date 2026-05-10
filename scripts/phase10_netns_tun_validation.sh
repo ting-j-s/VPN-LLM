@@ -31,6 +31,7 @@ E2E_PING=false
 PING_COUNT=2
 PING_TIMEOUT=5
 TCPDUMP=false
+PREFLIGHT_ONLY=false
 
 _usage() {
     cat <<'EOF'
@@ -41,6 +42,9 @@ Options:
   --timeout SECONDS   Max wait for server startup (default: 15)
   --keep              Keep namespaces and TUN devices after validation
   --verbose           Print detailed status and logs
+  --preflight-only    Run only pre-flight checks, exit 0 (skip or pass).
+                      No namespaces, TUN devices, or server/client processes
+                      are created. Safe for CI and non-root environments.
   --e2e-ping          Enable end-to-end TUN ping verification (Phase 10.4)
   --ping-count N      Number of ping packets (default: 2, only with --e2e-ping)
   --ping-timeout SEC  Ping timeout in seconds (default: 5, only with --e2e-ping)
@@ -72,6 +76,8 @@ while [[ $# -gt 0 ]]; do
             PING_COUNT="$2"; shift 2 ;;
         --ping-timeout)
             PING_TIMEOUT="$2"; shift 2 ;;
+        --preflight-only)
+            PREFLIGHT_ONLY=true; shift ;;
         --tcpdump)
             TCPDUMP=true; shift ;;
         -h|--help)
@@ -129,6 +135,20 @@ _pass()  { echo "[PASS]  $*"; }
 _fail()  { echo "[FAIL]  $*"; }
 
 # ---------------------------------------------------------------------------
+# Real netns capability probe
+# ---------------------------------------------------------------------------
+_check_netns_capability() {
+    local probe_ns="vpn_phase10_probe_$$"
+    if ip netns add "$probe_ns" >/dev/null 2>&1; then
+        ip netns delete "$probe_ns" >/dev/null 2>&1 || true
+        return 0
+    fi
+    # Clean up in case add partially succeeded
+    ip netns delete "$probe_ns" >/dev/null 2>&1 || true
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Pre-flight checks — skip gracefully if prerequisites not met
 # ---------------------------------------------------------------------------
 _preflight() {
@@ -163,6 +183,19 @@ _preflight() {
         fi
     fi
 
+    # Real netns capability probe — some environments (CI containers) pass the
+    # above checks but still cannot create network namespaces (e.g., unprivileged
+    # containers, restricted AppArmor/SELinux profiles, missing kernel modules).
+    if ! _check_netns_capability; then
+        echo "SKIP: cannot create network namespace in this environment"
+        echo "  This may be due to:"
+        echo "    - CI/container that does not allow network namespaces"
+        echo "    - Missing or restricted CAP_NET_ADMIN"
+        echo "    - Kernel without CONFIG_NET_NS=y"
+        echo "  For lightweight pre-flight checks in CI, use --preflight-only"
+        exit 0
+    fi
+
     # e2e-ping extra checks
     if $E2E_PING; then
         command -v ping >/dev/null 2>&1 || missing+=("ping")
@@ -175,7 +208,7 @@ _preflight() {
         fi
     fi
 
-    _info "pre-flight checks passed: Linux, ip, python3, /dev/net/tun, privileges"
+    _info "pre-flight checks passed: Linux, ip, python3, /dev/net/tun, privileges, netns capability"
 }
 
 # ---------------------------------------------------------------------------
@@ -242,10 +275,28 @@ _setup_netns() {
     _info "setting up network namespaces..."
 
     # Create namespaces
-    ip netns add "$NS_SRV" 2>/dev/null || { _error "failed to create $NS_SRV"; return 1; }
+    local ns_err
+    ns_err=$(ip netns add "$NS_SRV" 2>&1) || {
+        _error "failed to create namespace '$NS_SRV'"
+        _error "  stderr: ${ns_err:-none}"
+        _error "  Possible causes:"
+        _error "    - CI/container may not allow network namespaces"
+        _error "    - Missing or restricted CAP_NET_ADMIN"
+        _error "    - Kernel without CONFIG_NET_NS=y"
+        _error "  Re-run with --verbose for details"
+        _error "  Use --keep for manual debugging"
+        return 1
+    }
     _verbose "created namespace: $NS_SRV"
 
-    ip netns add "$NS_CLI" 2>/dev/null || { _error "failed to create $NS_CLI"; return 1; }
+    ns_err=$(ip netns add "$NS_CLI" 2>&1) || {
+        _error "failed to create namespace '$NS_CLI'"
+        _error "  stderr: ${ns_err:-none}"
+        _error "  Possible causes: CI/container restriction, missing CAP_NET_ADMIN"
+        # Clean up the first namespace
+        ip netns delete "$NS_SRV" 2>/dev/null || true
+        return 1
+    }
     _verbose "created namespace: $NS_CLI"
 
     # Create veth pair
@@ -684,10 +735,11 @@ _e2e_ping_validation() {
 # ---------------------------------------------------------------------------
 
 echo "=== Phase 10.3/10.4: netns + TUN Validation ==="
-echo "Transport:   $TRANSPORT"
-echo "Timeout:     ${TIMEOUT}s"
-echo "Keep:        $KEEP"
-echo "E2E Ping:    $E2E_PING"
+echo "Transport:      $TRANSPORT"
+echo "Timeout:        ${TIMEOUT}s"
+echo "Keep:           $KEEP"
+echo "Preflight-only: $PREFLIGHT_ONLY"
+echo "E2E Ping:       $E2E_PING"
 if $E2E_PING; then
     echo "Ping count:  $PING_COUNT"
     echo "Ping timeout: ${PING_TIMEOUT}s"
@@ -696,6 +748,11 @@ fi
 echo ""
 
 _preflight
+
+if $PREFLIGHT_ONLY; then
+    _info "--preflight-only: all pre-flight checks passed, exiting"
+    exit 0
+fi
 
 trap _cleanup EXIT
 
