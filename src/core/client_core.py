@@ -115,6 +115,14 @@ class ClientCore:
             self.tun.close()
             raise VPNError("Transport connection failed")
 
+        # Send AUTH frame immediately so server can negotiate session_id
+        try:
+            auth_frame = create_frame(FrameType.AUTH, self.session_id)
+            self.transport.send(encode_frame(auth_frame))
+            logger.debug("Sent AUTH frame to server")
+        except Exception as e:
+            logger.warning(f"Failed to send AUTH frame: {e}")
+
         # Initialize heartbeat state
         now = time.time()
         self._last_sent_time = now

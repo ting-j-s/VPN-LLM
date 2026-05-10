@@ -40,6 +40,20 @@ diff --git a/src/transport/websocket_transport.py b/src/transport/websocket_tran
 """
 
 
+def _valid_edits() -> str:
+    """FIND/REPLACE format output for generate() tests.
+
+    Uses the current on-disk state of config/server.yaml so the FIND
+    substring matches reality — generate() reads the real file.
+    """
+    return """FILE: config/server.yaml
+<<<FIND
+  type: websocket
+<<<REPLACE
+  type: tcp
+"""
+
+
 def _valid_plan() -> LLMTaskPlan:
     return LLMTaskPlan(
         task_type="transport_change",
@@ -298,17 +312,17 @@ class TestScanForSecrets:
 # ---------------------------------------------------------------------------
 
 class TestGenerate:
-    """Test generate() with mock HTTP."""
+    """Test generate() with mock HTTP, using FIND/REPLACE format."""
 
     def test_generates_valid_patch(self, monkeypatch, tmp_path):
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_diff())
+        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_edits())
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
         assert "diff --git" in patch
         assert "--- a/config/server.yaml" in patch
         assert "+++ b/config/server.yaml" in patch
 
-    def test_rejects_non_diff_llm_output(self, monkeypatch, tmp_path):
+    def test_rejects_non_edit_llm_output(self, monkeypatch, tmp_path):
         gen = _make_generator(
             monkeypatch, CONFIG_PATH,
             response_text="I suggest modifying the transport config file to use WebSocket."
@@ -316,46 +330,44 @@ class TestGenerate:
         plan = _valid_plan()
         with pytest.raises(LLMPatchGeneratorError) as excinfo:
             gen.generate("switch to websocket", plan, "context")
-        assert "diff --git" in str(excinfo.value)
+        assert "FILE:" in str(excinfo.value)
 
     def test_rejects_diff_with_blocked_file_path(self, monkeypatch, tmp_path):
-        bad_diff = """diff --git a/.env b/.env
---- a/.env
-+++ b/.env
-@@ -1,1 +1,1 @@
--OLD=value
-+NEW=value
+        bad_edits = """FILE: .env
+<<<FIND
+OLD=value
+<<<REPLACE
+NEW=value
 """
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=bad_diff)
+        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=bad_edits)
         plan = _valid_plan()
         with pytest.raises(LLMPatchGeneratorError) as excinfo:
             gen.generate("bad patch", plan, "context")
-        assert "blocked" in str(excinfo.value).lower()
+        assert "unsafe" in str(excinfo.value).lower()
 
     def test_rejects_diff_with_llm_agent_config_path(self, monkeypatch, tmp_path):
-        bad_diff = """diff --git a/config/llm_agent.yaml b/config/llm_agent.yaml
---- a/config/llm_agent.yaml
-+++ b/config/llm_agent.yaml
-@@ -1,1 +1,1 @@
--old
-+new
+        bad_edits = """FILE: config/llm_agent.yaml
+<<<FIND
+old
+<<<REPLACE
+new
 """
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=bad_diff)
+        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=bad_edits)
         plan = _valid_plan()
         with pytest.raises(LLMPatchGeneratorError) as excinfo:
             gen.generate("bad patch", plan, "context")
         assert "blocked" in str(excinfo.value).lower()
 
     def test_rejects_diff_with_secret_content(self, monkeypatch, tmp_path):
-        bad_diff = _valid_diff() + "\n+-----BEGIN RSA PRIVATE KEY-----\n+content\n+-----END RSA PRIVATE KEY-----"
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=bad_diff)
+        bad_edits = _valid_edits() + "\n+-----BEGIN RSA PRIVATE KEY-----\n+content\n+-----END RSA PRIVATE KEY-----"
+        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=bad_edits)
         plan = _valid_plan()
         with pytest.raises(LLMPatchGeneratorError) as excinfo:
             gen.generate("bad patch", plan, "context")
         assert "private key" in str(excinfo.value)
 
     def test_strips_markdown_fences_from_llm_output(self, monkeypatch, tmp_path):
-        raw = "```diff\n" + _valid_diff() + "\n```"
+        raw = "```\n" + _valid_edits() + "\n```"
         gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=raw)
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
@@ -391,19 +403,15 @@ class TestNoSideEffects:
     """Verify patch generation does not modify the working tree."""
 
     def test_does_not_write_source_files(self, monkeypatch, tmp_path):
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_diff())
+        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_edits())
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
-        # The patch text exists as a string, but no file should have been written
         assert isinstance(patch, str)
-        # config/server.yaml should still be the original
         assert os.path.exists("config/server.yaml")
 
     def test_does_not_call_git_apply(self, monkeypatch, tmp_path):
         """generate() only returns diff text — it does not call git apply."""
-        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_diff())
+        gen = _make_generator(monkeypatch, CONFIG_PATH, response_text=_valid_edits())
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
-        # The returned patch is just text, not applied
         assert "diff --git" in patch
-        assert "transport:" not in patch or "websocket" not in patch or True

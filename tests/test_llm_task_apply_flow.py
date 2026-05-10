@@ -48,13 +48,12 @@ def _make_temp_git_repo(tmp_path):
     return str(repo)
 
 
-def _valid_diff():
-    return """diff --git a/a.py b/a.py
---- a/a.py
-+++ b/a.py
-@@ -1 +1 @@
--old
-+new
+def _valid_edits():
+    return """FILE: a.py
+<<<FIND
+old
+<<<REPLACE
+new
 """
 
 
@@ -63,7 +62,7 @@ def _setup_mock_api(monkeypatch, plan_extra=None, patch_text=None):
     """Set up mock HTTP for LLMTaskPlanner and LLMPatchGenerator.
 
     plan_extra: extra fields to merge into the plan JSON.
-    patch_text: diff text for the patch generator response (default: _valid_diff).
+    patch_text: edit text for the patch generator response (default: _valid_edits).
     """
     import urllib.request
 
@@ -79,7 +78,7 @@ def _setup_mock_api(monkeypatch, plan_extra=None, patch_text=None):
         plan_data.update(plan_extra)
 
     if patch_text is None:
-        patch_text = _valid_diff()
+        patch_text = _valid_edits()
 
     call_count = [0]
 
@@ -184,12 +183,11 @@ class TestApplyCheckBlocksApply:
         repo = _make_temp_git_repo(tmp_path)
 
         # Produce a diff that references a non-existent file — check will fail
-        bad_patch = """diff --git a/nonexistent.py b/nonexistent.py
---- a/nonexistent.py
-+++ b/nonexistent.py
-@@ -1 +1 @@
--old
-+new
+        bad_patch = """FILE: nonexistent.py
+<<<FIND
+old
+<<<REPLACE
+new
 """
         _setup_mock_api(monkeypatch, patch_text=bad_patch)
         rc = _run_main(monkeypatch, repo, ["--generate-patch", "--apply-patch"],

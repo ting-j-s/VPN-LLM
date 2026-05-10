@@ -145,59 +145,63 @@ def write_report(
             lines.append("Some replacement smokes failed. Do not commit until fixed.")
         lines.append("")
 
-    # Failure summary
-    all_checks = [
+    # Failure summary — separate pre-apply from post-apply
+    pre_apply_checks = [
         ("Compile Check", compile_result),
         ("Targeted Tests", targeted_result),
         ("Full Test Suite", full_result),
         ("Git Status", git_result),
         ("Git Apply Check", git_apply_check_result if patch_text is not None else None),
     ]
+    pre_failures = [(l, r) for l, r in pre_apply_checks if r is not None and not r.success]
+
+    post_apply_checks = []
     if patch_was_applied:
-        all_checks.append(("Git Apply", apply_result))
+        post_apply_checks.append(("Git Apply", apply_result))
         if post_apply_validation:
             for label, result in post_apply_validation.items():
                 if result is not None:
-                    all_checks.append((f"Post-Apply {label}", result))
+                    post_apply_checks.append((f"Post-Apply {label}", result))
         if rs_result is not None and not rs_result.success:
-            all_checks.append(("Replacement Smoke", type("_", (), {
+            post_apply_checks.append(("Replacement Smoke", type("_", (), {
                 "success": False, "returncode": rs_result.returncode,
                 "stderr": rs_result.error or "",
             })()))
-    failures = [(label, result) for label, result in all_checks if result is not None and not result.success]
+    post_failures = [(l, r) for l, r in post_apply_checks if not r.success]
 
     lines.append("## Failure Summary")
     lines.append("")
-    if failures:
-        for label, result in failures:
+    if pre_failures:
+        lines.append("### Pre-Apply")
+        lines.append("")
+        for label, result in pre_failures:
             lines.append(f"- **{label}**: returncode={result.returncode}")
             if result.stderr:
                 lines.append(f"  ```\n  {result.stderr[:500]}\n  ```")
-    else:
+    if post_failures:
+        lines.append("### Post-Apply")
+        lines.append("")
+        for label, result in post_failures:
+            lines.append(f"- **{label}**: returncode={result.returncode}")
+            if result.stderr:
+                lines.append(f"  ```\n  {result.stderr[:500]}\n  ```")
+    if not pre_failures and not post_failures:
         lines.append("No failures detected.")
     lines.append("")
 
     # Conclusion
-    all_pass = compile_result.success and full_result.success
-    if targeted_result is not None:
-        all_pass = all_pass and targeted_result.success
-    if git_apply_check_result is not None:
-        all_pass = all_pass and git_apply_check_result.success
-    post_apply_all_pass = True
-    if patch_was_applied:
-        all_pass = all_pass and apply_result.success
-        if post_apply_validation:
-            for result in post_apply_validation.values():
-                if result is not None and not result.success:
-                    all_pass = False
-                    post_apply_all_pass = False
-    if rs_result is not None and not rs_result.success:
-        all_pass = False
+    post_apply_all_pass = len(post_failures) == 0
+    all_pass = len(pre_failures) == 0 and post_apply_all_pass
 
     lines.append("## Conclusion")
     lines.append("")
     if all_pass:
         lines.append("All validation checks passed.")
+    elif patch_was_applied and post_apply_all_pass:
+        lines.append(
+            f"All post-apply checks passed ({len(pre_failures)} pre-apply "
+            f"check(s) failed — likely due to test data being stale after revert)."
+        )
     else:
         lines.append("Some validation checks failed. See failure summary above.")
     lines.append("")

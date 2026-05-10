@@ -33,24 +33,24 @@ class LLMPatchGenerator:
     SYSTEM_PROMPT = (
         "You are a patch generator for a VPN software project. "
         "Given a user request, a task plan, and repository context, "
-        "generate a unified diff (git diff format) that implements the requested changes.\n\n"
+        "output edit instructions in FIND/REPLACE format.\n\n"
+        "FORMAT (repeat for each file):\n"
+        "FILE: <path>\n"
+        "<<<FIND\n"
+        "exact lines to find in the file (must match exactly, including whitespace)\n"
+        "<<<REPLACE\n"
+        "replacement lines\n\n"
         "CRITICAL RULES:\n"
-        "- Output ONLY the unified diff. No markdown, no explanation, no code fences.\n"
-        "- Start every file section with: diff --git a/<path> b/<path>\n"
-        "- Include --- a/<path> and +++ b/<path> headers\n"
-        "- Include proper @@ hunk headers with line numbers\n"
+        "- Output ONLY the edit blocks. No markdown, no explanation, no code fences.\n"
+        "- The FIND block must be an EXACT substring of the file content.\n"
+        "- FIND the smallest specific section that needs changing, not the entire file.\n"
+        "- Make ONLY the changes the user requested. Do NOT change unrelated values\n"
+        "  (ports, IPs, comments, etc.) unless the request explicitly asks for them.\n"
+        "- Preserve the exact indentation of the surrounding code. New lines in REPLACE\n"
+        "  must use the same indentation characters (spaces/tabs) as the lines they replace.\n"
         "- Do NOT modify .env, .git/, .claude/, *.key, *.pem, or config/llm_agent.yaml\n"
-        "- Do NOT include any API keys, private keys, tokens, or passwords in the diff\n"
-        "- If you cannot generate a safe patch, output an empty diff\n\n"
-        "Example output format:\n"
-        "diff --git a/config/server.yaml b/config/server.yaml\n"
-        "--- a/config/server.yaml\n"
-        "+++ b/config/server.yaml\n"
-        "@@ -10,7 +10,7 @@\n"
-        " transport:\n"
-        "-  type: tcp\n"
-        "+  type: websocket\n"
-        "   port: 8080\n"
+        "- Do NOT include any API keys, private keys, tokens, or passwords\n"
+        "- If you cannot generate a safe patch, output nothing.\n"
     )
 
     # Sensitive content patterns to reject in diff bodies
@@ -103,20 +103,20 @@ class LLMPatchGenerator:
 
         Returns the raw patch text after passing all safety checks.
 
-        Raises LLMPatchGeneratorError on any failure: HTTP error, invalid diff
+        Raises LLMPatchGeneratorError on any failure: HTTP error, invalid edit
         format, unsafe file paths, or sensitive content.
         """
         raw = self._call_api(user_request, task_plan, repository_context)
-        diff_text = self._extract_diff(raw)
-        file_paths = self._parse_file_paths(diff_text)
+        edits = self._parse_edit_blocks(raw)
+        if not edits:
+            raise LLMPatchGeneratorError("LLM returned no valid edit blocks")
 
-        # SafetyGate 1: validate every file path touched by the diff
-        for path in file_paths:
-            self._validate_file_path(path)
+        for filepath, find_str, replace_str in edits:
+            self._validate_file_path(filepath)
 
-        # SafetyGate 2: scan diff content for secrets
+        diff_text = self._generate_diff(edits)
+
         self._scan_for_secrets(diff_text)
-
         return diff_text
 
     # ------------------------------------------------------------------
@@ -197,7 +197,108 @@ class LLMPatchGenerator:
         return content
 
     # ------------------------------------------------------------------
-    # Internal: diff extraction and validation
+    # Internal: edit block parsing (FIND/REPLACE format)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_edit_blocks(raw: str) -> list[tuple[str, str, str]]:
+        """Parse LLM output into (filepath, find_str, replace_str) tuples."""
+        text = raw.strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        if not text:
+            raise LLMPatchGeneratorError("LLM returned empty output")
+
+        edits = []
+        # Pattern: FILE: <path>\n<<<FIND\n...<<<REPLACE\n...
+        # Split by FILE: to get blocks
+        blocks = re.split(r'\n(?=FILE:\s)', text)
+
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+
+            # Parse FILE: line
+            m = re.match(r'^FILE:\s*(.+)$', block, re.MULTILINE)
+            if not m:
+                raise LLMPatchGeneratorError(
+                    f"Edit block missing FILE: header: {block[:200]}"
+                )
+            filepath = m.group(1).strip()
+
+            # Parse FIND / REPLACE sections
+            find_match = re.search(r'<<<FIND\n(.*?)(?=\n<<<REPLACE|\Z)', block, re.DOTALL)
+            replace_match = re.search(r'<<<REPLACE\n(.*?)$', block, re.DOTALL)
+
+            if not find_match:
+                raise LLMPatchGeneratorError(
+                    f"Edit block for {filepath} missing <<<FIND section"
+                )
+            find_str = find_match.group(1)
+
+            replace_str = ""
+            if replace_match:
+                replace_str = replace_match.group(1)
+
+            edits.append((filepath, find_str, replace_str))
+
+        return edits
+
+    @staticmethod
+    def _generate_diff(edits: list[tuple[str, str, str]]) -> str:
+        """Generate a correct unified diff from edit blocks using difflib."""
+        import difflib
+
+        parts = []
+        for filepath, find_str, replace_str in edits:
+            if not os.path.isfile(filepath):
+                raise LLMPatchGeneratorError(
+                    f"Cannot patch non-existent file: {filepath}"
+                )
+            with open(filepath, "r", encoding="utf-8") as f:
+                original = f.read()
+
+            if find_str not in original:
+                raise LLMPatchGeneratorError(
+                    f"FIND string not found in {filepath}. "
+                    f"FIND: {find_str[:200]!r}"
+                )
+
+            modified = original.replace(find_str, replace_str, 1)
+            had_newline = original.endswith("\n")
+
+            parts.append(f"diff --git a/{filepath} b/{filepath}\n")
+            diff = difflib.unified_diff(
+                original.splitlines(keepends=True),
+                modified.splitlines(keepends=True),
+                fromfile=f"a/{filepath}",
+                tofile=f"b/{filepath}",
+            )
+            diff_text = "".join(diff)
+            if not had_newline:
+                # File lacks trailing newline — insert the standard marker
+                # so git apply can match context and multi-file patches
+                # have clean separation.
+                diff_text += "\n\\ No newline at end of file\n"
+            elif diff_text and not diff_text.endswith("\n"):
+                diff_text += "\n"
+            parts.append(diff_text)
+
+        result = "".join(parts)
+        if not result:
+            raise LLMPatchGeneratorError("Generated diff is empty")
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal: legacy diff extraction (kept for test compatibility)
     # ------------------------------------------------------------------
 
     @staticmethod

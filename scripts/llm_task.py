@@ -53,6 +53,33 @@ def load_patch_generator(config_path: str):
         sys.exit(1)
 
 
+def _validate_llm_commands(commands: list[str]) -> list[str]:
+    """Filter out LLM-suggested commands that reference non-existent files.
+
+    LLM planners may hallucinate test paths (e.g., tests/test_e2e.py).
+    This keeps only commands whose referenced files exist on disk.
+    """
+    import re
+
+    kept = []
+    for cmd in commands:
+        # Extract file-path-like arguments from the command
+        parts = cmd.split()
+        ok = True
+        for part in parts:
+            if not part.endswith(".py"):
+                continue
+            candidate = os.path.join(_project_root, part)
+            if not os.path.exists(candidate):
+                ok = False
+                break
+        if ok:
+            kept.append(cmd)
+        else:
+            print(f"  Skipping LLM-suggested command (missing file): {cmd[:80]}")
+    return kept
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="LLM Task Agent - MVP (plan + validate only)"
@@ -195,6 +222,7 @@ def main():
     # Also run LLM-suggested validation commands if available (only safe ones)
     llm_commands = getattr(plan, "validation_commands", [])
     if llm_commands and planner_type == "llm_based":
+        llm_commands = _validate_llm_commands(llm_commands)
         print("Running LLM-suggested validation commands...")
         for cmd in llm_commands:
             # SafetyGuard re-check (belt and suspenders)
@@ -226,7 +254,7 @@ def main():
 
         patch_gen = load_patch_generator(args.llm_config)
 
-        # Build lightweight repository context
+        # Build repository context with file contents so LLM can write exact FIND blocks
         repo_context_lines = [
             f"Task type: {plan.task_type}",
             f"Target transport: {plan.target_transport or 'N/A'}",
@@ -234,6 +262,30 @@ def main():
         ]
         for area in plan.affected_areas:
             repo_context_lines.append(f"  - {area}")
+
+        # Include file contents for candidate files (capped to avoid overflow)
+        repo_context_lines.append("")
+        repo_context_lines.append("File contents (for exact FIND matching):")
+        max_file_bytes = 8192
+        for fpath in plan.candidate_files:
+            if not os.path.isfile(fpath):
+                continue
+            ext = os.path.splitext(fpath)[1].lower()
+            if ext in (".key", ".pem", ".crt"):
+                continue
+            try:
+                size = os.path.getsize(fpath)
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read(max_file_bytes)
+                repo_context_lines.append(f"")
+                repo_context_lines.append(f"--- {fpath} ({size} bytes) ---")
+                repo_context_lines.append(content)
+                if size > max_file_bytes:
+                    repo_context_lines.append("... (truncated)")
+            except Exception:
+                repo_context_lines.append(f"")
+                repo_context_lines.append(f"--- {fpath} (unable to read) ---")
+
         repo_context = "\n".join(repo_context_lines)
 
         try:
@@ -325,6 +377,7 @@ def main():
             # Run LLM-suggested validation commands first, then fall back to targeted tests
             llm_cmds = getattr(plan, "validation_commands", [])
             if llm_cmds and planner_type == "llm_based":
+                llm_cmds = _validate_llm_commands(llm_cmds)
                 print("Running LLM-suggested validation commands (post-apply)...")
                 for cmd in llm_cmds:
                     try:

@@ -42,13 +42,12 @@ def _make_temp_git_repo(tmp_path):
     return str(repo)
 
 
-def _valid_diff():
-    return """diff --git a/a.py b/a.py
---- a/a.py
-+++ b/a.py
-@@ -1 +1 @@
--old
-+new
+def _valid_edits():
+    return """FILE: a.py
+<<<FIND
+old
+<<<REPLACE
+new
 """
 
 
@@ -68,7 +67,7 @@ def _setup_mock_api(monkeypatch, plan_extra=None, patch_text=None):
         plan_data.update(plan_extra)
 
     if patch_text is None:
-        patch_text = _valid_diff()
+        patch_text = _valid_edits()
 
     call_count = [0]
 
@@ -253,12 +252,11 @@ class TestCommitAdviceNotGenerated:
         """--suggest-commit with a bad patch should not generate advice."""
         repo = _make_temp_git_repo(tmp_path)
 
-        bad_patch = """diff --git a/nonexistent.py b/nonexistent.py
---- a/nonexistent.py
-+++ b/nonexistent.py
-@@ -1 +1 @@
--old
-+new
+        bad_patch = """FILE: nonexistent.py
+<<<FIND
+old
+<<<REPLACE
+new
 """
         _setup_mock_api(monkeypatch, patch_text=bad_patch)
 

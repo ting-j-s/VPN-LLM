@@ -61,11 +61,13 @@ class ServerCore:
         self.transport = transport
 
         # Generate session ID if not provided
+        self._session_id_explicit = session_id is not None
         if session_id is None:
             session_id = uuid.uuid4().bytes
         if len(session_id) != 16:
             raise VPNError("session_id must be 16 bytes")
         self.session_id = session_id
+        self._session_adopted = False
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
 
@@ -294,8 +296,17 @@ class ServerCore:
             frame: Decoded frame.
         """
         if frame.session_id != self.session_id:
-            logger.warning("Dropping frame with unexpected session_id")
-            return
+            if not self._session_id_explicit and not self._session_adopted:
+                old_hex = uuid.UUID(bytes=self.session_id).hex[:8]
+                self.session_id = frame.session_id
+                self._session_adopted = True
+                new_hex = uuid.UUID(bytes=self.session_id).hex[:8]
+                logger.info(
+                    f"Auto-adopted client session_id: {old_hex} -> {new_hex}"
+                )
+            else:
+                logger.warning("Dropping frame with unexpected session_id")
+                return
 
         if frame.frame_type == FrameType.DATA:
             if frame.payload:
