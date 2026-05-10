@@ -7,14 +7,13 @@ client:
 
 server:
   host: 127.0.0.1
-  port: 2223
+  port: 2222
 
 transport:
   type: tls
-  certfile: /path/to/client.crt
-  keyfile: /path/to/client.key
-  cafile: /path/to/ca.crt
-  verify_server: true
+  cafile: cert.pem
+  verify_server: false
+  insecure_skip_verify: true
 
 session:
   heartbeat_interval: 10

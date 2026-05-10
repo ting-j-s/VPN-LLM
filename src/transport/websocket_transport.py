@@ -98,6 +98,7 @@ class WebSocketTransport(Transport):
         self._server_ready = threading.Event()
         self._connection_event = threading.Event()
         self._setup_error: Optional[Exception] = None
+        self._loop_ready = threading.Event()
 
     # ------------------------------------------------------------------
     # Event-loop management
@@ -110,15 +111,19 @@ class WebSocketTransport(Transport):
         if self._shutting_down:
             raise TransportError("Transport is shutting down")
 
+        self._loop_ready.clear()
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
             target=self._run_loop, daemon=True, name="ws-transport-loop"
         )
         self._loop_thread.start()
+        if not self._loop_ready.wait(timeout=5.0):
+            raise TransportError("Event loop failed to start")
 
     def _run_loop(self) -> None:
         """Run the event loop forever.  Entry point for the background thread."""
         asyncio.set_event_loop(self._loop)
+        self._loop.call_soon(self._loop_ready.set)
         self._loop.run_forever()
         # Drain remaining tasks after the loop is stopped
         try:
@@ -190,12 +195,12 @@ class WebSocketTransport(Transport):
 
     async def _async_connect_client(self) -> None:
         """Client-connect coroutine — runs until the WebSocket is closed."""
-        from websockets.asyncio.client import connect
-
         extra_h = dict(self.extra_headers) if self.extra_headers else None
         url = f"ws://{self.host}:{self.port}{self.path}"
 
         try:
+            from websockets.asyncio.client import connect
+
             async with connect(url, additional_headers=extra_h) as ws:
                 self._ws = ws
                 self._connected = True
@@ -233,9 +238,9 @@ class WebSocketTransport(Transport):
                      self.host, self.port)
 
     async def _async_start_server(self) -> None:
-        from websockets.asyncio.server import serve
-
         try:
+            from websockets.asyncio.server import serve
+
             self._server = await serve(
                 self._ws_handler,
                 self.host,
