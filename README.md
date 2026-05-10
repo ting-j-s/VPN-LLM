@@ -131,7 +131,7 @@ pip install paramiko websockets requests pyyaml
 ### 运行测试
 
 ```bash
-cd /data/xjr/VPN-LLM/vpn_tunnel
+cd /data/xjr/VPN-LLM
 python3 -m pytest tests/ -v
 ```
 
@@ -296,7 +296,7 @@ transport:
 
 ### 传输层封装
 
-每个 Transport 在发送前额外添加 4 字节长度前缀：
+TCP / TLS / SSH Transport 在发送前额外添加 4 字节 big-endian 长度前缀，接收时先读长度再读完整 Frame：
 
 ```
 ┌──────────────┬─────────────┐
@@ -304,6 +304,8 @@ transport:
 │  big-endian  │             │
 └──────────────┴─────────────┘
 ```
+
+WebSocket Transport 使用一个 binary WebSocket message 承载一个完整 Frame，不额外添加 length prefix。Frame 自身仍统一使用 Magic / Version / Type / Length / Session ID / Payload 格式。
 
 ### 帧类型
 

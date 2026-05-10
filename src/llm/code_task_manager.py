@@ -256,7 +256,7 @@ class CodeTaskManager:
         commands = []
 
         # Always include the basic test command
-        commands.append("cd /data/xjr/VPN-LLM/vpn_tunnel && python3 -m pytest tests/ -v --tb=short")
+        commands.append("cd /data/xjr/VPN-LLM && python3 -m pytest tests/ -v --tb=short")
 
         # Add specific test file if transport
         transport_files = [f for f in files if "transport" in f and f.endswith(".py")]
@@ -264,7 +264,7 @@ class CodeTaskManager:
             test_file = transport_files[0].replace("src/", "tests/test_").replace(".py", ".py")
             # Don't duplicate if same as first
             if not any("test_transport" in c for c in commands):
-                commands.insert(0, f"cd /data/xjr/VPN-LLM/vpn_tunnel && python3 -m pytest tests/test_transport*.py -v --tb=short")
+                commands.insert(0, f"cd /data/xjr/VPN-LLM && python3 -m pytest tests/test_transport*.py -v --tb=short")
 
         return commands[:2]  # Limit to 2 commands
 
