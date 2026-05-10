@@ -204,6 +204,35 @@ class TestWebSocketTransportRoundtrip:
             client.close()
             server.close()
 
+    def test_client_to_server_multiple_messages_preserve_order(self):
+        """Client sends multiple messages sequentially; server receives them in the same order."""
+        port = _get_free_port()
+
+        server = WebSocketTransport(
+            mode="server", host="127.0.0.1", port=port,
+        )
+        client = WebSocketTransport(
+            mode="client", host="127.0.0.1", port=port,
+        )
+
+        try:
+            server.connect()
+            client.connect()
+            server.accept(timeout=5.0)
+
+            messages = [f"msg-{i}".encode() for i in range(5)]
+            for msg in messages:
+                client.send(msg)
+
+            received = []
+            for _ in range(len(messages)):
+                received.append(server.recv(timeout=2.0))
+
+            assert received == messages
+        finally:
+            client.close()
+            server.close()
+
     def test_recv_timeout_raises_transport_timeout(self):
         """recv with short timeout raises TransportTimeout when no data."""
         port = _get_free_port()
