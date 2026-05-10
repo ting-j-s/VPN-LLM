@@ -185,3 +185,35 @@ class TestTaskRecordSafety:
     def test_allows_normal_directory(self, tmp_path):
         mgr = TaskRecordManager(str(tmp_path))
         assert mgr is not None
+
+    def test_save_patch_writes_patch_diff(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test patch")
+        patch_text = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        mgr.save_patch(task_id, patch_text)
+        patch_path = os.path.join(tmp_path, task_id, "patch.diff")
+        assert os.path.isfile(patch_path)
+        content = open(patch_path).read()
+        assert "diff --git" in content
+        assert "x.py" in content
+
+    def test_patch_present_in_all_artifacts(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("full flow with patch")
+        plan = TaskPlan(
+            task_type=TASK_TRANSPORT_CHANGE,
+            description="full flow with patch",
+            target_transport="websocket",
+            affected_areas=["src/transport/", "config/"],
+        )
+        mgr.save_plan(task_id, plan)
+        mgr.save_patch(task_id, "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n")
+        mgr.save_validation_result(task_id, {
+            "compile": ValidationResult("compileall", 0, "", ""),
+        })
+        mgr.update_status(task_id, "completed", all_passed=True)
+        mgr.save_report(task_id, "# Report\nDone.")
+
+        task_dir = os.path.join(tmp_path, task_id)
+        for fname in ("request.txt", "plan.json", "validation.json", "status.json", "report.md", "patch.diff"):
+            assert os.path.isfile(os.path.join(task_dir, fname)), f"Missing: {fname}"

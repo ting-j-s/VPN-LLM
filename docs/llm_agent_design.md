@@ -212,10 +212,99 @@ python3 scripts/llm_task.py --request "..."
 python3 scripts/llm_task.py --request "..." --use-llm-planner
 ```
 
+## Phase 9.8: LLM Patch Generation (Dry-Run Only)
+
+### Overview
+
+An optional LLM-based patch generator (`LLMPatchGenerator`) that produces unified
+diffs for a given task plan. **The patch is saved to disk and validated via
+`git apply --check` but is NEVER automatically applied, committed, or pushed.**
+
+The LLM is ONLY used for diff generation — it cannot write files, apply patches,
+commit, or push. The generated patch must pass strict format validation AND
+SafetyGuard checks before being saved.
+
+### Key Design Decisions
+
+- **Requires `--generate-patch` AND `--use-llm-planner`**: Both flags must be
+  present. `--generate-patch` alone exits with an error.
+- **Dry-run only**: The CLI saves `patch.diff` and runs `git apply --check`.
+  The patch is NOT applied. A human must review and manually apply it.
+- **Dual safety validation**: Every file path in the diff is checked against
+  SafetyGuard AND a patch-specific blocklist. Diff content is scanned for
+  secrets.
+- **Strict diff format**: The LLM output must contain `diff --git`, `--- a/`,
+  and `+++ b/` headers. Non-diff output is rejected.
+
+### Patch Blocklist
+
+Beyond the standard SafetyGuard paths, the patch generator also blocks:
+- `config/llm_agent.yaml` and `config/llm_agent.yaml.example`
+- `.claude/` prefix paths
+- `.git/` prefix paths
+- `*.key`, `*.pem`, `*.crt` extensions
+
+### Secret Scanning
+
+The diff content is scanned for:
+- `-----BEGIN ... PRIVATE KEY-----` (RSA, EC, DSA, OpenSSH)
+- `-----BEGIN CERTIFICATE-----`
+- `sk-...` API key patterns
+- `AIza...` Google API keys
+- `eyJ...` JWT tokens (base64url-encoded JSON)
+- `api_key = "..."` / `api_key: "..."` assignments
+- `password = "..."` / `password: "..."` assignments
+- `Bearer ...` authorization tokens
+
+Any match causes immediate rejection.
+
+### Validation Pipeline (Extended)
+
+| Stage | Command | Purpose |
+|-------|---------|---------|
+| 1. Compile check | `python3 -m compileall src tests` | Syntax validity |
+| 2. Targeted tests | `python3 -m pytest tests/<relevant> -v` | Feature-specific checks |
+| 3. Full test suite | `python3 -m pytest tests/ -v` | Regression check |
+| 4. Git status | `git status --short` | Audit what changed |
+| 5. Patch generation | LLM API call | Generate unified diff (optional) |
+| 6. Git apply check | `git apply --check <patch.diff>` | Validate patch applicability |
+
+### CLI Usage
+
+```bash
+# Generate patch (dry-run)
+python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch
+
+# Error: --generate-patch alone is rejected
+python3 scripts/llm_task.py --request "switch to websocket" --generate-patch
+# Error: --generate-patch requires --use-llm-planner
+```
+
+### Module: `src/llm/patch_generator.py`
+
+- `LLMPatchGenerator(config_path)` — loads config, reads API key from env
+- `generate(request, task_plan, repo_context) -> str` — returns validated diff
+- `_extract_diff(raw)` — strips markdown fences, validates diff format
+- `_parse_file_paths(diff_text)` — extracts file paths from diff headers
+- `_validate_file_path(path)` — SafetyGuard + patch-specific blocklist
+- `_scan_for_secrets(diff_text)` — rejects diffs containing secrets
+
+### Task Record Extensions
+
+- `patch.diff` — the raw generated unified diff
+- `validation.json` now includes `git_apply_check` result
+- `report.md` includes Patch Generation section with file list and status
+
+### Report Extensions
+
+When a patch is generated, the report includes:
+- **Patch Generation** section with status (always "not applied"), size, file list
+- **Git Apply Check** result section
+- Conclusion note: "Patch was generated and saved as `patch.diff` — NOT applied."
+
 ## Future Extensions
 
-- Real LLM integration for plan/code generation
-- Automated modification within allowed paths
+- Automated modification within allowed paths (post human-review gate)
 - Failure-feedback loop (retry on validation failure, max 3)
 - Session audit log
 - Dry-run preview mode

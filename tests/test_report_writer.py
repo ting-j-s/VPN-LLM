@@ -7,6 +7,7 @@ import pytest
 
 from src.llm.report_writer import write_report
 from src.llm.task_planner import TaskPlan, TASK_TRANSPORT_CHANGE, TASK_UNKNOWN
+from src.llm.llm_task_planner import LLMTaskPlan
 from src.llm.validation_runner import ValidationResult
 
 
@@ -210,3 +211,126 @@ class TestReportWriterSafety:
             _make_result(), None, _make_result(), _make_result(),
         )
         assert len(report) > 0
+
+
+class TestReportWriterPatchSection:
+    """Test that patch-related sections appear when patch is provided."""
+
+    def test_report_without_patch_has_no_patch_section(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+        )
+        assert "Patch Generation" not in report
+
+    def test_report_with_patch_shows_patch_section(self):
+        plan = _make_plan()
+        patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            patch_text=patch,
+            patch_file_paths=["x.py"],
+            git_apply_check_result=None,
+        )
+        assert "Patch Generation" in report
+
+    def test_report_shows_patch_not_applied(self):
+        plan = _make_plan()
+        patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            patch_text=patch,
+            patch_file_paths=["x.py"],
+            git_apply_check_result=None,
+        )
+        assert "patch was generated but not applied" in report
+
+    def test_report_shows_patch_size(self):
+        plan = _make_plan()
+        patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            patch_text=patch,
+            patch_file_paths=["x.py"],
+            git_apply_check_result=None,
+        )
+        assert f"{len(patch)} bytes" in report
+
+    def test_report_shows_patch_files(self):
+        plan = _make_plan()
+        patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            patch_text=patch,
+            patch_file_paths=["x.py", "y.py"],
+            git_apply_check_result=None,
+        )
+        assert "x.py" in report
+        assert "y.py" in report
+
+    def test_report_with_patch_has_conclusion_note(self):
+        plan = _make_plan()
+        patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            patch_text=patch,
+            patch_file_paths=["x.py"],
+            git_apply_check_result=None,
+        )
+        assert "not applied" in report.lower()
+
+    def test_report_shows_git_apply_check_pass(self):
+        plan = _make_plan()
+        patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        apply_result = _make_result(0, "check ok", "")
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            patch_text=patch,
+            patch_file_paths=["x.py"],
+            git_apply_check_result=apply_result,
+        )
+        assert "Git Apply Check" in report
+
+    def test_report_shows_git_apply_check_fail(self):
+        plan = _make_plan()
+        patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        apply_result = _make_result(1, "", "error: patch does not apply")
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            patch_text=patch,
+            patch_file_paths=["x.py"],
+            git_apply_check_result=apply_result,
+        )
+        assert "Git Apply Check" in report
+        assert "failure" in report.lower() or "Some validation checks failed" in report
+
+    def test_patch_report_with_llm_plan(self):
+        plan = LLMTaskPlan(
+            task_type="transport_change",
+            target_transport="websocket",
+            summary="Switch transport to WebSocket",
+            candidate_files=["config/server.yaml"],
+            validation_commands=[],
+            risk_level="medium",
+        )
+        patch = "diff --git a/config/server.yaml b/config/server.yaml\n--- a/config/server.yaml\n+++ b/config/server.yaml\n@@ -10 +10 @@\n-  type: tcp\n+  type: websocket\n"
+        report = write_report(
+            "task_001", "Switch to websocket", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            planner_type="llm_based",
+            patch_text=patch,
+            patch_file_paths=["config/server.yaml"],
+            git_apply_check_result=_make_result(0, "", ""),
+        )
+        assert "Patch Generation" in report
+        assert "patch was generated but not applied" in report
+        assert "config/server.yaml" in report
+        assert "llm_based" in report

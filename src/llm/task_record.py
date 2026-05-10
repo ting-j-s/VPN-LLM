@@ -93,6 +93,17 @@ class TaskRecordManager:
         }
         self._write_file(task_id, "status.json", json.dumps(status_dict, indent=2))
 
+    def save_patch(self, task_id: str, patch_text: str) -> None:
+        """Write patch.diff to the task directory.
+
+        The patch is saved but NEVER automatically applied.
+        Human review and manual application required.
+        """
+        filepath = os.path.join(self._task_dir(task_id), "patch.diff")
+        SafetyGuard.validate_write_path(filepath)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(patch_text)
+
     def save_report(self, task_id: str, report: str) -> None:
         """Write report.md."""
         self._write_file(task_id, "report.md", report)

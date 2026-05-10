@@ -74,3 +74,14 @@ class ValidationRunner:
     def run_git_status(self) -> ValidationResult:
         """Run git status --short to see what files have changed."""
         return self.run_command("git status --short")
+
+    def run_git_apply_check(self, patch_path: str) -> ValidationResult:
+        """Run git apply --check on a patch file (dry-run only, no apply).
+
+        Args:
+            patch_path: Absolute or relative path to the .diff file.
+
+        Returns:
+            ValidationResult with returncode=0 if patch applies cleanly.
+        """
+        return self.run_command(f"git apply --check {patch_path}")

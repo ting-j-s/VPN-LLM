@@ -13,6 +13,9 @@ def write_report(
     full_result,
     git_result,
     planner_type: str = "rule_based",
+    patch_text: str | None = None,
+    patch_file_paths: list[str] | None = None,
+    git_apply_check_result=None,
 ) -> str:
     """Generate a Markdown validation report.
 
@@ -25,6 +28,9 @@ def write_report(
         full_result: ValidationResult for the full test suite.
         git_result: ValidationResult for git status.
         planner_type: "rule_based" or "llm_based".
+        patch_text: Generated unified diff, or None if no patch.
+        patch_file_paths: Files referenced in the patch, or None.
+        git_apply_check_result: ValidationResult from git apply --check, or None.
 
     Returns:
         Markdown report string.
@@ -61,6 +67,22 @@ def write_report(
     _append_result_section(lines, "Full Test Suite", full_result)
     _append_result_section(lines, "Git Status", git_result)
 
+    # Patch section (only when patch was generated)
+    if patch_text is not None:
+        lines.append("## Patch Generation")
+        lines.append("")
+        lines.append(f"- **Status**: patch was generated but not applied")
+        lines.append(f"- **Patch size**: {len(patch_text)} bytes")
+        if patch_file_paths:
+            lines.append("- **Files in patch**:")
+            for fp in patch_file_paths:
+                lines.append(f"  - `{fp}`")
+        else:
+            lines.append("- **Files in patch**: _(none detected)_")
+        lines.append("")
+
+        _append_result_section(lines, "Git Apply Check", git_apply_check_result)
+
     # Failure summary
     failures = []
     for label, result in [
@@ -68,6 +90,7 @@ def write_report(
         ("Targeted Tests", targeted_result),
         ("Full Test Suite", full_result),
         ("Git Status", git_result),
+        ("Git Apply Check", git_apply_check_result if patch_text is not None else None),
     ]:
         if result is not None and not result.success:
             failures.append((label, result))
@@ -87,6 +110,8 @@ def write_report(
     all_pass = compile_result.success and full_result.success
     if targeted_result is not None:
         all_pass = all_pass and targeted_result.success
+    if git_apply_check_result is not None:
+        all_pass = all_pass and git_apply_check_result.success
 
     lines.append("## Conclusion")
     lines.append("")
@@ -95,7 +120,11 @@ def write_report(
     else:
         lines.append("Some validation checks failed. See failure summary above.")
     lines.append("")
-    lines.append("> MVP mode: plan + validation only. No code changes were applied.")
+    if patch_text is not None:
+        lines.append("> Patch was generated and saved as `patch.diff` — NOT applied.")
+        lines.append("> Review the diff manually before applying with `git apply`.")
+    else:
+        lines.append("> MVP mode: plan + validation only. No code changes were applied.")
 
     return "\n".join(lines)
 
