@@ -12,21 +12,25 @@ def write_report(
     targeted_result,
     full_result,
     git_result,
+    planner_type: str = "rule_based",
 ) -> str:
     """Generate a Markdown validation report.
 
     Args:
         task_id: Unique task identifier.
         request: Original user request string.
-        plan: TaskPlan instance.
+        plan: TaskPlan or LLMTaskPlan instance.
         compile_result: ValidationResult for compileall.
         targeted_result: ValidationResult for targeted tests, or None.
         full_result: ValidationResult for the full test suite.
         git_result: ValidationResult for git status.
+        planner_type: "rule_based" or "llm_based".
 
     Returns:
         Markdown report string.
     """
+    risk_level = getattr(plan, "risk_level", None)
+
     lines = []
     lines.append("# LLM Task Report")
     lines.append("")
@@ -34,8 +38,11 @@ def write_report(
     lines.append("")
     lines.append(f"- **Task ID**: `{task_id}`")
     lines.append(f"- **User Request**: {request}")
+    lines.append(f"- **Planner**: {planner_type}")
     lines.append(f"- **Task Type**: `{plan.task_type}`")
     lines.append(f"- **Target Transport**: `{plan.target_transport or 'N/A'}`")
+    if risk_level:
+        lines.append(f"- **Risk Level**: `{risk_level}`")
     lines.append("")
     lines.append("## Planned Changes")
     lines.append("")

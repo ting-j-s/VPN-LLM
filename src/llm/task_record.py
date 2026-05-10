@@ -43,14 +43,24 @@ class TaskRecordManager:
         self._write_file(task_id, "request.txt", request)
         return task_id
 
-    def save_plan(self, task_id: str, plan) -> None:
-        """Serialize a TaskPlan to plan.json."""
+    def save_plan(self, task_id: str, plan, planner_type: str = "rule_based") -> None:
+        """Serialize a TaskPlan (or LLMTaskPlan) to plan.json."""
         plan_dict = {
+            "planner_type": planner_type,
             "task_type": plan.task_type,
-            "description": plan.description,
+            "description": getattr(plan, "description", ""),
             "target_transport": plan.target_transport,
             "affected_areas": plan.affected_areas,
         }
+        # Include LLM-specific fields when present
+        if hasattr(plan, "summary"):
+            plan_dict["summary"] = plan.summary
+        if hasattr(plan, "candidate_files"):
+            plan_dict["candidate_files"] = plan.candidate_files
+        if hasattr(plan, "validation_commands"):
+            plan_dict["validation_commands"] = plan.validation_commands
+        if hasattr(plan, "risk_level"):
+            plan_dict["risk_level"] = plan.risk_level
         self._write_file(task_id, "plan.json", json.dumps(plan_dict, indent=2, ensure_ascii=False))
 
     def save_validation_result(self, task_id: str, results: dict) -> None:
