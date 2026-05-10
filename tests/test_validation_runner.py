@@ -1,8 +1,9 @@
 """Tests for ValidationRunner."""
 
 import os
+import subprocess
 import pytest
-from src.llm.validation_runner import ValidationRunner, ValidationResult
+from src.llm.validation_runner import ValidationRunner, ValidationResult, DirtyWorktreeError
 
 
 class TestValidationResult:
@@ -105,3 +106,130 @@ class TestValidationRunner:
         result = runner.run_git_apply_check(patch_path)
         assert isinstance(result, ValidationResult)
         assert not result.success
+
+
+class TestGitApply:
+    """Tests for run_git_apply in temporary git repositories."""
+
+    def _make_temp_git_repo(self, tmp_path):
+        """Create a temporary git repo with a committed file, returns repo path."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True)
+        # Create and commit a file
+        (repo / "a.py").write_text("old\n")
+        subprocess.run(["git", "add", "a.py"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True)
+        # Create .llm_tasks directory inside the repo
+        llm_tasks = repo / ".llm_tasks" / "some_task"
+        llm_tasks.mkdir(parents=True)
+        return str(repo), str(llm_tasks)
+
+    def test_apply_valid_patch_succeeds(self, tmp_path):
+        repo, task_dir = self._make_temp_git_repo(tmp_path)
+        patch_path = os.path.join(task_dir, "patch.diff")
+        with open(patch_path, "w") as f:
+            f.write("diff --git a/a.py b/a.py\n")
+            f.write("--- a/a.py\n")
+            f.write("+++ b/a.py\n")
+            f.write("@@ -1 +1 @@\n")
+            f.write("-old\n")
+            f.write("+new\n")
+
+        runner = ValidationRunner()
+        cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            result = runner.run_git_apply(patch_path)
+        finally:
+            os.chdir(cwd)
+        assert result.success
+        assert "new" in (tmp_path / "repo" / "a.py").read_text()
+
+    def test_apply_malformed_patch_fails(self, tmp_path):
+        repo, task_dir = self._make_temp_git_repo(tmp_path)
+        patch_path = os.path.join(task_dir, "bad.diff")
+        with open(patch_path, "w") as f:
+            f.write("this is not a patch")
+
+        runner = ValidationRunner()
+        result = runner.run_git_apply(patch_path)
+        assert not result.success
+
+    def test_rejects_patch_outside_llm_tasks(self, tmp_path):
+        runner = ValidationRunner()
+        with pytest.raises(ValueError) as excinfo:
+            runner.run_git_apply("/tmp/evil.patch")
+        assert ".llm_tasks" in str(excinfo.value)
+
+
+class TestEnsureCleanWorktree:
+    """Tests for ensure_clean_worktree."""
+
+    def _make_temp_git_repo(self, tmp_path):
+        """Create a clean temp git repo, returns repo path."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True)
+        (repo / "committed.txt").write_text("content\n")
+        subprocess.run(["git", "add", "committed.txt"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True)
+        return str(repo)
+
+    def test_clean_worktree_does_not_raise(self, tmp_path):
+        repo = self._make_temp_git_repo(tmp_path)
+        runner = ValidationRunner()
+        # Run in the clean repo — should not raise
+        cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            runner.ensure_clean_worktree()
+        finally:
+            os.chdir(cwd)
+
+    def test_dirty_worktree_raises(self, tmp_path):
+        repo = self._make_temp_git_repo(tmp_path)
+        # Create an uncommitted file
+        (tmp_path / "repo" / "dirty.txt").write_text("dirty\n")
+
+        runner = ValidationRunner()
+        cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            with pytest.raises(DirtyWorktreeError) as excinfo:
+                runner.ensure_clean_worktree()
+            assert "not clean" in str(excinfo.value).lower()
+        finally:
+            os.chdir(cwd)
+
+    def test_dirty_worktree_from_modified_file(self, tmp_path):
+        repo = self._make_temp_git_repo(tmp_path)
+        # Modify a tracked file
+        (tmp_path / "repo" / "committed.txt").write_text("modified\n")
+
+        runner = ValidationRunner()
+        cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            with pytest.raises(DirtyWorktreeError):
+                runner.ensure_clean_worktree()
+        finally:
+            os.chdir(cwd)
+
+    def test_dirty_worktree_from_staged_file(self, tmp_path):
+        repo = self._make_temp_git_repo(tmp_path)
+        (tmp_path / "repo" / "staged.txt").write_text("staged\n")
+        subprocess.run(["git", "add", "staged.txt"], cwd=repo, capture_output=True)
+
+        runner = ValidationRunner()
+        cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            with pytest.raises(DirtyWorktreeError):
+                runner.ensure_clean_worktree()
+        finally:
+            os.chdir(cwd)

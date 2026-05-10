@@ -104,6 +104,37 @@ class TaskRecordManager:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(patch_text)
 
+    def save_apply_result(self, task_id: str, apply_result, post_apply_results: dict) -> None:
+        """Save patch application result and post-apply validation results.
+
+        Args:
+            task_id: The task identifier.
+            apply_result: ValidationResult from git apply.
+            post_apply_results: Dict mapping label (str) to ValidationResult or None.
+        """
+        apply_data = {
+            "command": apply_result.command,
+            "returncode": apply_result.returncode,
+            "success": apply_result.success,
+            "stdout": apply_result.stdout[-2000:] if apply_result.stdout else "",
+            "stderr": apply_result.stderr[-2000:] if apply_result.stderr else "",
+        }
+        self._write_file(task_id, "apply_result.json", json.dumps(apply_data, indent=2, ensure_ascii=False))
+
+        serialized = {}
+        for label, result in post_apply_results.items():
+            if result is None:
+                serialized[label] = None
+            else:
+                serialized[label] = {
+                    "command": result.command,
+                    "returncode": result.returncode,
+                    "success": result.success,
+                    "stdout": result.stdout[-2000:] if result.stdout else "",
+                    "stderr": result.stderr[-2000:] if result.stderr else "",
+                }
+        self._write_file(task_id, "post_apply_validation.json", json.dumps(serialized, indent=2, ensure_ascii=False))
+
     def save_report(self, task_id: str, report: str) -> None:
         """Write report.md."""
         self._write_file(task_id, "report.md", report)

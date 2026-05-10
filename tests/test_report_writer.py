@@ -334,3 +334,114 @@ class TestReportWriterPatchSection:
         assert "patch was generated but not applied" in report
         assert "config/server.yaml" in report
         assert "llm_based" in report
+
+
+class TestReportWriterApplySection:
+    """Test that apply-related sections appear when patch is applied."""
+
+    def test_no_apply_section_when_not_applied(self):
+        plan = _make_plan()
+        patch = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            patch_text=patch,
+            patch_file_paths=["x.py"],
+            git_apply_check_result=_make_result(0, "", ""),
+        )
+        assert "Patch Generation" in report
+        assert "Patch Application" not in report
+
+    def test_apply_section_shows_applied_yes(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            apply_result=_make_result(0, "applied", ""),
+            post_apply_validation={
+                "Compile Check": _make_result(0, "", ""),
+                "Full Test Suite": _make_result(0, "all passed", ""),
+            },
+        )
+        assert "Patch Application" in report
+        assert "Patch applied" in report
+        assert "Yes" in report
+
+    def test_apply_section_shows_post_apply_validation(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Compile Check": _make_result(0, "", ""),
+                "Full Test Suite": _make_result(0, "all passed", ""),
+            },
+        )
+        assert "Post-Apply Validation" in report
+        assert "Compile Check" in report
+        assert "Full Test Suite" in report
+
+    def test_apply_section_commit_guidance_on_success(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Compile Check": _make_result(0, "", ""),
+                "Full Test Suite": _make_result(0, "", ""),
+            },
+        )
+        assert "Commit the changes manually" in report
+        assert "do not push automatically" in report.lower()
+
+    def test_apply_section_do_not_commit_on_failure(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(1, "", "AssertionError"), _make_result(),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Full Test Suite": _make_result(1, "", "test failure"),
+            },
+        )
+        assert "Do not commit until failures are fixed" in report
+
+    def test_apply_section_with_partial_post_checks(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Compile Check": _make_result(0, "", ""),
+                "Targeted Tests": None,
+                "Full Test Suite": _make_result(0, "", ""),
+            },
+        )
+        assert "Targeted Tests" in report
+        assert "not run" in report
+
+    def test_apply_failure_shows_in_failure_summary(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(), None, _make_result(), _make_result(),
+            apply_result=_make_result(1, "", "patch error"),
+            post_apply_validation={},
+        )
+        assert "Failure Summary" in report
+        assert "Git Apply" in report
+
+    def test_apply_result_included_in_all_pass_check(self):
+        plan = _make_plan()
+        report = write_report(
+            "task_001", "req", plan,
+            _make_result(0), None, _make_result(0), _make_result(0),
+            apply_result=_make_result(0, "", ""),
+            post_apply_validation={
+                "Full Test Suite": _make_result(0, "", ""),
+            },
+        )
+        assert "All validation checks passed" in report

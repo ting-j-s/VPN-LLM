@@ -302,9 +302,115 @@ When a patch is generated, the report includes:
 - **Git Apply Check** result section
 - Conclusion note: "Patch was generated and saved as `patch.diff` — NOT applied."
 
+## Phase 9.9: Human-Confirmed Patch Application
+
+### Overview
+
+An explicit opt-in mechanism (`--apply-patch`) for applying a generated and
+validated patch to the working tree. **The patch is NEVER applied automatically.**
+A human must explicitly pass `--apply-patch`. Post-apply validation runs
+automatically, but the system never commits or pushes.
+
+### Key Design Decisions
+
+- **Explicit opt-in**: `--apply-patch` is required. Without it, patch generation
+  remains dry-run only.
+- **Pre-condition gates**: All of these must be true before apply:
+  1. `--apply-patch` is passed
+  2. `--generate-patch` is passed (enforced by CLI)
+  3. `--use-llm-planner` is passed (enforced by CLI)
+  4. `git apply --check` has succeeded
+  5. Working tree is clean (unless `--allow-dirty-worktree` is passed)
+- **No auto-commit, no auto-push**: The system applies the patch to the working
+  tree, runs validation, and reports results. All committing and pushing is
+  manual.
+- **Git apply bypasses SafetyGuard command validation**: `run_git_apply()` uses
+  a controlled argument list (`["git", "apply", patch_path]`) via subprocess
+  without shell interpolation, so it is not subject to `validate_command()`
+  interception. The patch path must be under `.llm_tasks/`.
+- **Post-apply validation**: After apply, the system automatically runs:
+  - `python3 -m compileall src tests`
+  - LLM-suggested validation commands (only safe ones, re-checked by SafetyGuard)
+  - Targeted tests for the target transport
+  - `python3 -m pytest tests/ -v`
+  - `git status --short`
+
+### Clean Worktree Requirement
+
+`ValidationRunner.ensure_clean_worktree()` runs `git status --porcelain`. If
+the output is non-empty, a `DirtyWorktreeError` is raised. The CLI catches this
+and exits with an error unless `--allow-dirty-worktree` is passed.
+
+This prevents accidental application on top of uncommitted changes.
+
+### Post-Apply Report Section
+
+The report includes a **Patch Application** section showing:
+- `Patch applied: Yes` / `Patch applied: No`
+- Git apply returncode
+- Post-apply validation results (compile check, targeted tests, full test suite, git status)
+- Guidance: "Commit the changes manually when ready" on success, or
+  "Do not commit until failures are fixed" on failure
+
+### CLI Usage
+
+```bash
+# Default: dry-run only (Phase 9.8 behavior)
+python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch
+
+# Apply after check passes (requires clean worktree)
+python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch --apply-patch
+
+# Apply even if worktree is dirty
+python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch --apply-patch --allow-dirty-worktree
+
+# Error: --apply-patch requires --generate-patch
+python3 scripts/llm_task.py --request "switch to websocket" --apply-patch
+# Error: --apply-patch requires --generate-patch
+```
+
+### Module: `src/llm/validation_runner.py`
+
+New methods:
+- `ensure_clean_worktree()` — raises `DirtyWorktreeError` if working tree has uncommitted changes
+- `run_git_apply(patch_path)` — applies patch via `["git", "apply", patch_path]` (no shell). Requires path under `.llm_tasks/`. Returns `ValidationResult`.
+
+### Module: `src/llm/task_record.py`
+
+New method:
+- `save_apply_result(task_id, apply_result, post_apply_results)` — saves `apply_result.json` and `post_apply_validation.json`
+
+### Module: `src/llm/report_writer.py`
+
+Extended `write_report()` parameters:
+- `apply_result` — `ValidationResult` from `git apply`, or `None`
+- `post_apply_validation` — dict of label → `ValidationResult` for post-apply checks
+
+### SafetyGuard
+
+- `git push` remains blocked by `BLOCKED_COMMAND_PATTERNS`
+- `run_git_apply()` uses a fixed argument list (not `shell=True`), so it does not pass through `validate_command()`. This avoids accidental blocking of `git apply`.
+- Patch path must be under `.llm_tasks/` — arbitrary external paths are rejected
+
+### Failure Handling
+
+| Condition | Behavior |
+|-----------|----------|
+| `--apply-patch` without `--generate-patch` | CLI exits with error |
+| `git apply --check` failed | CLI exits — nothing applied |
+| Dirty worktree (no `--allow-dirty-worktree`) | CLI exits with `DirtyWorktreeError` |
+| `git apply` fails | Patch not applied; report shows failure |
+| Post-apply validation fails | Report says "Do not commit until failures are fixed" |
+| Post-apply validation passes | Report says "Commit the changes manually when ready" |
+
+### Artifacts
+
+When `--apply-patch` is used, the task directory additionally contains:
+- `apply_result.json` — git apply result
+- `post_apply_validation.json` — post-apply validation results
+
 ## Future Extensions
 
-- Automated modification within allowed paths (post human-review gate)
 - Failure-feedback loop (retry on validation failure, max 3)
 - Session audit log
 - Dry-run preview mode

@@ -26,7 +26,7 @@ if _project_root not in sys.path:
 
 from src.llm.task_planner import TaskPlanner, TASK_UNKNOWN
 from src.llm.safety_guard import SafetyGuard, SafetyError
-from src.llm.validation_runner import ValidationRunner
+from src.llm.validation_runner import ValidationRunner, DirtyWorktreeError
 from src.llm.task_record import TaskRecordManager
 from src.llm.report_writer import write_report
 
@@ -77,10 +77,22 @@ def main():
         "--generate-patch", action="store_true",
         help="Generate unified diff via LLM (dry-run: saved to patch.diff, NOT applied). Requires --use-llm-planner."
     )
+    parser.add_argument(
+        "--apply-patch", action="store_true",
+        help="Apply the generated patch after git apply --check passes. Requires --generate-patch. Still no auto-commit or auto-push."
+    )
+    parser.add_argument(
+        "--allow-dirty-worktree", action="store_true",
+        help="Allow patch application even if the working tree has uncommitted changes."
+    )
     args = parser.parse_args()
 
     if args.generate_patch and not args.use_llm_planner:
         print("Error: --generate-patch requires --use-llm-planner")
+        sys.exit(1)
+
+    if args.apply_patch and not args.generate_patch:
+        print("Error: --apply-patch requires --generate-patch")
         sys.exit(1)
 
     print(f"Request: {args.request}")
@@ -227,6 +239,106 @@ def main():
         print(">>> PATCH WAS NOT APPLIED. Review patch.diff manually before applying. <<<")
         print()
 
+    # 6.5 Patch application (optional, only after explicit --apply-patch)
+    apply_result = None
+    post_apply_validation = None
+
+    if args.apply_patch:
+        from src.llm.patch_generator import LLMPatchGeneratorError
+
+        print()
+        print("=== Patch Application ===")
+
+        # Pre-condition: git apply --check must have passed
+        if git_apply_check_result is None or not git_apply_check_result.success:
+            print("Error: git apply --check did not pass. Cannot apply patch.")
+            print(f"  Check result: {git_apply_check_result}")
+            sys.exit(1)
+
+        # Pre-condition: clean worktree (unless --allow-dirty-worktree)
+        if not args.allow_dirty_worktree:
+            try:
+                runner.ensure_clean_worktree()
+                print("Working tree is clean.")
+            except DirtyWorktreeError as e:
+                print(f"Error: {e}")
+                print("Use --allow-dirty-worktree to bypass this check.")
+                sys.exit(1)
+        else:
+            print("Warning: --allow-dirty-worktree specified, skipping worktree check.")
+
+        patch_path = os.path.join(record_mgr.get_task_dir(task_id), "patch.diff")
+
+        # Apply the patch
+        print(f"Applying patch: {patch_path}")
+        apply_result = runner.run_git_apply(patch_path)
+
+        if not apply_result.success:
+            print(f"  git apply FAILED (returncode={apply_result.returncode})")
+            if apply_result.stderr:
+                print(f"  {apply_result.stderr.strip()[:500]}")
+            print()
+            print(">>> Patch application failed. No files were modified. <<<")
+        else:
+            print("  git apply: PASS (patch applied successfully)")
+            print()
+            print(">>> PATCH WAS APPLIED. Running post-apply validation... <<<")
+            print()
+
+            # Post-apply validation
+            post_apply_validation = {}
+
+            print("Running compileall (post-apply)...")
+            post_apply_validation["Compile Check"] = runner.run_compileall()
+            status = "PASS" if post_apply_validation["Compile Check"].success else "FAIL"
+            print(f"  [{status}] compileall")
+
+            # Run LLM-suggested validation commands first, then fall back to targeted tests
+            llm_cmds = getattr(plan, "validation_commands", [])
+            if llm_cmds and planner_type == "llm_based":
+                print("Running LLM-suggested validation commands (post-apply)...")
+                for cmd in llm_cmds:
+                    try:
+                        SafetyGuard.validate_command(cmd)
+                    except SafetyError:
+                        print(f"  Skipping unsafe LLM command: {cmd[:80]}")
+                        continue
+                    r = runner.run_command(cmd)
+                    post_apply_validation[cmd[:80]] = r
+                    status = "PASS" if r.success else f"FAIL (rc={r.returncode})"
+                    print(f"  [{status}] {cmd[:80]}")
+
+            if plan.target_transport:
+                test_file = f"tests/test_{plan.target_transport}_transport.py"
+                if os.path.exists(os.path.join(_project_root, test_file)):
+                    print(f"Running targeted tests (post-apply): {test_file}")
+                    post_apply_validation["Targeted Tests"] = runner.run_targeted_tests([test_file])
+                    status = "PASS" if post_apply_validation["Targeted Tests"].success else "FAIL"
+                    print(f"  [{status}] targeted tests")
+
+            print("Running full test suite (post-apply)...")
+            post_apply_validation["Full Test Suite"] = runner.run_full_tests()
+            status = "PASS" if post_apply_validation["Full Test Suite"].success else "FAIL"
+            print(f"  [{status}] full test suite")
+
+            print("Running git status (post-apply)...")
+            post_apply_validation["Git Status"] = runner.run_git_status()
+            print(f"  Changes after apply:")
+            if post_apply_validation["Git Status"].stdout:
+                for line in post_apply_validation["Git Status"].stdout.strip().splitlines()[:20]:
+                    print(f"    {line}")
+            else:
+                print("    (none)")
+
+            post_all_pass = all(r.success for r in post_apply_validation.values() if r is not None)
+            print()
+            if post_all_pass:
+                print(">>> All post-apply checks passed. Review the changes and commit manually. <<<")
+                print(">>> NEVER push automatically. <<<")
+            else:
+                print(">>> Do not commit until failures are fixed. <<<")
+            print()
+
     # 7. Generate report
     report = write_report(
         task_id=task_id,
@@ -240,6 +352,8 @@ def main():
         patch_text=patch_text,
         patch_file_paths=patch_file_paths,
         git_apply_check_result=git_apply_check_result,
+        apply_result=apply_result,
+        post_apply_validation=post_apply_validation,
     )
 
     # 8. Save all artifacts
@@ -251,11 +365,20 @@ def main():
         "git_apply_check": git_apply_check_result,
     })
 
+    if apply_result is not None:
+        record_mgr.save_apply_result(task_id, apply_result, post_apply_validation or {})
+
     all_pass = compile_result.success and full_result.success
     if test_result is not None:
         all_pass = all_pass and test_result.success
     if git_apply_check_result is not None:
         all_pass = all_pass and git_apply_check_result.success
+    if apply_result is not None:
+        all_pass = all_pass and apply_result.success
+        if post_apply_validation:
+            for r in post_apply_validation.values():
+                if r is not None and not r.success:
+                    all_pass = False
 
     record_mgr.update_status(task_id, "completed" if all_pass else "failed", all_passed=all_pass)
     record_mgr.save_report(task_id, report)

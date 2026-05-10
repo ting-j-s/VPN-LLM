@@ -217,3 +217,49 @@ class TestTaskRecordSafety:
         task_dir = os.path.join(tmp_path, task_id)
         for fname in ("request.txt", "plan.json", "validation.json", "status.json", "report.md", "patch.diff"):
             assert os.path.isfile(os.path.join(task_dir, fname)), f"Missing: {fname}"
+
+    def test_save_apply_result_writes_json(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test apply")
+        apply_result = ValidationResult("git apply patch.diff", 0, "applied", "")
+        post_results = {
+            "Compile Check": ValidationResult("compileall", 0, "ok", ""),
+            "Full Test Suite": ValidationResult("pytest tests/", 0, "all passed", ""),
+        }
+        mgr.save_apply_result(task_id, apply_result, post_results)
+
+        task_dir = os.path.join(tmp_path, task_id)
+        assert os.path.isfile(os.path.join(task_dir, "apply_result.json"))
+        assert os.path.isfile(os.path.join(task_dir, "post_apply_validation.json"))
+
+        apply_data = json.load(open(os.path.join(task_dir, "apply_result.json")))
+        assert apply_data["returncode"] == 0
+        assert apply_data["success"] is True
+
+        post_data = json.load(open(os.path.join(task_dir, "post_apply_validation.json")))
+        assert "Compile Check" in post_data
+        assert "Full Test Suite" in post_data
+        assert post_data["Compile Check"]["success"] is True
+
+    def test_save_apply_result_failure(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test apply fail")
+        apply_result = ValidationResult("git apply patch.diff", 1, "", "error: patch failed")
+        post_results = {}
+
+        mgr.save_apply_result(task_id, apply_result, post_results)
+
+        apply_data = json.load(open(os.path.join(tmp_path, task_id, "apply_result.json")))
+        assert apply_data["returncode"] == 1
+        assert apply_data["success"] is False
+        assert "patch failed" in apply_data["stderr"]
+
+    def test_save_apply_result_with_none_post_check(self, tmp_path):
+        mgr = TaskRecordManager(str(tmp_path))
+        task_id = mgr.create_task("test")
+        apply_result = ValidationResult("git apply patch.diff", 0, "", "")
+        post_results = {"Targeted Tests": None}
+
+        mgr.save_apply_result(task_id, apply_result, post_results)
+        post_data = json.load(open(os.path.join(tmp_path, task_id, "post_apply_validation.json")))
+        assert post_data["Targeted Tests"] is None

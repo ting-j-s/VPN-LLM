@@ -234,7 +234,9 @@ class LLMPatchGenerator:
                 "LLM output missing '+++ b/' file header"
             )
 
-        return text
+        # git apply requires every line (including the last) to end with \n.
+        # .strip() above removed trailing whitespace, so add one back.
+        return text + "\n"
 
     @classmethod
     def _parse_file_paths(cls, diff_text: str) -> list[str]:

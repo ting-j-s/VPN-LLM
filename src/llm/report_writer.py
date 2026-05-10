@@ -16,6 +16,8 @@ def write_report(
     patch_text: str | None = None,
     patch_file_paths: list[str] | None = None,
     git_apply_check_result=None,
+    apply_result=None,
+    post_apply_validation: dict | None = None,
 ) -> str:
     """Generate a Markdown validation report.
 
@@ -31,6 +33,8 @@ def write_report(
         patch_text: Generated unified diff, or None if no patch.
         patch_file_paths: Files referenced in the patch, or None.
         git_apply_check_result: ValidationResult from git apply --check, or None.
+        apply_result: ValidationResult from git apply, or None if not applied.
+        post_apply_validation: Dict of label -> ValidationResult for post-apply checks.
 
     Returns:
         Markdown report string.
@@ -83,17 +87,39 @@ def write_report(
 
         _append_result_section(lines, "Git Apply Check", git_apply_check_result)
 
+    # Patch application section (only when patch was actually applied)
+    patch_was_applied = apply_result is not None
+    if patch_was_applied:
+        lines.append("## Patch Application")
+        lines.append("")
+        lines.append(f"- **Patch applied**: Yes")
+        _append_result_section(lines, "Git Apply", apply_result)
+        if post_apply_validation:
+            lines.append("### Post-Apply Validation")
+            lines.append("")
+            for label, result in post_apply_validation.items():
+                if result is not None:
+                    _append_result_section(lines, label, result)
+                else:
+                    lines.append(f"**{label}**: _(not run)_")
+                    lines.append("")
+        lines.append("")
+
     # Failure summary
-    failures = []
-    for label, result in [
+    all_checks = [
         ("Compile Check", compile_result),
         ("Targeted Tests", targeted_result),
         ("Full Test Suite", full_result),
         ("Git Status", git_result),
         ("Git Apply Check", git_apply_check_result if patch_text is not None else None),
-    ]:
-        if result is not None and not result.success:
-            failures.append((label, result))
+    ]
+    if patch_was_applied:
+        all_checks.append(("Git Apply", apply_result))
+        if post_apply_validation:
+            for label, result in post_apply_validation.items():
+                if result is not None:
+                    all_checks.append((f"Post-Apply {label}", result))
+    failures = [(label, result) for label, result in all_checks if result is not None and not result.success]
 
     lines.append("## Failure Summary")
     lines.append("")
@@ -112,6 +138,14 @@ def write_report(
         all_pass = all_pass and targeted_result.success
     if git_apply_check_result is not None:
         all_pass = all_pass and git_apply_check_result.success
+    post_apply_all_pass = True
+    if patch_was_applied:
+        all_pass = all_pass and apply_result.success
+        if post_apply_validation:
+            for result in post_apply_validation.values():
+                if result is not None and not result.success:
+                    all_pass = False
+                    post_apply_all_pass = False
 
     lines.append("## Conclusion")
     lines.append("")
@@ -120,7 +154,17 @@ def write_report(
     else:
         lines.append("Some validation checks failed. See failure summary above.")
     lines.append("")
-    if patch_text is not None:
+
+    if patch_was_applied:
+        if post_apply_all_pass:
+            lines.append("> Patch was applied and all post-apply checks passed.")
+            lines.append("> The working tree now contains the patched changes.")
+            lines.append("> Commit the changes manually when ready. **Do not push automatically.**")
+        else:
+            lines.append("> **Do not commit until failures are fixed.**")
+            lines.append("> Patch was applied but post-apply validation failed.")
+            lines.append("> Review the failures, fix them, and re-run validation before committing.")
+    elif patch_text is not None:
         lines.append("> Patch was generated and saved as `patch.diff` — NOT applied.")
         lines.append("> Review the diff manually before applying with `git apply`.")
     else:
