@@ -460,6 +460,74 @@ sudo bash scripts/phase10_netns_tun_validation.sh --transport websocket --verbos
   through the Transport/Core stack. This is distinct from the underlay veth ping
   (`ping 192.168.200.1`) which only validates namespace connectivity.
 
+## Relationship to LLM Agent
+
+The netns/TUN validation is the **second and third runtime gates** in the LLM-driven
+replacement pipeline. Each gate verifies the replacement at a deeper level:
+
+```
+LLM generates Transport/Core patch
+  │
+  ▼
+1. pytest (unit/integration)
+  │
+  ▼
+2. replacement smoke matrix (Gate 1 — MockTun, localhost)
+  │
+  ▼
+3. netns/TUN default mode (Gate 2 — real TUN, underlay veth ping)
+  │
+  ▼
+4. netns/TUN e2e ping (Gate 3 — real IP packet forwarding through TUN)
+  │
+  ▼
+5. benchmark/stability (Gate 4 — Phase 10.7 planned)
+```
+
+### Why this gate requires human invocation
+
+Unlike the smoke matrix (which can run in CI), the netns/TUN validation:
+- Requires root or `CAP_NET_ADMIN`
+- Requires `/dev/net/tun` kernel support
+- Requires `iproute2` and network namespace support
+- Creates real kernel objects (namespaces, veth pairs, TUN devices)
+
+The script is intentionally NOT invoked automatically by the LLM Agent. After the
+smoke matrix passes, a human must explicitly run:
+
+```bash
+sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping
+```
+
+### What passing means for the LLM Agent
+
+If both Gate 2 (default) and Gate 3 (e2e ping) pass:
+- The LLM-generated Transport/Core patch produces a system that can establish
+  real TUN tunnels through Linux kernel TUN devices
+- Real IP packets flow bidirectionally through the replacement Transport/Core stack
+- The replacement is ready for benchmark/stability testing (Gate 4)
+- The LLM Agent can report the replacement as validated at the real-kernel level
+
+## Phase 10.6 Result Summary
+
+**Date**: 2026-05-10 | **Environment**: Debian 12, Linux 6.1.0-45-amd64
+
+| Transport | Default mode | E2E Ping | Loss | RTT |
+|---|---|---|---|---|
+| TCP | PASS | PASS | 0% | 0.5–1.8ms |
+| WebSocket | PASS | PASS | 0% | 2.5–4.6ms |
+
+**Key findings**:
+- No "Dropping frame" errors — shared `--session-id` mechanism works correctly
+- No Core changes were required — `ServerCore`/`ClientCore` already supported explicit session IDs
+- Session ID isolation is preserved — the mismatch drop logic was not modified
+- WebSocket adds ~2–3ms overhead vs raw TCP due to framing and async event loop
+
+**Bugs found and fixed**:
+1. `config/client_netns.yaml` — subnet mismatch (`192.168.100.1` → `192.168.200.1`)
+2. `src/transport/websocket_transport.py` — websockets v10/v16 compatibility
+   (replaced `websockets.asyncio` subpackage imports with top-level imports)
+
 ## Files
 
 | File | Purpose |

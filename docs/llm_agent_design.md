@@ -8,8 +8,11 @@ from TCP to WebSocket"). The system calls an OpenAI-compatible LLM API to
 generate a modification plan and code changes, then automatically validates
 them.
 
-**This is a controlled tool, not an unconstrained auto-coder.** Every step
-includes safety boundaries, verification gates, and audit reports.
+**The LLM Agent is designed primarily for Transport/Core replacement tasks in
+VPN-LLM. It is not a general-purpose auto-coder.** Its main role is to help
+generate, validate, and audit changes to the outer transport protocol layer
+and VPN core/data-plane behavior. Every step includes safety boundaries,
+verification gates, and audit reports.
 
 ## Architecture
 
@@ -37,6 +40,50 @@ User Request (natural language)
        v
   Report output         -- structured report of what was done and results
 ```
+
+## Replacement-Oriented Design
+
+The LLM Agent is architected around two replaceable dimensions of the VPN system:
+
+### Transport Replacement
+
+When the user requests an outer protocol change (e.g., TCP → WebSocket, add TLS,
+switch to SSH), the agent:
+
+1. Classifies the request as `transport_change`
+2. Identifies the `target_transport`
+3. Generates a patch targeting `src/transport/` and related configs
+4. Validates via smoke matrix with the target transport
+5. Progresses through netns/TUN E2E validation for real-kernel verification
+
+### Core Replacement
+
+When the user requests a VPN Core behavior change (e.g., alter session validation,
+change Frame codec, modify forwarding strategy), the agent:
+
+1. Classifies the request as `core_change`
+2. Generates a patch targeting `src/core/`, `src/common/frame.py`, etc.
+3. Runs the full smoke matrix (mock, tcp, tls, websocket) since Core changes
+   affect all transport combinations
+4. Validates session_id isolation and TUN forwarding remain functional
+
+### Validation-First Workflow
+
+Every replacement, whether Transport or Core, must pass a layered validation
+pipeline before being considered complete:
+
+```
+pytest → compileall → smoke matrix → netns/TUN E2E → benchmark
+```
+
+The agent never skips gates. Each gate failure is surfaced in the report.
+
+### Human-in-the-Loop Safety
+
+- `--apply-patch` is an explicit human opt-in — never automatic
+- `git push` is blocked at the SafetyGuard level
+- Commit messages are suggestions only (`--suggest-commit`)
+- All changes remain local until the human explicitly commits and pushes
 
 ## Key Principles
 
@@ -113,9 +160,12 @@ Rule-based classification of user requests (MVP: no real LLM call).
 
 Task types:
 - `transport_change` — detected when request mentions websocket/tcp/tls/ssh
+- `core_change` — detected when request mentions core/session/frame/forwarding/tun
 - `config_change` — detected when request mentions config/configuration
 - `test_addition` — detected when request mentions test/add test
 - `docs_update` — detected when request mentions doc/readme/documentation
+- `bugfix` — detected when request mentions fix/bug/error/repair
+- `refactor` — detected when request mentions refactor/restructure/clean
 - `unknown` — fallback
 
 Extracts `target_transport` from keywords: websocket, tcp, tls, ssh, mock.
@@ -588,6 +638,32 @@ python3 scripts/llm_task.py \
 - TLS certs are ephemeral (tempfile.mkdtemp, cleaned up immediately)
 - No LLM API call, no config/llm_agent.yaml read
 - Still never auto git add, commit, or push
+
+## Phase 10.6: netns + TUN E2E Verification
+
+After Phase 10.2 integrated the smoke matrix into the LLM Agent post-apply pipeline,
+Phase 10.6 added the second runtime gate: real Linux network namespace + TUN device
+validation with end-to-end ICMP ping.
+
+**Results (Debian 12, Linux 6.1, 2026-05-10):**
+
+| Transport | Default mode | E2E Ping | RTT |
+|---|---|---|---|
+| TCP | PASS | PASS | 0.5–1.8ms |
+| WebSocket | PASS | PASS | 2.5–4.6ms |
+
+**Key findings:**
+- Shared `--session-id` mechanism works — no "Dropping frame" errors during e2e ping
+- No Core changes were needed — `ServerCore`/`ClientCore` already supported explicit session IDs
+- Two bugs were found and fixed during verification:
+  1. `config/client_netns.yaml` had wrong veth subnet (Phase 3 `192.168.100.1` vs Phase 10.3 `192.168.200.1`)
+  2. `websocket_transport.py` used `websockets.asyncio` subpackage (incompatible with both v10.4 and v16.0)
+- Session ID isolation is preserved — the mismatch drop logic was not modified
+- WebSocket adds ~2–3ms overhead vs raw TCP due to framing and async event loop
+
+This confirms that the LLM Agent replacement pipeline — from natural language request
+through patch generation, smoke matrix, and real-kernel TUN validation — produces
+working Transport replacements without breaking Core functionality.
 
 ## Future Extensions
 

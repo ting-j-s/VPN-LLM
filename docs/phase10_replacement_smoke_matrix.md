@@ -26,6 +26,56 @@ The VPN project has two replaceable dimensions:
 When the LLM Agent proposes a replacement in either dimension, we need a fast,
 deterministic answer to: "Is this minimally runnable?"
 
+## Role in LLM-Driven Replacement
+
+The smoke matrix is the **first runtime gate** after an LLM-generated Transport or Core patch.
+It answers a single question: "Is the replacement minimally runnable?"
+
+### When it runs
+
+- After `--apply-patch` and post-apply validation pass
+- Only when `--run-replacement-smoke` is explicitly passed (opt-in)
+- `ReplacementValidator` (`src/llm/replacement_validator.py`) orchestrates the run
+
+### Transport selection logic
+
+The transports tested depend on the task type and target transport:
+
+| Task condition | Transports selected |
+|---|---|
+| `target_transport` = websocket | mock, websocket |
+| `target_transport` = tcp | mock, tcp |
+| `target_transport` = tls | mock, tls |
+| `task_type` = core_change | mock, tcp, tls, websocket (broad matrix — Core affects all transports) |
+| `task_type` = refactor / bugfix / unknown | mock, tcp, tls, websocket |
+| All other types | mock, tcp, websocket (default) |
+
+### JSON output for agent consumption
+
+The `--json` flag produces structured output consumable by `ReplacementValidator`:
+
+```json
+{
+  "results": [{"transport": "websocket", "core": "default", "status": "pass", ...}],
+  "summary": {"passed": 3, "failed": 0, "skipped": 0}
+}
+```
+
+The agent parses this to generate the "Replacement Smoke Validation" report section
+and saves `replacement_validation.json` to the task directory.
+
+### What it is NOT
+
+The smoke matrix does NOT:
+- Use real TUN devices (uses MockTunDevice)
+- Run in real network namespace (no root required)
+- Measure performance or stability
+- Replace netns/TUN E2E validation (Gate 3/4)
+- Replace benchmark testing (Gate 5)
+
+It is intentionally lightweight — a fast "does it still work?" check before proceeding
+to heavier validation gates.
+
 ## Transport Dimension
 
 | Transport | Smoke check | Status in CI |

@@ -1,12 +1,30 @@
-# VPN Tunnel - 模块化 VPN 原型系统
+# VPN-LLM — LLM 驱动的可替换 VPN 隧道实验平台
 
-一个用于研究和教学的模块化 VPN 隧道系统，支持多种传输层协议（SSH、TCP、TLS、WebSocket）。
+本项目是一个用于研究和教学的模块化 VPN 隧道实验平台。它不仅支持 TCP、TLS、SSH、WebSocket
+等可替换外层协议 Transport，还引入受控 LLM Agent，用于根据自然语言需求辅助生成、应用和验证
+Transport / VPN Core 替换补丁。**项目重点是"LLM 驱动的协议与内核替换闭环"，而不是单一 VPN
+实现。**
 
 > **⚠️ 安全边界说明**：本项目仅用于授权实验和教学研究。不得用于未授权网络访问、规避网络审计或隐藏流量。任何此类使用均不在本项目许可范围内。
 
 ---
 
 ## 1. 项目简介
+
+### 核心定位：LLM 驱动的 Transport/Core 替换
+
+本项目的核心研究问题是：
+
+> **"当用户提出修改外层协议或 VPN Core 的需求时，能否由 LLM Agent 生成可审计补丁，
+> 并通过自动化验证确认替换后的系统仍能运行？"**
+
+围绕这个问题，项目有三层设计：
+
+| 层 | 职责 | 可替换性 |
+|---|---|---|
+| **Transport（外层协议适配层）** | 承载 Frame 数据的网络传输 | mock / tcp / tls / ssh / websocket，后续可扩展 http2 / quic / grpc |
+| **VPN Core（数据平面核心）** | Frame 编解码、session_id 会话隔离、TUN 转发、路由/NAT、forwarding loop 策略 | 可形成多个 Core variant（strict_session / alt_frame_codec / experimental_forwarding 等） |
+| **LLM Agent（替换工程代理）** | 理解自然语言需求 → 生成 TaskPlan → 生成 patch.diff → SafetyGuard 检查 → 验证 Gate → 报告 + commit advice | 围绕 Transport/Core 的替换服务，永不自动 git push |
 
 本项目实现了一个模块化的 VPN 隧道原型系统，核心设计目标是：
 
@@ -56,6 +74,27 @@
 
 1. **客户端**：本地 TUN 设备接收 IP 数据包 → Frame 封装 → Transport 发送
 2. **服务端**：Transport 接收 → Frame 解封 → 写入远程 TUN 设备
+
+### LLM 驱动的替换闭环架构
+
+```
+     User Request ("把传输协议换成 WebSocket")
+          |
+          v
+     LLM Agent
+     (TaskPlan / Patch / Safety / Validation)
+          |
+          v
+     Replacement Layer
+     ┌──────────────────────────────────┐
+     │ Transport: TCP / TLS / SSH / WS  │
+     │ Core: Frame / Session / TUN / NAT│
+     └──────────────────────────────────┘
+          |
+          v
+     Validation Gates
+     pytest → smoke matrix → netns/TUN E2E → benchmark
+```
 
 ## 3. 目录结构
 
@@ -643,11 +682,92 @@ print(nat.generate_rules('tun0', '10.8.0.0/24'))
 
 ---
 
-## 13. Current Status / 当前状态
+## 13. LLM Agent 与替换闭环
 
-- **Test baseline**: 143 passed, 6 skipped, 0 failed
+LLM Agent 是围绕 Transport/Core 替换工作的工程代理，不是泛用自动编码器。其职责是帮助用户
+以可审计、可验证的方式完成协议替换和内核修改。
+
+### 模块组成
+
+| 模块 | 文件 | 职责 |
+|---|---|---|
+| Rule-based TaskPlanner | [src/llm/task_planner.py](src/llm/task_planner.py) | 基于关键词规则的请求分类和任务规划 |
+| LLM-based TaskPlanner | [src/llm/llm_task_planner.py](src/llm/llm_task_planner.py) | 基于 LLM API 的请求理解和任务分解（需显式启用） |
+| LLMPatchGenerator | [src/llm/patch_generator.py](src/llm/patch_generator.py) | 生成 unified diff，含 secret scanning 和安全校验 |
+| SafetyGuard | [src/llm/safety_guard.py](src/llm/safety_guard.py) | 检查文件路径、命令和敏感信息，阻断危险操作 |
+| ValidationRunner | [src/llm/validation_runner.py](src/llm/validation_runner.py) | 执行编译检查、pytest、git status 等验证 |
+| ReplacementValidator | [src/llm/replacement_validator.py](src/llm/replacement_validator.py) | 运行 smoke replacement matrix，验证替换后最小可运行性 |
+| TaskRecordManager | [src/llm/task_record.py](src/llm/task_record.py) | 管理任务目录、持久化验证结果和 patch |
+| ReportWriter | [src/llm/report_writer.py](src/llm/report_writer.py) | 生成结构化 Markdown 报告 |
+| CommitAdvisor | [src/llm/commit_advisor.py](src/llm/commit_advisor.py) | 生成 Conventional Commits 格式的提交建议（永不自动提交） |
+
+### 完整替换流程
+
+```
+User Request (自然语言需求，如 "把传输协议换成 WebSocket")
+    │
+    ▼
+TaskPlanner (rule-based 或 LLM-based)
+    → 分类 task_type (transport_change / core_change / ...)
+    → 生成结构化 TaskPlan
+    │
+    ▼
+SafetyGuard (对所有候选路径和命令做安全检查)
+    │
+    ▼
+LLMPatchGenerator → 生成 patch.diff
+    → 校验 diff 格式
+    → Secret scanning (API key, private key, password 等)
+    → 保存 patch.diff 到 .llm_tasks/<task_id>/
+    │
+    ▼
+git apply --check (dry-run 校验 patch 是否可应用)
+    │
+    ▼
+User 显式确认 --apply-patch (人工闸门，不可跳过)
+    │
+    ▼
+Post-apply Validation:
+    ├── python3 -m compileall src tests
+    ├── python3 -m pytest tests/ -v
+    └── git status --short
+    │
+    ▼
+Replacement Smoke Matrix (--run-replacement-smoke)
+    → 验证 Transport × Core 组合的最小可运行性
+    │
+    ▼
+netns + TUN E2E Validation (手动，需 root)
+    → 验证真实 TUN 设备和 IP 数据包转发
+    │
+    ▼
+Benchmark / Stability (Phase 10.7 planned)
+    │
+    ▼
+Report + Commit Advice (写入 .llm_tasks/<task_id>/)
+    → suggested_commit_message.txt
+    → commit_summary.md
+    → 永不自动 git commit 或 git push
+```
+
+### 关键安全边界
+
+- **永不自动 git push** — 所有版本控制操作需用户手动执行
+- **永不自动 git commit** — commit message 仅作为建议生成
+- **--apply-patch 是显式闸门** — 不传此参数则 patch 仅做 dry-run
+- **SafetyGuard 阻断** — 危险命令 (sudo, rm -rf, curl | bash)、敏感路径 (.env, .claude/, *.key, *.pem) 一律拒绝
+- **Secret scanning** — patch 内容扫描 private key、API key、password、JWT 等模式
+- **LLM 仅用于 plan/patch 生成** — 不能执行命令、写文件、修改代码或操作 git
+
+---
+
+## 14. Current Status / 当前状态
+
+- **Test baseline**: 562 passed, 6 skipped, 0 failed
 - **Current stable branch**: `test-2`
-- **Current stable commit**: `fda32246307fe2deb4f9a5292b405010d2c7d03e`
+- **Current stable commit**: `cf17dba` (2026-05-10)
+- **当前阶段**: Phase 10.6 已完成 — TCP / WebSocket 在 Linux netns + TUN 环境下 E2E ping 已通过
+- **下一阶段**: Phase 10.7 — 稳定性与性能 benchmark
 
 ### Transport Status
 
@@ -665,10 +785,22 @@ print(nat.generate_rules('tun0', '10.8.0.0/24'))
 
 ---
 
-## 14. Phase 10: Replacement Smoke Validation
+## 15. Phase 10: LLM 驱动的替换验证体系
 
 项目支持通过 LLM Agent 辅助修改外层协议（Transport）和 VPN 内核（Core）。
-修改后可以用 **smoke replacement matrix** 做最小可运行性验证：
+每次替换必须通过以下验证 Gates：
+
+### 验证 Gate 总览
+
+| Gate | 目的 | 命令 | 状态 (本地验证) |
+|---|---|---|---|
+| **Gate 1** | 单元/集成测试 | `python3 -m pytest tests/ -v` | 562 passed, 6 skipped |
+| **Gate 2** | Transport/Core replacement smoke | `python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,websocket --cores default --json` | PASS |
+| **Gate 3** | netns + TUN 环境验证 | `sudo bash scripts/phase10_netns_tun_validation.sh --transport tcp --verbose` | PASS |
+| **Gate 4** | netns + TUN E2E ping | `sudo bash scripts/phase10_netns_tun_validation.sh --transport tcp --verbose --e2e-ping` | TCP / WebSocket PASS |
+| **Gate 5** | benchmark / stability | Phase 10.7 planned | TODO |
+
+### Gate 2: Replacement Smoke Matrix
 
 ```bash
 # Run smoke matrix for stable transports
@@ -679,20 +811,19 @@ python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,tls,websocket 
 ```
 
 输出一个 Transport × Core 矩阵，标记每个组合的 pass/fail/skip 状态。
-这为"LLM 驱动的外层协议替换 / Core 替换"提供了统一的验证入口。
+这是 LLM 驱动替换后的**第一道运行时 Gate**，快速判断替换是否最小可运行。
+
+LLM Agent can optionally run replacement smoke validation after human-confirmed
+patch application via `--run-replacement-smoke`.
 
 详细说明见 [docs/phase10_replacement_smoke_matrix.md](docs/phase10_replacement_smoke_matrix.md)。
 
-LLM Agent can optionally run replacement smoke validation after human-confirmed
-patch application via `--run-replacement-smoke`. This is the first runtime
-gate for LLM-driven Transport or Core replacement.
+### Gate 3 & 4: netns + TUN Validation
 
-### netns + TUN Validation (Gate 2)
+After the local smoke matrix passes, use Linux network namespaces and
+real TUN devices for the second and third validation gates.
 
-After the local smoke matrix (Gate 1) passes, use Linux network namespaces and
-real TUN devices for the second validation gate. The script has two modes:
-
-**Default mode** (Phase 10.3) — environment, TUN, underlay, and process health:
+**Default mode** (Gate 3) — environment, TUN, underlay, and process health:
 
 ```bash
 # Requires root or CAP_NET_ADMIN — skips gracefully otherwise
@@ -701,14 +832,11 @@ sudo scripts/phase10_netns_tun_validation.sh
 # Test with WebSocket transport
 sudo scripts/phase10_netns_tun_validation.sh --transport websocket
 
-# Keep environment for manual tcpdump/ping verification
-sudo scripts/phase10_netns_tun_validation.sh --keep --verbose
-
 # Safe for CI — pre-flight check only, no namespaces created
 bash scripts/phase10_netns_tun_validation.sh --preflight-only
 ```
 
-**E2E ping mode** (Phase 10.4) — real IP packet forwarding through the TUN tunnel:
+**E2E ping mode** (Gate 4) — real IP packet forwarding through the TUN tunnel:
 
 ```bash
 # Automated ping through the tunnel (bidirectional)
@@ -716,9 +844,6 @@ sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping
 
 # With packet capture for diagnostics
 sudo scripts/phase10_netns_tun_validation.sh --transport websocket --e2e-ping --verbose --tcpdump
-
-# Custom ping parameters
-sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping --ping-count 5 --ping-timeout 3
 ```
 
 > **Shared session ID**: The netns e2e validation script automatically passes a fixed
@@ -731,20 +856,7 @@ sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping --ping-c
 > (Linux 6.1). Real IP packets flow bidirectionally through the TUN tunnel with
 > 0% loss. See [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md#phase-106-real-e2e-results).
 
-This sets up isolated namespaces (`vpn_srv_validation`, `vpn_cli_validation`),
-veth pairs, and real TUN devices, then starts server/client to verify the
-replacement is minimally runnable with real IP packets.
-
 详细说明见 [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md)。
-
-**Validation gates summary:**
-
-| Gate | Script | Requires | Automated |
-|---|---|---|---|
-| 1 — Smoke matrix | `smoke_replacement_matrix.py` | Python deps | Yes (CI) |
-| 2a — netns + TUN | `phase10_netns_tun_validation.sh` | root, Linux, /dev/net/tun | Semi |
-| 2b — e2e ping | `phase10_netns_tun_validation.sh --e2e-ping` | root, Linux, /dev/net/tun | Semi |
-| 3 — Multi-machine | Lab setup | Physical/virtual hosts | Manual |
 
 ---
 
