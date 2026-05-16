@@ -445,3 +445,206 @@ class TestNoSideEffects:
         plan = _valid_plan()
         patch = gen.generate("switch to websocket", plan, "context")
         assert "diff --git" in patch
+
+
+# ---------------------------------------------------------------------------
+# Test: FIND uniqueness edge cases
+# ---------------------------------------------------------------------------
+
+class TestFindUniqueness:
+    """Verify that _verify_find_uniqueness rejects edge cases."""
+
+    def test_find_empty_string_raises(self, tmp_path):
+        """Empty FIND must be rejected."""
+        filepath = tmp_path / "test.py"
+        filepath.write_text("content\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._verify_find_uniqueness("test.py", "")
+        assert "empty" in str(excinfo.value).lower()
+
+    def test_find_whitespace_only_raises(self, tmp_path):
+        """Whitespace-only FIND must be rejected."""
+        filepath = tmp_path / "test.py"
+        filepath.write_text("content\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._verify_find_uniqueness("test.py", "   \n\t  ")
+        assert "whitespace" in str(excinfo.value).lower()
+
+    def test_find_spaces_only_raises(self, tmp_path):
+        """Space-only FIND must be rejected."""
+        filepath = tmp_path / "test.py"
+        filepath.write_text("content\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._verify_find_uniqueness("test.py", "    ")
+        assert "whitespace" in str(excinfo.value).lower()
+
+    def test_find_multiple_matches_raises(self, tmp_path):
+        """FIND that matches more than once must be rejected."""
+        filepath = tmp_path / "test.py"
+        filepath.write_text("dup_line\ndup_line\ndup_line\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._verify_find_uniqueness("test.py", "dup_line")
+        assert "3 times" in str(excinfo.value) or "matches" in str(excinfo.value)
+
+    def test_find_not_found_raises(self, tmp_path):
+        """FIND that matches zero times must be rejected."""
+        filepath = tmp_path / "test.py"
+        filepath.write_text("content\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._verify_find_uniqueness("test.py", "nonexistent")
+        assert "not found" in str(excinfo.value).lower()
+
+    def test_find_unique_succeeds(self, tmp_path):
+        """FIND that matches exactly once should not raise."""
+        filepath = tmp_path / "test.py"
+        filepath.write_text("line1\nline2\nline3\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        gen._verify_find_uniqueness("test.py", "line2")
+
+    def test_find_in_nonexistent_file_raises(self, tmp_path):
+        """FIND in a file that doesn't exist must raise."""
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._verify_find_uniqueness("nonexistent.py", "foo")
+        assert "non-existent" in str(excinfo.value).lower() or "not" in str(excinfo.value).lower()
+
+    def test_multiple_blocks_same_file_each_checked(self, tmp_path):
+        """Each edit block's FIND is independently checked for the same file."""
+        filepath = tmp_path / "multi.py"
+        filepath.write_text("import os\nimport sys\nimport re\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        # First FIND is unique -> ok
+        gen._verify_find_uniqueness("multi.py", "import os")
+        # Second FIND is unique -> ok
+        gen._verify_find_uniqueness("multi.py", "import sys")
+        # Third FIND appears once -> ok
+        gen._verify_find_uniqueness("multi.py", "import re")
+        # A FIND that matches multiple -> fails
+        with pytest.raises(LLMPatchGeneratorError):
+            gen._verify_find_uniqueness("multi.py", "import")
+
+    def test_find_with_crlf_content(self, tmp_path):
+        """FIND works with CRLF line endings — Python text mode normalizes \\r\\n to \\n."""
+        filepath = tmp_path / "crlf.py"
+        filepath.write_text("line1\r\nline2\r\nline3\r\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        # Python text mode normalizes CRLF → LF, so FIND with LF succeeds
+        gen._verify_find_uniqueness("crlf.py", "line1\n")
+        # FIND with explicit CRLF in the search string won't match the normalized content
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._verify_find_uniqueness("crlf.py", "line1\r\n")
+        assert "not found" in str(excinfo.value).lower()
+
+    def test_find_matches_with_lf_content(self, tmp_path):
+        """FIND checking works normally with LF line endings."""
+        filepath = tmp_path / "lf.py"
+        filepath.write_text("line1\nline2\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        gen._verify_find_uniqueness("lf.py", "line1")
+
+
+# ---------------------------------------------------------------------------
+# Test: allowed_create_patterns in PatchGenerator
+# ---------------------------------------------------------------------------
+
+class TestCreatePathWithPatterns:
+    """_validate_create_path enforces allowed_create_patterns."""
+
+    def test_allows_create_matching_pattern(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        gen._validate_create_path(
+            "src/transport/http2_transport.py",
+            allowed_create_paths=["src/transport/"],
+            allowed_create_patterns=["src/transport/*_transport.py"],
+        )
+
+    def test_rejects_create_mismatching_pattern(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "src/transport/bad_name.py",
+                allowed_create_paths=["src/transport/"],
+                allowed_create_patterns=["src/transport/*_transport.py"],
+            )
+        assert "pattern" in str(excinfo.value).lower()
+
+    def test_rejects_readme_create(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "README.md",
+                allowed_create_paths=["."],
+                allowed_create_patterns=["*.md"],
+            )
+        # README.md is blocked by basename check
+        assert "README" in str(excinfo.value) or "blocked" in str(excinfo.value).lower()
+
+    def test_rejects_hidden_file_create(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "src/transport/.hidden.py",
+                allowed_create_paths=["src/transport/"],
+                allowed_create_patterns=["src/transport/*.py"],
+            )
+        assert "hidden" in str(excinfo.value).lower()
+
+    def test_rejects_path_traversal_create(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "src/transport/../../.env",
+                allowed_create_paths=["src/transport/"],
+                allowed_create_patterns=["src/transport/*"],
+            )
+        assert "traversal" in str(excinfo.value).lower() or "blocked" in str(excinfo.value).lower()
+
+    def test_rejects_key_extension_create(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "config/secret.key",
+                allowed_create_paths=["config/"],
+                allowed_create_patterns=["config/*"],
+            )
+        assert "extension" in str(excinfo.value).lower() or "key" in str(excinfo.value).lower()
+
+    def test_rejects_create_of_existing_file(self, tmp_path):
+        """Cannot create a file that already exists."""
+        existing = tmp_path / "exists.py"
+        existing.write_text("content\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "exists.py",
+                allowed_create_paths=["."],
+            )
+        assert "already exists" in str(excinfo.value).lower()
+
+    def test_rejects_create_outside_allowed_dir(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "src/core/new.py",
+                allowed_create_paths=["src/transport/"],
+            )
+        assert "not under allowed_create_paths" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Helper for tests that don't need mock API
+# ---------------------------------------------------------------------------
+
+def _dummy_gen(root_dir: str = "."):
+    """Create a generator with a dummy API key for unit-testing internal methods."""
+    import os as _os
+    monkeypatch = None  # not needed for these tests
+    # We need a generator with a real root_dir but we only call internal methods
+    gen = object.__new__(LLMPatchGenerator)
+    gen._root_dir = root_dir
+    return gen

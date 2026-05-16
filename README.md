@@ -693,7 +693,11 @@ LLM Agent 是围绕 Transport/Core 替换工作的工程代理，不是泛用自
 |---|---|---|
 | Rule-based TaskPlanner | [src/llm/task_planner.py](src/llm/task_planner.py) | 基于关键词规则的请求分类和任务规划 |
 | LLM-based TaskPlanner | [src/llm/llm_task_planner.py](src/llm/llm_task_planner.py) | 基于 LLM API 的请求理解和任务分解（需显式启用） |
-| LLMPatchGenerator | [src/llm/patch_generator.py](src/llm/patch_generator.py) | 生成 unified diff，含 secret scanning 和安全校验 |
+| **RepoIndexer** | [src/llm/repo_indexer.py](src/llm/repo_indexer.py) | 扫描仓库，提取 Python symbols/imports、config keys、识别 test/doc 文件（纯本地，不用 LLM） |
+| **FileRetriever** | [src/llm/file_retriever.py](src/llm/file_retriever.py) | 多路文件召回：关键词 + symbol + config key + task type 规则 + test/doc 映射 |
+| **ImpactExpander** | [src/llm/impact_expander.py](src/llm/impact_expander.py) | 影响面扩展：从候选文件生成 FileSelection（must_edit / must_review / test / doc / allowed_create） |
+| **ContextBuilder** | [src/llm/context_builder.py](src/llm/context_builder.py) | 读取 selected files 构建 LLM 上下文（12KB/file cap） |
+| LLMPatchGenerator | [src/llm/patch_generator.py](src/llm/patch_generator.py) | 生成 patch，受 allowed_edit_files/allowed_create_paths/allowed_create_patterns 约束，FIND 唯一性校验 |
 | SafetyGuard | [src/llm/safety_guard.py](src/llm/safety_guard.py) | 检查文件路径、命令和敏感信息，阻断危险操作 |
 | ValidationRunner | [src/llm/validation_runner.py](src/llm/validation_runner.py) | 执行编译检查、pytest、git status 等验证 |
 | ReplacementValidator | [src/llm/replacement_validator.py](src/llm/replacement_validator.py) | 运行 smoke replacement matrix，验证替换后最小可运行性 |
@@ -701,7 +705,7 @@ LLM Agent 是围绕 Transport/Core 替换工作的工程代理，不是泛用自
 | ReportWriter | [src/llm/report_writer.py](src/llm/report_writer.py) | 生成结构化 Markdown 报告 |
 | CommitAdvisor | [src/llm/commit_advisor.py](src/llm/commit_advisor.py) | 生成 Conventional Commits 格式的提交建议（永不自动提交） |
 
-### 完整替换流程
+### 完整替换流程 (Agentized)
 
 ```
 User Request (自然语言需求，如 "把传输协议换成 WebSocket")
@@ -712,11 +716,44 @@ TaskPlanner (rule-based 或 LLM-based)
     → 生成结构化 TaskPlan
     │
     ▼
-SafetyGuard (对所有候选路径和命令做安全检查)
+Extreme Risk Control
+    → 检测 .git/、.env、sudo、rm -rf、auto push 等极端风险
+    → 高风险请求：停止执行，生成 clarification_questions.md
     │
     ▼
-LLMPatchGenerator → 生成 patch.diff
-    → 校验 diff 格式
+SafetyGuard (对所有候选路径做安全检查)
+    │
+    ▼
+RepoIndexer.build() — 本地仓库索引（ast 提取 + 文件系统扫描，不用 LLM）
+    │
+    ▼
+FileRetriever.retrieve() — 多路文件召回
+    ├── 路径/文件名关键词匹配
+    ├── Python symbol 匹配
+    ├── Config key 匹配
+    ├── Task type 规则召回
+    ├── Test 文件映射
+    ├── Doc 文件映射
+    └── LLM planner hints（最低优先级，仅作补充）
+    │
+    ▼
+ImpactExpander.expand() — 影响面扩展 → FileSelection
+    ├── must_edit_files（仅高置信度文件：规则结构性文件 + 评分 ≥0.9 的候选文件）
+    ├── must_review_files（相关但不一定修改的文件，含纯 planner hint）
+    ├── test_files
+    ├── doc_files
+    ├── allowed_create_paths（目录前缀）
+    ├── allowed_create_patterns（fnmatch glob 命名模式，如 *_transport.py, test_*.py）
+    ├── action_sources（每个文件分类来源的可审计追踪）
+    └── rejected_hints（LLM 猜的不存在的文件）
+    │
+    ▼
+ContextBuilder.build() — 读取 selected files 构建 LLM 上下文
+    │
+    ▼
+LLMPatchGenerator.generate() — 生成 patch.diff
+    → 受 allowed_edit_files / allowed_create_paths 约束
+    → 校验 FIND 唯一性（0 次或多次匹配 → 失败）
     → Secret scanning (API key, private key, password 等)
     → 保存 patch.diff 到 .llm_tasks/<task_id>/
     │
@@ -747,6 +784,7 @@ Benchmark / Stability (Phase 10.7 planned)
 Report + Commit Advice (写入 .llm_tasks/<task_id>/)
     → suggested_commit_message.txt
     → commit_summary.md
+    → repo_index_summary.json, file_retrieval.json, impact_analysis.json, file_selection.json, context_summary.json
     → 永不自动 git commit 或 git push
 ```
 
@@ -755,6 +793,11 @@ Report + Commit Advice (写入 .llm_tasks/<task_id>/)
 - **永不自动 git push** — 所有版本控制操作需用户手动执行
 - **永不自动 git commit** — commit message 仅作为建议生成
 - **--apply-patch 是显式闸门** — 不传此参数则 patch 仅做 dry-run
+- **Extreme Risk Control** — 高风险请求 (.git/, .env, sudo, rm -rf, auto push 等) 直接停止并生成澄清问题
+- **LLM 不再猜文件** — 文件选择由 RepoIndexer + FileRetriever + ImpactExpander 本地完成，LLM 只做 patch 生成且受 allowed_edit_files 约束
+- **Planner hints 不能直接授予 must_edit** — LLM planner 的 candidate_files 仅是 hints（0.6 分），必须经过 FileRetriever 多路召回 + ImpactExpander 评分才能进入 must_edit；纯 hint 文件只能进入 must_review
+- **FIND 唯一性校验** — PatchGenerator 验证 FIND 在目标文件中恰好出现 1 次；空 FIND、纯空白 FIND 均拒绝
+- **Create 路径受目录 + 命名模式双重约束** — allowed_create_paths（目录前缀）+ allowed_create_patterns（fnmatch glob），且禁止创建 README.md、隐藏文件、路径穿越、.env、.git、*.key、*.pem
 - **SafetyGuard 阻断** — 危险命令 (sudo, rm -rf, curl | bash)、敏感路径 (.env, .claude/, *.key, *.pem) 一律拒绝
 - **Secret scanning** — patch 内容扫描 private key、API key、password、JWT 等模式
 - **LLM 仅用于 plan/patch 生成** — 不能执行命令、写文件、修改代码或操作 git
@@ -763,11 +806,40 @@ Report + Commit Advice (写入 .llm_tasks/<task_id>/)
 
 ## 14. Current Status / 当前状态
 
-- **Test baseline**: 562 passed, 6 skipped, 0 failed
+- **Test baseline**: 620+ passed
 - **Current stable branch**: `test-2`
-- **Current stable commit**: `cf17dba` (2026-05-10)
-- **当前阶段**: Phase 10.6 已完成 — TCP / WebSocket 在 Linux netns + TUN 环境下 E2E ping 已通过
+- **Current stable commit**: `76d1b47` (2026-05-15)
+- **当前阶段**: Phase 11.1 — LLM Agent workflow 二次加固
 - **下一阶段**: Phase 10.7 — 稳定性与性能 benchmark
+
+### Phase 11.1 加固要点
+
+LLM Agent workflow has been upgraded from planner-guessed candidate files to a local-index-driven file selection pipeline.
+
+The new pipeline uses:
+- RepoIndexer for local repository facts
+- FileRetriever for multi-source candidate recall
+- ImpactExpander for cross-layer impact analysis
+- ContextBuilder for bounded LLM context construction
+- PatchGenerator allowlists for edit/create enforcement
+
+The LLM no longer has authority to freely decide which files may be edited. Planner candidate_files are treated only as hints. Final file selection is derived from local repository analysis and recorded in file_retrieval.json, impact_analysis.json, and file_selection.json for auditability.
+
+Key hardening in Phase 11.1:
+- **must_edit / must_review 严格分区** — must_edit 仅包含高置信度文件（规则结构性文件 + 评分 ≥0.9 候选），纯 planner hint 只能进入 must_review
+- **allowed_create_paths 收紧** — 加入 fnmatch glob 命名模式（如 *_transport.py, test_*.py），README.md 禁止 create，隐藏文件/路径穿越/危险后缀均拒绝
+- **FIND 唯一性校验增强** — 空 FIND、纯空白 FIND 均立即拒绝
+- **action_sources 可审计** — file_selection.json 记录每个文件的分类来源
+
+### 当前项目重点
+
+本项目核心是 **LLM 驱动的 Transport/Core 替换闭环**：
+
+- **Transport 外层可替换**: mock / tcp / tls / websocket / ssh
+- **VPN Core 内核可替换**: session / frame / forwarding / TUN loop
+- **Replacement smoke matrix 是 Gate 1** — 快速验证替换后最小可运行性
+- **netns + real TUN validation 是 Gate 2** — 真实环境端到端验证
+- **LLM Agent 不参与实时转发** — 只参与开发、补丁生成、验证和报告闭环
 
 ### Transport Status
 

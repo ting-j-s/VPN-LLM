@@ -60,11 +60,26 @@ class TestValidationRunner:
         assert isinstance(result, ValidationResult)
         assert result.success, f"Frame tests failed:\n{result.stderr[:500]}"
 
-    def test_run_git_status(self):
-        runner = ValidationRunner()
-        result = runner.run_git_status()
-        assert isinstance(result, ValidationResult)
-        assert result.success
+    def test_run_git_status(self, tmp_path):
+        """run_git_status should succeed inside a git repo."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True)
+        (repo / "dummy.txt").write_text("hello\n")
+        subprocess.run(["git", "add", "dummy.txt"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True)
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(str(repo))
+            runner = ValidationRunner()
+            result = runner.run_git_status()
+            assert isinstance(result, ValidationResult)
+            assert result.success
+        finally:
+            os.chdir(cwd)
 
     def test_structured_result_fields(self):
         runner = ValidationRunner()
@@ -79,6 +94,13 @@ class TestValidationRunner:
 
     def test_run_git_apply_check_on_valid_patch(self, tmp_path):
         """git apply --check on a valid patch file should succeed."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, text=True)
+        (repo / "README.md").write_text("old\n")
+        subprocess.run(["git", "add", "README.md"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True)
+
         patch_path = os.path.join(str(tmp_path), "valid.diff")
         with open(patch_path, "w") as f:
             f.write("diff --git a/README.md b/README.md\n")
@@ -88,13 +110,15 @@ class TestValidationRunner:
             f.write("-old\n")
             f.write("+new\n")
 
-        runner = ValidationRunner()
-        result = runner.run_git_apply_check(patch_path)
-        assert isinstance(result, ValidationResult)
-        # May fail because README.md is in the repo but the patch may apply cleanly or not
-        # Just verify the command runs and produces a result
-        assert hasattr(result, "returncode")
-        assert hasattr(result, "success")
+        cwd = os.getcwd()
+        try:
+            os.chdir(str(repo))
+            runner = ValidationRunner()
+            result = runner.run_git_apply_check(patch_path)
+            assert isinstance(result, ValidationResult)
+            assert result.success, f"git apply --check failed: {result.stderr}"
+        finally:
+            os.chdir(cwd)
 
     def test_run_git_apply_check_on_malformed_patch(self, tmp_path):
         """git apply --check on a malformed patch file should fail."""

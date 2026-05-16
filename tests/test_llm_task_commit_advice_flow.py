@@ -32,6 +32,9 @@ def _make_temp_git_repo(tmp_path):
     (repo / ".gitignore").write_text("__pycache__/\n")
     (repo / "src").mkdir()
     (repo / "src" / "__init__.py").write_text("")
+    (repo / "src" / "transport").mkdir(parents=True)
+    (repo / "src" / "transport" / "__init__.py").write_text("")
+    (repo / "src" / "transport" / "base.py").write_text("class BaseTransport:\n    pass\n")
     (repo / "tests").mkdir()
     (repo / "tests" / "__init__.py").write_text("")
     (repo / "tests" / "test_dummy.py").write_text("def test_pass():\n    assert True\n")
@@ -43,12 +46,15 @@ def _make_temp_git_repo(tmp_path):
 
 
 def _valid_edits():
-    return """FILE: a.py
-<<<FIND
-old
-<<<REPLACE
-new
-"""
+    """Edit src/transport/base.py — guaranteed to be in must_edit for transport_change."""
+    return ('FILE: src/transport/base.py\n'
+            '<<<FIND\n'
+            'class BaseTransport:\n'
+            '    pass\n'
+            '<<<REPLACE\n'
+            'class BaseTransport:\n'
+            '    """Base transport."""\n'
+            '    pass\n')
 
 
 def _setup_mock_api(monkeypatch, plan_extra=None, patch_text=None):
@@ -95,6 +101,31 @@ def _setup_mock_api(monkeypatch, plan_extra=None, patch_text=None):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
 
 
+def _mock_validation_methods(monkeypatch):
+    """Mock slow ValidationRunner methods to return fake success."""
+    from src.llm.validation_runner import ValidationResult
+
+    def _fake_success(cmd="mocked"):
+        return ValidationResult(command=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(
+        "src.llm.validation_runner.ValidationRunner.run_compileall",
+        lambda self: _fake_success("compileall"),
+    )
+    monkeypatch.setattr(
+        "src.llm.validation_runner.ValidationRunner.run_targeted_tests",
+        lambda self, test_paths: _fake_success("targeted tests"),
+    )
+    monkeypatch.setattr(
+        "src.llm.validation_runner.ValidationRunner.run_full_tests",
+        lambda self: _fake_success("full tests"),
+    )
+    monkeypatch.setattr(
+        "src.llm.validation_runner.ValidationRunner.run_git_status",
+        lambda self: _fake_success("git status"),
+    )
+
+
 def _run_main(monkeypatch, repo, extra_args, record_dir):
     """Call scripts.llm_task.main() with mocked argv and chdir to repo."""
     from scripts.llm_task import main
@@ -132,6 +163,7 @@ class TestSuggestCommitGating:
         """--suggest-commit without --apply-patch should error."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
         rc = _run_main(monkeypatch, repo,
                        ["--generate-patch", "--suggest-commit"],
                        str(tmp_path / ".llm_tasks"))
@@ -149,6 +181,7 @@ class TestDefaultNoCommitAdvice:
         """Default apply (without --suggest-commit) should not create commit advice files."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
 
         _run_main(monkeypatch, repo,
                   ["--generate-patch", "--apply-patch"],
@@ -164,6 +197,7 @@ class TestDefaultNoCommitAdvice:
         """Report without --suggest-commit should not have Commit Advice section."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
 
         _run_main(monkeypatch, repo,
                   ["--generate-patch", "--apply-patch"],
@@ -185,12 +219,12 @@ class TestCommitAdviceGenerated:
         """--suggest-commit with successful apply should create advice files."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
 
         rc = _run_main(monkeypatch, repo,
                        ["--generate-patch", "--apply-patch", "--suggest-commit"],
                        str(tmp_path / ".llm_tasks"))
-        # rc may be 1 if post-apply validation fails in minimal temp repo
-        # We just check for file presence
+        assert rc == 0
 
         task_dirs = list((tmp_path / ".llm_tasks").iterdir())
         assert len(task_dirs) > 0
@@ -199,14 +233,15 @@ class TestCommitAdviceGenerated:
         msg_path = task_dir / "suggested_commit_message.txt"
         summary_path = task_dir / "commit_summary.md"
 
-        # At minimum, the apply succeeded (a.py changed)
-        # Check if files were created
-        assert (tmp_path / "repo" / "a.py").read_text() == "new\n"
+        # At minimum, the apply succeeded (base.py changed)
+        base_content = (tmp_path / "repo" / "src" / "transport" / "base.py").read_text()
+        assert "Base transport" in base_content
 
     def test_commit_advice_files_exist_when_all_pass(self, tmp_path, monkeypatch):
         """When apply succeeds and post-apply validation passes, advice files exist."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
 
         _run_main(monkeypatch, repo,
                   ["--generate-patch", "--apply-patch", "--suggest-commit"],
@@ -215,24 +250,26 @@ class TestCommitAdviceGenerated:
         task_dirs = list((tmp_path / ".llm_tasks").iterdir())
         task_dir = task_dirs[0]
 
-        # Check if patch was applied
-        assert (tmp_path / "repo" / "a.py").read_text() == "new\n"
+        # Check if patch was applied (base.py changed)
+        base_content = (tmp_path / "repo" / "src" / "transport" / "base.py").read_text()
+        assert "Base transport" in base_content
 
-        # Check for commit advice files (should exist if post-apply passed)
+        # Check for commit advice files (should exist since post-apply passed)
         msg_path = task_dir / "suggested_commit_message.txt"
         summary_path = task_dir / "commit_summary.md"
-        if msg_path.exists():
-            assert summary_path.exists()
-            content = msg_path.read_text()
-            assert len(content) > 0
-            summary_content = summary_path.read_text()
-            assert "Commit was suggested but NOT created" in summary_content
-            assert "Push was NOT performed" in summary_content
+        assert msg_path.exists(), f"Expected {msg_path} to exist"
+        assert summary_path.exists()
+        content = msg_path.read_text()
+        assert len(content) > 0
+        summary_content = summary_path.read_text()
+        assert "Commit was suggested but NOT created" in summary_content
+        assert "Push was NOT performed" in summary_content
 
     def test_report_contains_commit_advice_section(self, tmp_path, monkeypatch):
         """Report with --suggest-commit should have Commit Advice section."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
 
         _run_main(monkeypatch, repo,
                   ["--generate-patch", "--apply-patch", "--suggest-commit"],
@@ -259,6 +296,7 @@ old
 new
 """
         _setup_mock_api(monkeypatch, patch_text=bad_patch)
+        _mock_validation_methods(monkeypatch)
 
         rc = _run_main(monkeypatch, repo,
                        ["--generate-patch", "--apply-patch", "--suggest-commit"],

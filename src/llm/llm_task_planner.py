@@ -52,6 +52,9 @@ class LLMTaskPlan:
 
     Compatible with the rule-based TaskPlan interface (task_type,
     target_transport, affected_areas) while adding LLM-specific fields.
+
+    candidate_files is a planner hint only — the final selected_files must
+    come from RepoIndexer + FileRetriever + ImpactExpander.
     """
 
     def __init__(
@@ -62,6 +65,10 @@ class LLMTaskPlan:
         candidate_files: list[str],
         validation_commands: list[str],
         risk_level: str,
+        requirements: list[str] | None = None,
+        constraints: list[str] | None = None,
+        validation_goals: list[str] | None = None,
+        ambiguity: list[str] | None = None,
     ):
         self.task_type = task_type
         self.target_transport = target_transport
@@ -69,6 +76,10 @@ class LLMTaskPlan:
         self.candidate_files = candidate_files
         self.validation_commands = validation_commands
         self.risk_level = risk_level
+        self.requirements = requirements or []
+        self.constraints = constraints or []
+        self.validation_goals = validation_goals or []
+        self.ambiguity = ambiguity or []
 
     @property
     def affected_areas(self) -> list[str]:
@@ -88,6 +99,10 @@ class LLMTaskPlan:
             "candidate_files": self.candidate_files,
             "validation_commands": self.validation_commands,
             "risk_level": self.risk_level,
+            "requirements": self.requirements,
+            "constraints": self.constraints,
+            "validation_goals": self.validation_goals,
+            "ambiguity": self.ambiguity,
         }
 
 
@@ -109,15 +124,23 @@ class LLMTaskPlanner:
         "- task_type: one of transport_change, config_change, test_addition, docs_update, core_change, bugfix, refactor, unknown\n"
         "- target_transport: one of tcp, tls, ssh, websocket, mock, or null\n"
         "- summary: one-sentence summary of what the user wants\n"
-        "- candidate_files: list of file paths that might need changes (empty list if unknown)\n"
+        "- candidate_files: list of file paths that MIGHT need changes (hints only — local index determines final selection)\n"
         "- validation_commands: list of shell commands to validate the result (empty list if unknown)\n"
-        "- risk_level: low, medium, or high\n\n"
+        "- risk_level: low, medium, or high\n"
+        "- requirements: (optional) list of explicit requirements derived from the request\n"
+        "- constraints: (optional) list of constraints that must be respected\n"
+        "- validation_goals: (optional) list of validation goals\n"
+        "- ambiguity: (optional) list of ambiguous points needing clarification\n\n"
         "Example output:\n"
         '{"task_type":"transport_change","target_transport":"websocket",'
         '"summary":"Switch default transport from TCP to WebSocket",'
         '"candidate_files":["src/transport/websocket_transport.py","config/server.yaml"],'
         '"validation_commands":["python3 -m pytest tests/test_websocket_transport.py -v"],'
-        '"risk_level":"medium"}'
+        '"risk_level":"medium",'
+        '"requirements":["replace tcp with websocket in config"],'
+        '"constraints":["must not break existing tests"],'
+        '"validation_goals":["transport smoke matrix passes"],'
+        '"ambiguity":[]}'
     )
 
     def __init__(self, config_path: str):
@@ -151,6 +174,10 @@ class LLMTaskPlanner:
             candidate_files=validated["candidate_files"],
             validation_commands=validated["validation_commands"],
             risk_level=validated["risk_level"],
+            requirements=validated.get("requirements", []),
+            constraints=validated.get("constraints", []),
+            validation_goals=validated.get("validation_goals", []),
+            ambiguity=validated.get("ambiguity", []),
         )
 
     # ------------------------------------------------------------------

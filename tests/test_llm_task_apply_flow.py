@@ -35,6 +35,9 @@ def _make_temp_git_repo(tmp_path):
     # Minimal src/ module so compileall doesn't fail with file-not-found
     (repo / "src").mkdir()
     (repo / "src" / "__init__.py").write_text("")
+    (repo / "src" / "transport").mkdir(parents=True)
+    (repo / "src" / "transport" / "__init__.py").write_text("")
+    (repo / "src" / "transport" / "base.py").write_text("class BaseTransport:\n    pass\n")
 
     # Minimal tests/ with passing tests
     (repo / "tests").mkdir()
@@ -49,12 +52,15 @@ def _make_temp_git_repo(tmp_path):
 
 
 def _valid_edits():
-    return """FILE: a.py
-<<<FIND
-old
-<<<REPLACE
-new
-"""
+    """Edit src/transport/base.py — guaranteed to be in must_edit for transport_change."""
+    return ('FILE: src/transport/base.py\n'
+            '<<<FIND\n'
+            'class BaseTransport:\n'
+            '    pass\n'
+            '<<<REPLACE\n'
+            'class BaseTransport:\n'
+            '    """Base transport."""\n'
+            '    pass\n')
 
 
 
@@ -106,6 +112,35 @@ def _setup_mock_api(monkeypatch, plan_extra=None, patch_text=None):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
 
 
+def _mock_validation_methods(monkeypatch):
+    """Mock slow ValidationRunner methods to return fake success.
+
+    Only mocks compileall, pytest, and git-status — keeps run_command real
+    so that git apply --check and git apply work correctly.
+    """
+    from src.llm.validation_runner import ValidationResult
+
+    def _fake_success(cmd="mocked"):
+        return ValidationResult(command=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(
+        "src.llm.validation_runner.ValidationRunner.run_compileall",
+        lambda self: _fake_success("compileall"),
+    )
+    monkeypatch.setattr(
+        "src.llm.validation_runner.ValidationRunner.run_targeted_tests",
+        lambda self, test_paths: _fake_success("targeted tests"),
+    )
+    monkeypatch.setattr(
+        "src.llm.validation_runner.ValidationRunner.run_full_tests",
+        lambda self: _fake_success("full tests"),
+    )
+    monkeypatch.setattr(
+        "src.llm.validation_runner.ValidationRunner.run_git_status",
+        lambda self: _fake_success("git status"),
+    )
+
+
 def _run_main(monkeypatch, repo, extra_args, record_dir):
     """Call scripts.llm_task.main() with mocked argv and chdir to repo."""
     from scripts.llm_task import main
@@ -144,6 +179,7 @@ class TestCliArgumentGating:
         """--apply-patch without --generate-patch should error."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
         rc = _run_main(monkeypatch, repo, ["--apply-patch"], str(tmp_path / ".llm_tasks"))
         assert rc == 1
 
@@ -151,6 +187,7 @@ class TestCliArgumentGating:
         """--generate-patch without --use-llm-planner should error."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
         # Simulate calling without --use-llm-planner
         config_path = os.path.join(_project_root, "config", "llm_agent.yaml.example")
         monkeypatch.setattr(sys, "argv", [
@@ -190,6 +227,7 @@ old
 new
 """
         _setup_mock_api(monkeypatch, patch_text=bad_patch)
+        _mock_validation_methods(monkeypatch)
         rc = _run_main(monkeypatch, repo, ["--generate-patch", "--apply-patch"],
                        str(tmp_path / ".llm_tasks"))
         assert rc == 1
@@ -208,6 +246,7 @@ class TestDirtyWorktreeBlock:
         repo = _make_temp_git_repo(tmp_path)
         (tmp_path / "repo" / "dirty.txt").write_text("untracked\n")
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
         rc = _run_main(monkeypatch, repo, ["--generate-patch", "--apply-patch"],
                        str(tmp_path / ".llm_tasks"))
         assert rc == 1
@@ -217,12 +256,14 @@ class TestDirtyWorktreeBlock:
         repo = _make_temp_git_repo(tmp_path)
         (tmp_path / "repo" / "dirty.txt").write_text("untracked\n")
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
         rc = _run_main(monkeypatch, repo,
                        ["--generate-patch", "--apply-patch", "--allow-dirty-worktree"],
                        str(tmp_path / ".llm_tasks"))
-        # rc may be non-zero due to post-apply validation in minimal temp repo
-        # but the bypass should have worked — patch applied despite dirty worktree
-        assert (tmp_path / "repo" / "a.py").read_text() == "new\n"
+        # With mocked validation methods, the post-apply checks pass
+        assert (tmp_path / "repo" / "a.py").read_text() == "old\n"  # a.py is not the edit target
+        base_content = (tmp_path / "repo" / "src" / "transport" / "base.py").read_text()
+        assert "Base transport" in base_content
 
 
 # ---------------------------------------------------------------------------
@@ -236,25 +277,31 @@ class TestDefaultNoApply:
         """--generate-patch alone should NOT apply the patch."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
 
         assert (tmp_path / "repo" / "a.py").read_text() == "old\n"
+        base_orig = (tmp_path / "repo" / "src" / "transport" / "base.py").read_text()
 
         rc = _run_main(monkeypatch, repo, ["--generate-patch"],
                        str(tmp_path / ".llm_tasks"))
         assert rc == 0
 
         assert (tmp_path / "repo" / "a.py").read_text() == "old\n"
+        # base.py should be unchanged (patch was not applied)
+        assert (tmp_path / "repo" / "src" / "transport" / "base.py").read_text() == base_orig
 
     def test_generate_with_apply_applies_patch(self, tmp_path, monkeypatch):
         """--generate-patch + --apply-patch should apply the patch."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
 
         rc = _run_main(monkeypatch, repo, ["--generate-patch", "--apply-patch"],
                        str(tmp_path / ".llm_tasks"))
-        # rc may be 1 if post-apply validation (compileall/pytest) fails
-        # in the minimal temp repo; we care that the patch was applied.
-        assert (tmp_path / "repo" / "a.py").read_text() == "new\n"
+        # With mocked validation, rc should be 0
+        assert rc == 0
+        base_content = (tmp_path / "repo" / "src" / "transport" / "base.py").read_text()
+        assert "Base transport" in base_content
 
         # Verify apply artifacts exist
         task_dirs = list((tmp_path / ".llm_tasks").iterdir())
@@ -273,10 +320,11 @@ class TestDefaultNoApply:
         """Report after apply should have manual commit guidance, no auto-push."""
         repo = _make_temp_git_repo(tmp_path)
         _setup_mock_api(monkeypatch)
+        _mock_validation_methods(monkeypatch)
 
         rc = _run_main(monkeypatch, repo, ["--generate-patch", "--apply-patch"],
                        str(tmp_path / ".llm_tasks"))
-        # rc may be 1 due to post-apply validation in minimal temp repo
+        assert rc == 0
 
         # Read the report from disk
         task_dirs = list((tmp_path / ".llm_tasks").iterdir())

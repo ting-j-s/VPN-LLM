@@ -11,11 +11,20 @@ Usage:
     # Custom record directory
     python3 scripts/llm_task.py --request "..." --record-dir .llm_tasks
 
-MVP: plan + validation only. Does NOT generate or apply code changes,
-does NOT commit, does NOT push.
+The agentized flow:
+  1. TaskPlan (rule-based or LLM-based)
+  2. RepoIndexer.build() — local static analysis, no LLM
+  3. FileRetriever.retrieve() — multi-strategy recall from the index
+  4. ImpactExpander.expand() — impact analysis → FileSelection
+  5. ContextBuilder.build() — read selected files for LLM context
+  6. PatchGenerator.generate() — LLM writes patches constrained by FileSelection
+
+LLM is NOT responsible for guessing which files to edit — that is handled
+by the local index → retrieve → expand pipeline.
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -29,6 +38,62 @@ from src.llm.safety_guard import SafetyGuard, SafetyError
 from src.llm.validation_runner import ValidationRunner, DirtyWorktreeError
 from src.llm.task_record import TaskRecordManager
 from src.llm.report_writer import write_report
+
+
+# ---------------------------------------------------------------------------
+# Risk control
+# ---------------------------------------------------------------------------
+
+_EXTREME_RISK_KEYWORDS = [
+    ".git/", ".env", "*.key", "*.pem",
+    "sudo", "rm -rf", "curl | sh", "curl|sh", "wget | sh",
+    "auto commit", "auto push", "automatic commit", "automatic push",
+    "git push", "force push",
+]
+
+
+def _is_extreme_risk(request: str) -> bool:
+    """Check if a request involves extreme-risk operations."""
+    request_lower = request.lower()
+    for kw in _EXTREME_RISK_KEYWORDS:
+        if kw in request_lower:
+            return True
+    return False
+
+
+def _write_clarification_questions(task_dir: str, request: str) -> None:
+    """Write clarification_questions.md for extreme-risk tasks."""
+    lines = [
+        "# Clarification Questions",
+        "",
+        "The following request was classified as **extreme risk** and was NOT executed.",
+        "",
+        f"**Request**: {request}",
+        "",
+        "## Risk Factors",
+        "",
+        "The request matched one or more extreme-risk patterns:",
+        "",
+    ]
+    request_lower = request.lower()
+    for kw in _EXTREME_RISK_KEYWORDS:
+        if kw in request_lower:
+            lines.append(f"- `{kw}`")
+    lines.extend([
+        "",
+        "## Required Clarifications",
+        "",
+        "1. What specific files or directories need to be modified?",
+        "2. Is there a safer alternative that achieves the same goal?",
+        "3. Has this change been reviewed by a human?",
+        "4. What is the rollback plan if something goes wrong?",
+        "",
+        "> This task was blocked by the LLM Agent safety system. "
+        "Please clarify and re-submit with appropriate safeguards.",
+    ])
+    filepath = os.path.join(task_dir, "clarification_questions.md")
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def load_llm_planner(config_path: str):
@@ -176,9 +241,9 @@ def main():
         print("Warning: could not classify request. Proceeding with validation only.")
         print()
 
-    # 2. Safety check on the request itself
+    # 2. Basic safety check on path patterns (not the request command itself —
+    #    that is checked after the extreme risk gate)
     try:
-        SafetyGuard.validate_command(args.request)
         SafetyGuard.validate_write_path("config/server.yaml")
         SafetyGuard.validate_write_path("config/client.yaml")
         SafetyGuard.validate_write_path("tests/test_websocket_transport.py")
@@ -200,8 +265,128 @@ def main():
     record_mgr = TaskRecordManager(args.record_dir)
     task_id = record_mgr.create_task(args.request)
     record_mgr.save_plan(task_id, plan, planner_type=planner_type)
-    print(f"Task record: {record_mgr.get_task_dir(task_id)}")
+    task_dir = record_mgr.get_task_dir(task_id)
+    print(f"Task record: {task_dir}")
     print()
+
+    # ---- Extreme risk control ----
+    if _is_extreme_risk(args.request):
+        print("=== EXTREME RISK DETECTED ===")
+        print("This request matches extreme-risk patterns (e.g., .git/, .env, sudo, rm -rf, auto-push).")
+        print("Execution stopped. Generating clarification questions.")
+        _write_clarification_questions(task_dir, args.request)
+        # Generate a minimal report
+        report = write_report(
+            task_id=task_id, request=args.request, plan=plan,
+            compile_result=None, targeted_result=None,
+            full_result=None, git_result=None,
+            planner_type=planner_type,
+        )
+        record_mgr.save_report(task_id, report)
+        print(f"Clarification questions written to: {task_dir}/clarification_questions.md")
+        print(">>> Task was NOT executed. Please clarify and re-submit. <<<")
+        sys.exit(1)
+
+    # ---- Safety command check (after extreme risk gate) ----
+    try:
+        SafetyGuard.validate_command(args.request)
+    except SafetyError as e:
+        print(f"SAFETY BLOCK: {e}")
+        sys.exit(1)
+
+    # ---- File selection pipeline (no LLM involved) ----
+    file_selection = None
+    repo_context = ""
+    context_summary = None
+
+    if args.generate_patch:
+        from src.llm.repo_indexer import RepoIndexer
+        from src.llm.file_retriever import FileRetriever
+        from src.llm.impact_expander import ImpactExpander
+        from src.llm.context_builder import ContextBuilder
+
+        print("=== File Selection Pipeline ===")
+        print()
+
+        # 4a. Build repo index (scan cwd so tests can use temp repos)
+        print("Building repo index...")
+        indexer = RepoIndexer(os.getcwd())
+        repo_index = indexer.build()
+        print(f"  Files indexed: {repo_index.file_count} "
+              f"({repo_index.python_count} python, {repo_index.test_count} tests, "
+              f"{repo_index.doc_count} docs)")
+
+        # Save index summary
+        record_mgr._write_file(task_id, "repo_index_summary.json",
+                               json.dumps(repo_index.summary(), indent=2))
+
+        # 4b. Multi-strategy file retrieval
+        print("Retrieving candidate files...")
+        retriever = FileRetriever(repo_index)
+        candidates = retriever.retrieve(args.request, plan)
+        print(f"  Candidates retrieved: {len(candidates)}")
+        for c in candidates[:10]:
+            print(f"    [{c.action}] {c.path} (score={c.score:.2f}, sources={c.sources})")
+        if len(candidates) > 10:
+            print(f"    ... and {len(candidates) - 10} more")
+
+        # Save retrieval results
+        record_mgr._write_file(task_id, "file_retrieval.json",
+                               json.dumps([c.to_dict() for c in candidates], indent=2))
+
+        # 4c. Impact expansion
+        print("Expanding impact...")
+        expander = ImpactExpander(repo_index)
+        file_selection = expander.expand(args.request, plan, candidates)
+        print(f"  Must edit: {len(file_selection.must_edit_files)} files")
+        print(f"  Must review: {len(file_selection.must_review_files)} files")
+        print(f"  Test files: {len(file_selection.test_files)}")
+        print(f"  Doc files: {len(file_selection.doc_files)}")
+        print(f"  Allowed create paths: {file_selection.allowed_create_paths}")
+        if file_selection.rejected_hints:
+            print(f"  Rejected hints (not on disk): {file_selection.rejected_hints}")
+
+        # Save impact analysis and selection
+        record_mgr._write_file(task_id, "impact_analysis.json",
+                               json.dumps({
+                                   "affected_area_keys": list(set(
+                                       c.sources[0] if c.sources else "unknown"
+                                       for c in candidates
+                                   )),
+                                   "candidate_count": len(candidates),
+                                   "must_edit_count": len(file_selection.must_edit_files),
+                                   "must_review_count": len(file_selection.must_review_files),
+                               }, indent=2))
+        record_mgr._write_file(task_id, "file_selection.json",
+                               json.dumps(file_selection.to_dict(), indent=2))
+
+        # Check: no editable files found → stop
+        if not file_selection.has_any_edits and not file_selection.allowed_create_paths:
+            print()
+            print(">>> No editable files were selected. Cannot determine modification scope. <<<")
+            print(">>> The request may be too vague or the affected area is not in the index. <<<")
+            # Write report and exit
+            report = write_report(
+                task_id=task_id, request=args.request, plan=plan,
+                compile_result=None, targeted_result=None,
+                full_result=None, git_result=None,
+                planner_type=planner_type,
+            )
+            record_mgr.save_report(task_id, report)
+            record_mgr.update_status(task_id, "failed", all_passed=False)
+            sys.exit(1)
+
+        # 4d. Build context for LLM (use cwd so tests work with temp repos)
+        print("Building repository context...")
+        builder = ContextBuilder(os.getcwd())
+        repo_context, context_summary = builder.build(file_selection)
+        print(f"  Context size: {context_summary.total_bytes} bytes "
+              f"({len(context_summary.files_included)} files)")
+
+        # Save context summary
+        record_mgr._write_file(task_id, "context_summary.json",
+                               json.dumps(context_summary.to_dict(), indent=2))
+        print()
 
     # 5. Run validation
     runner = ValidationRunner()
@@ -254,42 +439,58 @@ def main():
 
         patch_gen = load_patch_generator(args.llm_config)
 
-        # Build repository context with file contents so LLM can write exact FIND blocks
-        repo_context_lines = [
-            f"Task type: {plan.task_type}",
-            f"Target transport: {plan.target_transport or 'N/A'}",
-            "Affected areas:",
-        ]
-        for area in plan.affected_areas:
-            repo_context_lines.append(f"  - {area}")
+        # Use context from ContextBuilder if available, otherwise fall back to legacy path
+        if repo_context:
+            print("Using file-selection-based context.")
+        else:
+            # Legacy fallback: build minimal context from plan.candidate_files
+            print("Warning: file selection pipeline not run — using legacy context.")
+            repo_context_lines = [
+                f"Task type: {plan.task_type}",
+                f"Target transport: {plan.target_transport or 'N/A'}",
+                "Affected areas:",
+            ]
+            for area in plan.affected_areas:
+                repo_context_lines.append(f"  - {area}")
+            repo_context_lines.append("")
+            repo_context_lines.append("File contents (for exact FIND matching):")
+            max_file_bytes = 8192
+            for fpath in getattr(plan, "candidate_files", []) or []:
+                if not os.path.isfile(fpath):
+                    continue
+                ext = os.path.splitext(fpath)[1].lower()
+                if ext in (".key", ".pem", ".crt"):
+                    continue
+                try:
+                    size = os.path.getsize(fpath)
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        content = f.read(max_file_bytes)
+                    repo_context_lines.append(f"")
+                    repo_context_lines.append(f"--- {fpath} ({size} bytes) ---")
+                    repo_context_lines.append(content)
+                    if size > max_file_bytes:
+                        repo_context_lines.append("... (truncated)")
+                except Exception:
+                    repo_context_lines.append(f"")
+                    repo_context_lines.append(f"--- {fpath} (unable to read) ---")
+            repo_context = "\n".join(repo_context_lines)
 
-        # Include file contents for candidate files (capped to avoid overflow)
-        repo_context_lines.append("")
-        repo_context_lines.append("File contents (for exact FIND matching):")
-        max_file_bytes = 8192
-        for fpath in plan.candidate_files:
-            if not os.path.isfile(fpath):
-                continue
-            ext = os.path.splitext(fpath)[1].lower()
-            if ext in (".key", ".pem", ".crt"):
-                continue
-            try:
-                size = os.path.getsize(fpath)
-                with open(fpath, "r", encoding="utf-8") as f:
-                    content = f.read(max_file_bytes)
-                repo_context_lines.append(f"")
-                repo_context_lines.append(f"--- {fpath} ({size} bytes) ---")
-                repo_context_lines.append(content)
-                if size > max_file_bytes:
-                    repo_context_lines.append("... (truncated)")
-            except Exception:
-                repo_context_lines.append(f"")
-                repo_context_lines.append(f"--- {fpath} (unable to read) ---")
-
-        repo_context = "\n".join(repo_context_lines)
+        # Prepare file constraints from file_selection
+        allowed_edit_files = None
+        allowed_create_paths = None
+        allowed_create_patterns = None
+        if file_selection is not None:
+            allowed_edit_files = list(file_selection.must_edit_files)
+            allowed_create_paths = list(file_selection.allowed_create_paths) or None
+            allowed_create_patterns = list(file_selection.allowed_create_patterns) or None
 
         try:
-            patch_text = patch_gen.generate(args.request, plan, repo_context)
+            patch_text = patch_gen.generate(
+                args.request, plan, repo_context,
+                allowed_edit_files=allowed_edit_files,
+                allowed_create_paths=allowed_create_paths,
+                allowed_create_patterns=allowed_create_patterns,
+            )
             print("Patch generated successfully")
         except LLMPatchGeneratorError as e:
             print(f"Patch generation failed: {e}")

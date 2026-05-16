@@ -29,8 +29,6 @@ def has_root_or_net_admin():
     """
     if os.geteuid() == 0:
         return True
-    # Check if we have CAP_NET_ADMIN in our capabilities
-    # This only works if capsh is available
     try:
         import subprocess
         result = subprocess.run(
@@ -41,8 +39,12 @@ def has_root_or_net_admin():
         )
         return "cap_net_admin" in result.stdout
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        # Can't determine, assume we might not have it
         return False
+
+
+def _can_use_real_tun():
+    """All three conditions required for real TUN device operations."""
+    return is_linux() and has_root_or_net_admin() and has_tun_device()
 
 
 class TestLinuxTunDeviceImport:
@@ -74,30 +76,14 @@ class TestLinuxTunDeviceOpenClose:
     def test_open_requires_root(self):
         """open() should fail without root or CAP_NET_ADMIN."""
         dev = LinuxTunDevice(name="tun99", mtu=1400)
-        if os.geteuid() != 0:
-            # Try to detect if we have capabilities
-            try:
-                import subprocess
-                result = subprocess.run(
-                    ["capsh", "--print"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                has_cap = "cap_net_admin" in result.stdout
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                has_cap = False
+        if _can_use_real_tun():
+            pytest.skip("Has real TUN capability — test verifies failure without it")
+        with pytest.raises(Exception):  # TunDeviceError or OSError
+            dev.open()
 
-            if not has_cap:
-                with pytest.raises(Exception):  # TunDeviceError or OSError
-                    dev.open()
-
-    @pytest.mark.skipif(not is_linux(), reason="Not Linux")
+    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_open_with_root(self):
         """With root, open() should succeed."""
-        if os.geteuid() != 0:
-            pytest.skip("Requires root")
-
         dev = LinuxTunDevice(name="tun99", mtu=1400)
         try:
             dev.open()
@@ -106,12 +92,9 @@ class TestLinuxTunDeviceOpenClose:
         finally:
             dev.close()
 
-    @pytest.mark.skipif(not is_linux(), reason="Not Linux")
+    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_double_open_logs_warning(self):
         """Calling open() twice should log a warning and not fail."""
-        if os.geteuid() != 0:
-            pytest.skip("Requires root")
-
         dev = LinuxTunDevice(name="tun98", mtu=1400)
         try:
             dev.open()
@@ -121,12 +104,9 @@ class TestLinuxTunDeviceOpenClose:
         finally:
             dev.close()
 
-    @pytest.mark.skipif(not is_linux(), reason="Not Linux")
+    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_close_is_idempotent(self):
         """close() should be safe to call multiple times."""
-        if os.geteuid() != 0:
-            pytest.skip("Requires root")
-
         dev = LinuxTunDevice(name="tun97", mtu=1400)
         dev.open()
         assert dev._opened is True
@@ -210,8 +190,7 @@ class TestMockTunDevice:
 class TestLinuxTunDeviceReadWrite:
     """Test LinuxTunDevice read/write (requires root)."""
 
-    @pytest.mark.skipif(not is_linux(), reason="Not Linux")
-    @pytest.mark.skipif(os.geteuid() != 0, reason="Requires root")
+    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_write_and_read_packet(self):
         """Should be able to write and read packets with real TUN."""
         dev = LinuxTunDevice(name="tun94", mtu=1400)
@@ -229,8 +208,7 @@ class TestLinuxTunDeviceReadWrite:
         finally:
             dev.close()
 
-    @pytest.mark.skipif(not is_linux(), reason="Not Linux")
-    @pytest.mark.skipif(os.geteuid() != 0, reason="Requires root")
+    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_set_nonblocking(self):
         """set_nonblocking() should work without errors."""
         dev = LinuxTunDevice(name="tun93", mtu=1400)
@@ -240,8 +218,7 @@ class TestLinuxTunDeviceReadWrite:
         finally:
             dev.close()
 
-    @pytest.mark.skipif(not is_linux(), reason="Not Linux")
-    @pytest.mark.skipif(os.geteuid() != 0, reason="Requires root")
+    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_read_when_empty(self):
         """read_packet() should return None when no data."""
         dev = LinuxTunDevice(name="tun92", mtu=1400)

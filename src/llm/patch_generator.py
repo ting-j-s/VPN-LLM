@@ -34,20 +34,29 @@ class LLMPatchGenerator:
         "You are a patch generator for a VPN software project. "
         "Given a user request, a task plan, and repository context, "
         "output edit instructions in FIND/REPLACE format.\n\n"
-        "FORMAT (repeat for each file):\n"
+        "FORMAT for editing existing files:\n"
         "FILE: <path>\n"
+        "ACTION: replace\n"
         "<<<FIND\n"
         "exact lines to find in the file (must match exactly, including whitespace)\n"
         "<<<REPLACE\n"
         "replacement lines\n\n"
+        "FORMAT for creating new files:\n"
+        "FILE: <path>\n"
+        "ACTION: create\n"
+        "<<<CONTENT\n"
+        "full file content\n"
+        ">>>\n\n"
         "CRITICAL RULES:\n"
         "- Output ONLY the edit blocks. No markdown, no explanation, no code fences.\n"
-        "- The FIND block must be an EXACT substring of the file content.\n"
+        "- The FIND block must be an EXACT substring that appears EXACTLY ONCE in the file.\n"
         "- FIND the smallest specific section that needs changing, not the entire file.\n"
         "- Make ONLY the changes the user requested. Do NOT change unrelated values\n"
         "  (ports, IPs, comments, etc.) unless the request explicitly asks for them.\n"
         "- Preserve the exact indentation of the surrounding code. New lines in REPLACE\n"
         "  must use the same indentation characters (spaces/tabs) as the lines they replace.\n"
+        "- You may ONLY edit files listed in 'allowed_edit_files' (if provided).\n"
+        "- You may ONLY create files under paths listed in 'allowed_create_paths'.\n"
         "- Do NOT modify .env, .git/, .claude/, *.key, *.pem, or config/llm_agent.yaml\n"
         "- Do NOT include any API keys, private keys, tokens, or passwords\n"
         "- If you cannot generate a safe patch, output nothing.\n"
@@ -99,26 +108,137 @@ class LLMPatchGenerator:
     # Public API
     # ------------------------------------------------------------------
 
-    def generate(self, user_request: str, task_plan, repository_context: str) -> str:
+    def generate(self, user_request: str, task_plan, repository_context: str,
+                 allowed_edit_files: list[str] | None = None,
+                 allowed_create_paths: list[str] | None = None,
+                 allowed_create_patterns: list[str] | None = None) -> str:
         """Generate a unified diff for the given request and plan.
+
+        Args:
+            user_request: Natural language request.
+            task_plan: TaskPlan or LLMTaskPlan instance.
+            repository_context: Repository context string from ContextBuilder.
+            allowed_edit_files: If provided, only these files may be edited.
+            allowed_create_paths: If provided, new files may only be created
+                under these directory prefixes.
+            allowed_create_patterns: If provided, new files must match one of
+                these fnmatch glob patterns. Also blocks hidden files, binary
+                files, path traversal, and .env/.git/*.key/*.pem.
 
         Returns the raw patch text after passing all safety checks.
 
         Raises LLMPatchGeneratorError on any failure: HTTP error, invalid edit
-        format, unsafe file paths, or sensitive content.
+        format, unsafe file paths, FIND not found / not unique, or sensitive content.
         """
-        raw = self._call_api(user_request, task_plan, repository_context)
+        raw = self._call_api(user_request, task_plan, repository_context,
+                            allowed_edit_files, allowed_create_paths,
+                            allowed_create_patterns)
         edits = self._parse_edit_blocks(raw)
         if not edits:
             raise LLMPatchGeneratorError("LLM returned no valid edit blocks")
 
-        for filepath, find_str, replace_str in edits:
-            self._validate_file_path(filepath)
+        for filepath, action, find_str, replace_str in edits:
+            if action == "create":
+                self._validate_create_path(filepath, allowed_create_paths,
+                                          allowed_create_patterns)
+            else:
+                self._validate_file_path(filepath)
+                if allowed_edit_files is not None and filepath not in allowed_edit_files:
+                    raise LLMPatchGeneratorError(
+                        f"LLM attempted to edit file not in allowed_edit_files: {filepath}. "
+                        f"Allowed: {allowed_edit_files}"
+                    )
+                # Verify FIND uniqueness
+                self._verify_find_uniqueness(filepath, find_str)
 
         diff_text = self._generate_diff(edits)
 
         self._scan_for_secrets(diff_text)
         return diff_text
+
+    def _verify_find_uniqueness(self, filepath: str, find_str: str) -> None:
+        """Verify the FIND string appears exactly once in the target file.
+
+        Also rejects empty FIND and whitespace-only FIND.
+        """
+        # Reject empty FIND
+        if not find_str:
+            raise LLMPatchGeneratorError(
+                f"FIND string is empty for {filepath}. "
+                "FIND must contain the exact lines to replace."
+            )
+        # Reject whitespace-only FIND
+        if not find_str.strip():
+            raise LLMPatchGeneratorError(
+                f"FIND string is whitespace-only for {filepath}. "
+                "FIND must contain non-whitespace content."
+            )
+        full_path = os.path.join(self._root_dir, filepath)
+        if not os.path.isfile(full_path):
+            raise LLMPatchGeneratorError(
+                f"Cannot patch non-existent file: {filepath}"
+            )
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        count = content.count(find_str)
+        if count == 0:
+            raise LLMPatchGeneratorError(
+                f"FIND string not found in {filepath}. "
+                f"FIND: {find_str[:200]!r}"
+            )
+        if count > 1:
+            raise LLMPatchGeneratorError(
+                f"FIND string matches {count} times in {filepath} (must be unique). "
+                f"Make FIND more specific. FIND: {find_str[:200]!r}"
+            )
+
+    def _validate_create_path(self, filepath: str, allowed_create_paths: list[str] | None,
+                              allowed_create_patterns: list[str] | None = None) -> None:
+        """Validate that a new file path is allowed.
+
+        Checks in order:
+        1. Standard safety checks (blocked paths, extensions, SafetyGuard)
+        2. File must not already exist
+        3. Must be under an allowed_create_paths prefix (if provided)
+        4. Must match an allowed_create_patterns glob (if provided)
+        5. Must pass filename-level checks (no hidden files, path traversal,
+           binary, blocked basenames like README.md, blocked extensions)
+
+        Args:
+            filepath: The path where the file would be created.
+            allowed_create_paths: List of allowed directory prefixes.
+            allowed_create_patterns: List of fnmatch glob patterns for filenames.
+
+        Raises:
+            LLMPatchGeneratorError: If the path is blocked or not allowed.
+        """
+        # Always run the standard safety checks first
+        self._validate_file_path(filepath)
+
+        # Check if the file already exists
+        full_path = os.path.join(self._root_dir, filepath)
+        if os.path.exists(full_path):
+            raise LLMPatchGeneratorError(
+                f"Cannot create {filepath}: file already exists. Use ACTION: replace to edit."
+            )
+
+        # Check if creation is allowed under allowed_create_paths
+        if allowed_create_paths is not None:
+            normalized = filepath.replace("\\", "/")
+            allowed = any(
+                normalized.startswith(acp.rstrip("/") + "/") or normalized.startswith(acp.rstrip("/"))
+                for acp in allowed_create_paths
+            )
+            if not allowed:
+                raise LLMPatchGeneratorError(
+                    f"Cannot create {filepath}: not under allowed_create_paths: {allowed_create_paths}"
+                )
+
+        # Check filename-level rules via ImpactExpander's validator
+        from src.llm.impact_expander import validate_create_filename
+        err = validate_create_filename(filepath, allowed_create_patterns)
+        if err is not None:
+            raise LLMPatchGeneratorError(err)
 
     # ------------------------------------------------------------------
     # Internal: config loading
@@ -141,7 +261,10 @@ class LLMPatchGenerator:
     # Internal: LLM API call
     # ------------------------------------------------------------------
 
-    def _call_api(self, user_request: str, task_plan, repository_context: str) -> str:
+    def _call_api(self, user_request: str, task_plan, repository_context: str,
+                  allowed_edit_files: list[str] | None = None,
+                  allowed_create_paths: list[str] | None = None,
+                  allowed_create_patterns: list[str] | None = None) -> str:
         planner_type = "llm_based" if hasattr(task_plan, "summary") else "rule_based"
         plan_summary = getattr(task_plan, "summary", "") or getattr(task_plan, "description", "")
         plan_dict = {
@@ -151,12 +274,33 @@ class LLMPatchGenerator:
             "affected_areas": task_plan.affected_areas,
         }
 
+        # Add file selection constraints to the prompt
+        constraints = ""
+        if allowed_edit_files:
+            constraints += (
+                f"\nALLOWED EDIT FILES (you may ONLY edit these):\n"
+                + "\n".join(f"  - {f}" for f in allowed_edit_files)
+            )
+        if allowed_create_paths:
+            constraints += (
+                f"\nALLOWED CREATE DIRECTORIES (new files must be under these):\n"
+                + "\n".join(f"  - {p}/" for p in allowed_create_paths)
+            )
+        if allowed_create_patterns:
+            constraints += (
+                f"\nALLOWED CREATE PATTERNS (new file names must match one of these globs):\n"
+                + "\n".join(f"  - {p}" for p in allowed_create_patterns)
+                + "\n  README.md is NOT allowed to create (edit only)."
+                + "\n  Hidden files, path traversal (..), and blocked extensions (.key, .pem, .env) are forbidden."
+            )
+
         user_message = (
             f"USER REQUEST:\n{user_request}\n\n"
             f"TASK PLAN:\n{json.dumps(plan_dict, indent=2, ensure_ascii=False)}\n\n"
-            f"REPOSITORY CONTEXT:\n{repository_context}\n\n"
-            "Generate the unified diff that implements these changes. "
-            "Output ONLY the diff, no other text."
+            f"REPOSITORY CONTEXT:\n{repository_context}\n"
+            f"{constraints}\n\n"
+            "Generate the edit instructions that implement these changes. "
+            "Output ONLY the edit blocks, no other text."
         )
 
         url = f"{self._base_url}/chat/completions"
@@ -202,8 +346,13 @@ class LLMPatchGenerator:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_edit_blocks(raw: str) -> list[tuple[str, str, str]]:
-        """Parse LLM output into (filepath, find_str, replace_str) tuples."""
+    def _parse_edit_blocks(raw: str) -> list[tuple[str, str, str, str]]:
+        """Parse LLM output into (filepath, action, find_str, replace_str) tuples.
+
+        Supports two formats:
+        1. Default (replace): FILE: <path>\\n<<<FIND\\n...<<<REPLACE\\n...
+        2. Create: FILE: <path>\\nACTION: create\\n<<<CONTENT\\n...>>>
+        """
         text = raw.strip()
         # Strip markdown code fences if present
         if text.startswith("```"):
@@ -218,7 +367,6 @@ class LLMPatchGenerator:
             raise LLMPatchGeneratorError("LLM returned empty output")
 
         edits = []
-        # Pattern: FILE: <path>\n<<<FIND\n...<<<REPLACE\n...
         # Split by FILE: to get blocks
         blocks = re.split(r'\n(?=FILE:\s)', text)
 
@@ -235,60 +383,104 @@ class LLMPatchGenerator:
                 )
             filepath = m.group(1).strip()
 
-            # Parse FIND / REPLACE sections
-            find_match = re.search(r'<<<FIND\n(.*?)(?=\n<<<REPLACE|\Z)', block, re.DOTALL)
-            replace_match = re.search(r'<<<REPLACE\n(.*?)$', block, re.DOTALL)
+            # Detect action (default: replace)
+            action_match = re.search(r'^ACTION:\s*(create|replace)\s*$', block, re.MULTILINE)
+            if action_match:
+                action = action_match.group(1).strip()
+            else:
+                action = "replace"  # default for backward compatibility
 
-            if not find_match:
-                raise LLMPatchGeneratorError(
-                    f"Edit block for {filepath} missing <<<FIND section"
-                )
-            find_str = find_match.group(1)
+            if action == "create":
+                # Parse CONTENT block
+                content_match = re.search(r'<<<CONTENT\n(.*?)(?=\n>>>|\Z)', block, re.DOTALL)
+                if not content_match:
+                    raise LLMPatchGeneratorError(
+                        f"Create block for {filepath} missing <<<CONTENT section"
+                    )
+                content = content_match.group(1)
+                edits.append((filepath, "create", "", content))
+            else:
+                # Parse FIND / REPLACE sections
+                find_match = re.search(r'<<<FIND\n(.*?)(?=\n<<<REPLACE|\Z)', block, re.DOTALL)
+                replace_match = re.search(r'<<<REPLACE\n(.*?)$', block, re.DOTALL)
 
-            replace_str = ""
-            if replace_match:
-                replace_str = replace_match.group(1)
+                if not find_match:
+                    raise LLMPatchGeneratorError(
+                        f"Edit block for {filepath} missing <<<FIND section"
+                    )
+                find_str = find_match.group(1)
 
-            edits.append((filepath, find_str, replace_str))
+                replace_str = ""
+                if replace_match:
+                    replace_str = replace_match.group(1)
+
+                edits.append((filepath, "replace", find_str, replace_str))
 
         return edits
 
-    def _generate_diff(self, edits: list[tuple[str, str, str]]) -> str:
-        """Generate a correct unified diff from edit blocks using difflib."""
+    def _generate_diff(self, edits: list[tuple[str, str, str, str]]) -> str:
+        """Generate a unified diff from edit blocks.
+
+        For replace actions: produces a standard unified diff.
+        For create actions: produces a diff showing file creation.
+        """
         import difflib
 
         parts = []
-        for filepath, find_str, replace_str in edits:
+        for filepath, action, find_str, replace_str in edits:
             full_path = os.path.join(self._root_dir, filepath)
-            if not os.path.isfile(full_path):
-                raise LLMPatchGeneratorError(
-                    f"Cannot patch non-existent file: {filepath}"
+
+            if action == "create":
+                # Generate a "new file" diff
+                original = ""
+                modified = replace_str  # replace_str holds the full content for create
+                had_newline = modified.endswith("\n")
+
+                parts.append(f"diff --git a/{filepath} b/{filepath}\n")
+                parts.append(f"new file mode 100644\n")
+                diff = difflib.unified_diff(
+                    original.splitlines(keepends=True),
+                    modified.splitlines(keepends=True),
+                    fromfile=f"a/{filepath}",
+                    tofile=f"b/{filepath}",
                 )
-            with open(full_path, "r", encoding="utf-8") as f:
-                original = f.read()
+                diff_text = "".join(diff)
+                if not had_newline:
+                    diff_text += "\n\\ No newline at end of file\n"
+                elif diff_text and not diff_text.endswith("\n"):
+                    diff_text += "\n"
+                parts.append(diff_text)
+            else:
+                # Standard replace
+                if not os.path.isfile(full_path):
+                    raise LLMPatchGeneratorError(
+                        f"Cannot patch non-existent file: {filepath}"
+                    )
+                with open(full_path, "r", encoding="utf-8") as f:
+                    original = f.read()
 
-            if find_str not in original:
-                raise LLMPatchGeneratorError(
-                    f"FIND string not found in {filepath}. "
-                    f"FIND: {find_str[:200]!r}"
+                if find_str not in original:
+                    raise LLMPatchGeneratorError(
+                        f"FIND string not found in {filepath}. "
+                        f"FIND: {find_str[:200]!r}"
+                    )
+
+                modified = original.replace(find_str, replace_str, 1)
+                had_newline = original.endswith("\n")
+
+                parts.append(f"diff --git a/{filepath} b/{filepath}\n")
+                diff = difflib.unified_diff(
+                    original.splitlines(keepends=True),
+                    modified.splitlines(keepends=True),
+                    fromfile=f"a/{filepath}",
+                    tofile=f"b/{filepath}",
                 )
-
-            modified = original.replace(find_str, replace_str, 1)
-            had_newline = original.endswith("\n")
-
-            parts.append(f"diff --git a/{filepath} b/{filepath}\n")
-            diff = difflib.unified_diff(
-                original.splitlines(keepends=True),
-                modified.splitlines(keepends=True),
-                fromfile=f"a/{filepath}",
-                tofile=f"b/{filepath}",
-            )
-            diff_text = "".join(diff)
-            if not had_newline:
-                diff_text += "\n\\ No newline at end of file\n"
-            elif diff_text and not diff_text.endswith("\n"):
-                diff_text += "\n"
-            parts.append(diff_text)
+                diff_text = "".join(diff)
+                if not had_newline:
+                    diff_text += "\n\\ No newline at end of file\n"
+                elif diff_text and not diff_text.endswith("\n"):
+                    diff_text += "\n"
+                parts.append(diff_text)
 
         result = "".join(parts)
         if not result:

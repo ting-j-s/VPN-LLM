@@ -33,12 +33,21 @@ CORE_KEYWORDS = (
 
 @dataclass
 class TaskPlan:
-    """Structured plan produced from a user request."""
+    """Structured plan produced from a user request.
+
+    candidate_files is a planner hint only — the final selected_files must
+    come from RepoIndexer + FileRetriever + ImpactExpander.
+    """
 
     task_type: str
     description: str
     target_transport: str | None = None
     affected_areas: list[str] = field(default_factory=list)
+    candidate_files: list[str] = field(default_factory=list)
+    requirements: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    validation_goals: list[str] = field(default_factory=list)
+    ambiguity: list[str] = field(default_factory=list)
 
 
 class TaskPlanner:
