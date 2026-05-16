@@ -16,6 +16,12 @@ import yaml
 from src.llm.safety_guard import SafetyGuard, SafetyError
 
 
+def _verbose_print(msg: str) -> None:
+    """Print verbose output to stderr."""
+    import sys
+    print(msg, file=sys.stderr, flush=True)
+
+
 class LLMPatchGeneratorError(Exception):
     """Raised when patch generation or validation fails."""
 
@@ -159,10 +165,14 @@ class LLMPatchGenerator:
     def _verify_find_uniqueness(self, filepath: str, find_str: str) -> None:
         """Verify the FIND string appears exactly once in the target file.
 
-        Also rejects empty FIND and whitespace-only FIND.
+        Allows empty FIND only when the target file is empty (zero bytes),
+        which means "prepend this content to the empty file."
         """
-        # Reject empty FIND
+        # Allow empty FIND for empty files (prepend operation)
         if not find_str:
+            full_path = os.path.join(self._root_dir, filepath)
+            if os.path.isfile(full_path) and os.path.getsize(full_path) == 0:
+                return  # empty FIND on empty file = prepend, always unique
             raise LLMPatchGeneratorError(
                 f"FIND string is empty for {filepath}. "
                 "FIND must contain the exact lines to replace."
@@ -324,9 +334,17 @@ class LLMPatchGenerator:
             method="POST",
         )
 
+        if os.environ.get("VPN_LLM_VERBOSE") == "1":
+            _verbose_print("=== LLM Call: PatchGenerator ===")
+            _verbose_print(f"URL: {url}")
+            _verbose_print(f"Model: {self._model}")
+            _verbose_print(f"System prompt ({len(self.SYSTEM_PROMPT)} chars): {self.SYSTEM_PROMPT[:200]}...")
+            _verbose_print(f"Request body ({len(body)} bytes): {body[:4000]}")
+            _verbose_print("--- sending request ---")
+
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             raise LLMPatchGeneratorError(f"LLM API HTTP {e.code}: {e.reason}") from e
         except urllib.error.URLError as e:
@@ -334,10 +352,24 @@ class LLMPatchGenerator:
         except json.JSONDecodeError as e:
             raise LLMPatchGeneratorError(f"LLM API returned invalid JSON: {e}") from e
 
+        data = json.loads(raw)
+
+        if os.environ.get("VPN_LLM_VERBOSE") == "1":
+            _verbose_print(f"--- response ({len(raw)} bytes) ---")
+            _verbose_print(raw[:4000])
+            _verbose_print("=== End PatchGenerator ===")
+
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             raise LLMPatchGeneratorError(f"Unexpected API response structure: {e}") from e
+
+        # Some reasoning models (e.g. deepseek-v4-pro) may put all output in
+        # reasoning_content and leave content empty. Fall back to reasoning_content.
+        if not content or not content.strip():
+            reasoning = data["choices"][0]["message"].get("reasoning_content", "")
+            if reasoning and reasoning.strip():
+                return reasoning
 
         return content
 
@@ -431,25 +463,25 @@ class LLMPatchGenerator:
             full_path = os.path.join(self._root_dir, filepath)
 
             if action == "create":
-                # Generate a "new file" diff
-                original = ""
+                # Generate a "new file" diff with /dev/null as old path
+                # (required by git apply for new files)
                 modified = replace_str  # replace_str holds the full content for create
                 had_newline = modified.endswith("\n")
 
                 parts.append(f"diff --git a/{filepath} b/{filepath}\n")
                 parts.append(f"new file mode 100644\n")
-                diff = difflib.unified_diff(
-                    original.splitlines(keepends=True),
-                    modified.splitlines(keepends=True),
-                    fromfile=f"a/{filepath}",
-                    tofile=f"b/{filepath}",
-                )
-                diff_text = "".join(diff)
+                parts.append(f"index 0000000..0000000\n")
+                parts.append(f"--- /dev/null\n")
+                parts.append(f"+++ b/{filepath}\n")
+
+                lines = modified.splitlines(keepends=True)
+                line_count = len(lines) if lines else 0
+                parts.append(f"@@ -0,0 +1,{line_count} @@\n")
+                for line in lines:
+                    parts.append(f"+{line}")
+
                 if not had_newline:
-                    diff_text += "\n\\ No newline at end of file\n"
-                elif diff_text and not diff_text.endswith("\n"):
-                    diff_text += "\n"
-                parts.append(diff_text)
+                    parts.append("\\ No newline at end of file\n")
             else:
                 # Standard replace
                 if not os.path.isfile(full_path):

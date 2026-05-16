@@ -197,7 +197,14 @@ def main():
         "--include-ssh-smoke", action="store_true",
         help="Include SSH in replacement smoke matrix (expected skip without sshd)."
     )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Print LLM API request/response details (prompt, response content) to stderr."
+    )
     args = parser.parse_args()
+
+    if args.verbose:
+        os.environ["VPN_LLM_VERBOSE"] = "1"
 
     if args.generate_patch and not args.use_llm_planner:
         print("Error: --generate-patch requires --use-llm-planner")

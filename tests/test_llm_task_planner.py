@@ -208,6 +208,120 @@ class TestLLMTaskPlannerValid:
 
 
 # ---------------------------------------------------------------------------
+# Test LLMTaskPlanner — transport addition (new transports)
+# ---------------------------------------------------------------------------
+
+
+class TestLLMTaskPlannerTransportAddition:
+    """Verify _validate() handles new transport names correctly."""
+
+    def _setup(self, monkeypatch, tmp_path):
+        config = tmp_path / "cfg.yaml"
+        config.write_text(
+            "base_url: http://127.0.0.1:4000/v1\nmodel: test\napi_key_env: LLM_API_KEY\n"
+        )
+        return str(config)
+
+    def test_new_transport_with_addition_type_normalizes_to_none(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=http2 + task_type=transport_addition → normalized to None."""
+        config = self._setup(monkeypatch, tmp_path)
+        plan_json = json.dumps({
+            **_valid_plan_json(),
+            "task_type": "transport_addition",
+            "target_transport": "http2",
+            "summary": "Add new http2 transport skeleton",
+            "requirements": ["create http2_transport.py", "add http2 config"],
+        })
+        planner = _make_planner(monkeypatch, config, response_text=plan_json)
+        result = planner.plan("add new http2 transport")
+        assert result.task_type == "transport_addition"
+        assert result.target_transport is None
+        assert any("new_transport_name=http2" in r for r in result.requirements), (
+            f"expected new_transport_name=http2 in requirements, got {result.requirements}"
+        )
+        assert any("create http2_transport.py" in r for r in result.requirements)
+
+    def test_feature_addition_with_new_transport_normalizes(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=quic + task_type=feature_addition → normalized to None."""
+        config = self._setup(monkeypatch, tmp_path)
+        plan_json = json.dumps({
+            **_valid_plan_json(),
+            "task_type": "feature_addition",
+            "target_transport": "quic",
+            "summary": "Add QUIC transport support",
+        })
+        planner = _make_planner(monkeypatch, config, response_text=plan_json)
+        result = planner.plan("add quic transport")
+        assert result.target_transport is None
+        assert any("new_transport_name=quic" in r for r in result.requirements)
+
+    def test_mixed_feature_change_with_new_transport_normalizes(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=grpc + task_type=mixed_feature_change → normalized to None."""
+        config = self._setup(monkeypatch, tmp_path)
+        plan_json = json.dumps({
+            **_valid_plan_json(),
+            "task_type": "mixed_feature_change",
+            "target_transport": "grpc",
+            "summary": "Add gRPC transport and update Core",
+        })
+        planner = _make_planner(monkeypatch, config, response_text=plan_json)
+        result = planner.plan("add grpc transport and update core")
+        assert result.target_transport is None
+        assert any("new_transport_name=grpc" in r for r in result.requirements)
+
+    def test_existing_transport_with_addition_type_passes_unchanged(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=websocket + task_type=transport_addition → passed through as-is."""
+        config = self._setup(monkeypatch, tmp_path)
+        plan_json = json.dumps({
+            **_valid_plan_json(),
+            "task_type": "transport_addition",
+            "target_transport": "websocket",
+            "summary": "Add websocket relay support",
+        })
+        planner = _make_planner(monkeypatch, config, response_text=plan_json)
+        result = planner.plan("add websocket relay")
+        # websocket IS a known transport, so it stays as-is
+        assert result.target_transport == "websocket"
+
+    def test_known_transport_with_transport_change_still_passes(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=websocket + task_type=transport_change → passes (existing behavior)."""
+        config = self._setup(monkeypatch, tmp_path)
+        plan_json = json.dumps(_valid_plan_json())  # websocket + transport_change
+        planner = _make_planner(monkeypatch, config, response_text=plan_json)
+        result = planner.plan("switch to websocket")
+        assert result.task_type == "transport_change"
+        assert result.target_transport == "websocket"
+
+    def test_bad_transport_with_transport_change_still_fails(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=badtransport + task_type=transport_change → still raises."""
+        config = self._setup(monkeypatch, tmp_path)
+        bad = json.dumps({
+            **_valid_plan_json(),
+            "task_type": "transport_change",
+            "target_transport": "badtransport",
+        })
+        planner = _make_planner(monkeypatch, config, response_text=bad)
+        with pytest.raises(LLMTaskPlannerError, match="Invalid target_transport"):
+            planner.plan("use badtransport")
+
+    def test_new_transport_requirements_preserve_existing(self, monkeypatch, tmp_path):
+        """When normalizing, existing requirements are preserved alongside new_transport_name."""
+        config = self._setup(monkeypatch, tmp_path)
+        plan_json = json.dumps({
+            **_valid_plan_json(),
+            "task_type": "transport_addition",
+            "target_transport": "http2",
+            "summary": "Add http2 transport",
+            "requirements": ["add config support", "add unit tests"],
+        })
+        planner = _make_planner(monkeypatch, config, response_text=plan_json)
+        result = planner.plan("add http2 transport")
+        assert "add config support" in result.requirements
+        assert "add unit tests" in result.requirements
+        assert any("new_transport_name=http2" in r for r in result.requirements)
+
+
+# ---------------------------------------------------------------------------
 # Test LLMTaskPlanner — invalid responses
 # ---------------------------------------------------------------------------
 

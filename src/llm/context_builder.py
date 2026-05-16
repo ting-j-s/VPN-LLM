@@ -17,6 +17,36 @@ from src.llm.impact_expander import FileSelection
 # Maximum bytes to read per file (12 KB)
 _MAX_FILE_BYTES = 12 * 1024
 
+# Maximum number of must_review files to include in context
+_MAX_REVIEW_FILES = 20
+
+# Priority prefixes for sorting review files (lower index = higher priority)
+_REVIEW_PRIORITY_PREFIXES = [
+    "src/transport/",
+    "config/",
+    "tests/",
+    "docs/",
+    "src/common/",
+    "src/core/",
+    "src/llm/",
+    "src/tun/",
+    "scripts/",
+]
+
+
+def _prioritize_review_files(filepaths: list[str]) -> list[str]:
+    """Sort review files by relevance priority, then alphabetically.
+
+    Files matching higher-priority prefixes come first.
+    """
+    def _priority(path: str) -> int:
+        for i, prefix in enumerate(_REVIEW_PRIORITY_PREFIXES):
+            if path.startswith(prefix):
+                return i
+        return len(_REVIEW_PRIORITY_PREFIXES)  # lowest priority
+
+    return sorted(filepaths, key=lambda p: (_priority(p), p))
+
 
 @dataclass
 class ContextSummary:
@@ -97,13 +127,19 @@ class ContextBuilder:
                 lines.append("... (truncated at 12KB)")
             lines.append(content)
 
-        # Read must_review_files
+        # Read must_review_files (capped at _MAX_REVIEW_FILES, prioritized by relevance)
         if file_selection.must_review_files:
             lines.append("")
             lines.append("=" * 40)
             lines.append("MUST REVIEW FILES")
             lines.append("=" * 40)
-            for fpath in file_selection.must_review_files:
+
+            # Prioritize: transport/config/tests/docs > core/llm/tun > scripts/other
+            prioritized = _prioritize_review_files(file_selection.must_review_files)
+            capped = prioritized[:_MAX_REVIEW_FILES]
+            skipped = len(file_selection.must_review_files) - len(capped)
+
+            for fpath in capped:
                 content, size, truncated = self._read_file(fpath)
                 total_bytes += size
                 summary.files_included.append(fpath)
@@ -113,6 +149,9 @@ class ContextBuilder:
                 if truncated:
                     lines.append("... (truncated at 12KB)")
                 lines.append(content)
+
+            if skipped > 0:
+                lines.append(f"\n... ({skipped} more review files omitted)")
 
         # Add test and doc file listings (paths only, not content)
         if file_selection.test_files:

@@ -115,7 +115,7 @@ class TestTransportImpactExpansion:
     def test_transport_expansion_includes_core_files(self):
         index = _transport_index()
         candidates = [
-            CandidateFile("src/transport/tcp_transport.py", 0.9, ["key: tcp"], ["keyword"], "edit"),
+            CandidateFile("src/transport/tcp_transport.py", 0.95, ["key: tcp"], ["keyword"], "edit"),
             CandidateFile("config/server.yaml", 0.8, ["config key: transport"], ["config_key"], "edit"),
             CandidateFile("tests/test_tcp_transport.py", 0.7, ["test for tcp"], ["test_map"], "test"),
         ]
@@ -231,7 +231,7 @@ class TestPlannerHints:
         ])
         # Simulate a candidate that was both a planner_hint AND a keyword match
         candidates = [
-            CandidateFile("src/transport/ws.py", 0.9, ["key: ws", "LLM hint"], ["keyword", "planner_hint"], "edit"),
+            CandidateFile("src/transport/ws.py", 0.95, ["key: ws", "LLM hint"], ["keyword", "planner_hint"], "edit"),
         ]
 
         plan = TaskPlan(
@@ -392,7 +392,7 @@ class TestActionSources:
     def test_must_edit_files_have_action_sources(self):
         index = _transport_index()
         candidates = [
-            CandidateFile("src/transport/tcp_transport.py", 0.9, ["key: tcp"], ["keyword"], "edit"),
+            CandidateFile("src/transport/tcp_transport.py", 0.95, ["key: tcp"], ["keyword"], "edit"),
         ]
         plan = TaskPlan(
             task_type=TASK_TRANSPORT_CHANGE,

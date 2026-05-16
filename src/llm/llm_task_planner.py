@@ -17,13 +17,23 @@ import yaml
 
 from src.llm.safety_guard import SafetyGuard, SafetyError
 
+
+def _verbose_print(msg: str) -> None:
+    """Print verbose output to stderr."""
+    import sys
+    print(msg, file=sys.stderr, flush=True)
+
+
 # Valid task types (extended from rule-based planner)
 VALID_TASK_TYPES = frozenset({
     "transport_change",
+    "transport_addition",
     "config_change",
     "test_addition",
     "docs_update",
     "core_change",
+    "feature_addition",
+    "mixed_feature_change",
     "bugfix",
     "refactor",
     "unknown",
@@ -121,8 +131,12 @@ class LLMTaskPlanner:
         "Analyze the user's natural language request and output a JSON plan.\n\n"
         "Rules:\n"
         "- Output ONLY valid JSON. No markdown, no explanation, no code fences.\n"
-        "- task_type: one of transport_change, config_change, test_addition, docs_update, core_change, bugfix, refactor, unknown\n"
-        "- target_transport: one of tcp, tls, ssh, websocket, mock, or null\n"
+        "- task_type: one of transport_change, transport_addition, config_change, test_addition, docs_update,"
+        " core_change, feature_addition, mixed_feature_change, bugfix, refactor, unknown\n"
+        "- target_transport: ONLY for EXISTING transports (tcp, tls, ssh, websocket, mock). "
+        "For requests that ADD a NEW transport (e.g. http2, quic, grpc), target_transport MUST be null "
+        "and task_type MUST be transport_addition or feature_addition. "
+        "The new transport name belongs in requirements (e.g. 'new_transport_name=http2').\n"
         "- summary: one-sentence summary of what the user wants\n"
         "- candidate_files: list of file paths that MIGHT need changes (hints only — local index determines final selection)\n"
         "- validation_commands: list of shell commands to validate the result (empty list if unknown)\n"
@@ -226,9 +240,17 @@ class LLMTaskPlanner:
             method="POST",
         )
 
+        if os.environ.get("VPN_LLM_VERBOSE") == "1":
+            _verbose_print("=== LLM Call: TaskPlanner ===")
+            _verbose_print(f"URL: {url}")
+            _verbose_print(f"Model: {self._model}")
+            _verbose_print(f"System prompt ({len(self.SYSTEM_PROMPT)} chars): {self.SYSTEM_PROMPT[:200]}...")
+            _verbose_print(f"User request: {request}")
+            _verbose_print("--- sending request ---")
+
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             raise LLMTaskPlannerError(
                 f"LLM API HTTP {e.code}: {e.reason}"
@@ -237,6 +259,13 @@ class LLMTaskPlanner:
             raise LLMTaskPlannerError(f"LLM API connection error: {e.reason}") from e
         except json.JSONDecodeError as e:
             raise LLMTaskPlannerError(f"LLM API returned invalid JSON: {e}") from e
+
+        data = json.loads(raw)
+
+        if os.environ.get("VPN_LLM_VERBOSE") == "1":
+            _verbose_print(f"--- response ({len(raw)} bytes) ---")
+            _verbose_print(raw[:4000])
+            _verbose_print("=== End TaskPlanner ===")
 
         try:
             content = data["choices"][0]["message"]["content"]
@@ -300,11 +329,18 @@ class LLMTaskPlanner:
 
         # 3. target_transport whitelist (null is acceptable)
         transport = parsed["target_transport"]
+        _addition_types = {"transport_addition", "feature_addition", "mixed_feature_change"}
         if transport is not None:
             if not isinstance(transport, str) or transport not in VALID_TRANSPORTS:
-                raise LLMTaskPlannerError(
-                    f"Invalid target_transport '{transport}'. Must be one of: {sorted(VALID_TRANSPORTS)} or null"
-                )
+                if task_type in _addition_types:
+                    requirements_list = list(parsed.get("requirements", []))
+                    requirements_list.append(f"new_transport_name={transport}")
+                    parsed["requirements"] = requirements_list
+                    transport = None
+                else:
+                    raise LLMTaskPlannerError(
+                        f"Invalid target_transport '{transport}'. Must be one of: {sorted(VALID_TRANSPORTS)} or null"
+                    )
 
         # 4. summary must be a non-empty string
         summary = parsed.get("summary", "")
@@ -354,4 +390,8 @@ class LLMTaskPlanner:
             "candidate_files": candidate_files,
             "validation_commands": validation_commands,
             "risk_level": risk_level,
+            "requirements": parsed.get("requirements", []),
+            "constraints": parsed.get("constraints", []),
+            "validation_goals": parsed.get("validation_goals", []),
+            "ambiguity": parsed.get("ambiguity", []),
         }

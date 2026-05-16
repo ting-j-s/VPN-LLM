@@ -77,6 +77,12 @@ _MUST_EDIT_RULES: dict[str, list[str]] = {
         "src/transport/factory.py",
         "src/common/config.py",
     ],
+    "transport_addition": [
+        "src/transport/__init__.py",
+        "src/transport/base.py",
+        "src/transport/factory.py",
+        "src/common/config.py",
+    ],
     "core": [
         "src/core/__init__.py",
         "src/core/client_core.py",
@@ -114,6 +120,9 @@ _MUST_REVIEW_RULES: dict[str, list[str]] = {
         "src/transport/",
         "config/server.yaml",
         "config/client.yaml",
+    ],
+    "transport_addition": [
+        "src/transport/",
     ],
     "core": [
         "src/core/",
@@ -157,6 +166,7 @@ _MUST_REVIEW_RULES: dict[str, list[str]] = {
 # Allowable directories for creating new files per area
 _ALLOW_CREATE_RULES: dict[str, list[str]] = {
     "transport": ["src/transport/"],
+    "transport_addition": ["src/transport/", "tests/", "docs/", "config/"],
     "core": ["src/core/", "src/common/"],
     "tun": ["src/tun/"],
     "config": ["config/"],
@@ -175,6 +185,12 @@ _ALLOW_CREATE_RULES: dict[str, list[str]] = {
 # README.md is deliberately excluded — it may only be edited, never created.
 _ALLOW_CREATE_PATTERNS: dict[str, list[str]] = {
     "transport": ["src/transport/*_transport.py"],
+    "transport_addition": [
+        "src/transport/*_transport.py",
+        "tests/test_*.py",
+        "docs/*.md",
+        "config/*.yaml", "config/*.yaml.example",
+    ],
     "core": ["src/core/*.py", "src/common/*.py"],
     "tun": ["src/tun/*.py"],
     "config": ["config/*.yaml", "config/*.yaml.example"],
@@ -296,17 +312,17 @@ class ImpactExpander:
                 allowed_create_patterns.add(pat)
 
         # Promote high-confidence candidates to must_edit.
-        # Threshold is 0.9 (keyword-level confidence), AND the candidate must
-        # have at least one non-hint source (planner_hint alone is not enough).
+        # Threshold is 0.95 (requires multiple strong signals; keyword alone is
+        # 0.9-0.94, so solo keyword hits stay in review).
         for c in candidates:
             non_hint_sources = [s for s in c.sources if s != "planner_hint"]
-            if c.score >= 0.9 and c.action == "edit" and non_hint_sources:
+            if c.score >= 0.95 and c.action == "edit" and non_hint_sources:
                 if c.path in self._index.files:
                     must_edit.add(c.path)
                     must_review.discard(c.path)
                     action_sources[c.path] = f"candidate_promoted(score={c.score:.2f}, sources={c.sources})"
 
-        # Candidates with score < 0.9 or pure planner_hint candidates go to
+        # Candidates with score < 0.95 or pure planner_hint candidates go to
         # must_review (if they exist on disk). Candidate-based action_sources
         # override rule-based ones since they carry more specific signals.
         for c in candidates:
@@ -315,7 +331,7 @@ class ImpactExpander:
             if c.path not in self._index.files:
                 continue
             non_hint_sources = [s for s in c.sources if s != "planner_hint"]
-            if c.score < 0.9 or not non_hint_sources:
+            if c.score < 0.95 or not non_hint_sources:
                 if c.path not in must_review:
                     must_review.add(c.path)
                 source_label = "planner_hint_only" if not non_hint_sources else f"candidate_review(score={c.score:.2f})"

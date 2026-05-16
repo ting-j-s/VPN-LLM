@@ -637,6 +637,166 @@ class TestCreatePathWithPatterns:
 
 
 # ---------------------------------------------------------------------------
+# Test: create diff format (ACTION:create generates valid git diff)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateDiff:
+    """Verify ACTION:create generates a valid git diff with /dev/null."""
+
+    def test_create_diff_uses_dev_null(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        gen._validate_create_path = lambda *a, **kw: None  # bypass validation
+        gen._validate_file_path = lambda *a, **kw: None
+        gen._verify_find_uniqueness = lambda *a, **kw: None
+        gen._scan_for_secrets = lambda *a, **kw: None
+
+        edits = [("src/transport/http2_transport.py", "create", "", "import asyncio\n\nclass Http2Transport:\n    pass\n")]
+        diff = gen._generate_diff(edits)
+
+        assert "--- /dev/null" in diff
+        assert "+++ b/src/transport/http2_transport.py" in diff
+        assert "new file mode 100644" in diff
+        assert "diff --git a/src/transport/http2_transport.py b/src/transport/http2_transport.py" in diff
+
+    def test_create_diff_accepted_by_git_apply_check(self, tmp_path):
+        import subprocess
+
+        # Initialize a git repo in tmp_path
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "test"], cwd=str(tmp_path), capture_output=True)
+        # Create at least one committed file so apply works
+        (tmp_path / "README.md").write_text("test repo\n")
+        subprocess.run(["git", "add", "README.md"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        gen._validate_create_path = lambda *a, **kw: None
+        gen._validate_file_path = lambda *a, **kw: None
+        gen._verify_find_uniqueness = lambda *a, **kw: None
+        gen._scan_for_secrets = lambda *a, **kw: None
+
+        edits = [("src/transport/http2_transport.py", "create", "",
+                  "\"\"\"HTTP/2 Transport.\"\"\"\n\nimport asyncio\n\n\nclass Http2Transport:\n    pass\n")]
+        diff = gen._generate_diff(edits)
+
+        # Write the diff to a file and check with git apply
+        patch_file = tmp_path / "test.patch"
+        patch_file.write_text(diff)
+        result = subprocess.run(
+            ["git", "apply", "--check", str(patch_file)],
+            cwd=str(tmp_path), capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"git apply --check failed: {result.stderr}"
+
+    def test_create_diff_line_content_prefixed_with_plus(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        gen._validate_create_path = lambda *a, **kw: None
+        gen._validate_file_path = lambda *a, **kw: None
+        gen._verify_find_uniqueness = lambda *a, **kw: None
+        gen._scan_for_secrets = lambda *a, **kw: None
+
+        content = "line1\nline2\nline3\n"
+        edits = [("src/transport/new.py", "create", "", content)]
+        diff = gen._generate_diff(edits)
+
+        # All content lines in @@ hunk should start with +
+        in_hunk = False
+        plus_lines = 0
+        for line in diff.splitlines():
+            if line.startswith("@@"):
+                in_hunk = True
+                continue
+            if in_hunk and line.startswith("+"):
+                plus_lines += 1
+        assert plus_lines == 3, f"Expected 3 lines starting with +, got {plus_lines}"
+
+    def test_create_diff_no_trailing_newline(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        gen._validate_create_path = lambda *a, **kw: None
+        gen._validate_file_path = lambda *a, **kw: None
+        gen._verify_find_uniqueness = lambda *a, **kw: None
+        gen._scan_for_secrets = lambda *a, **kw: None
+
+        content = "single line without newline"
+        edits = [("src/transport/new.py", "create", "", content)]
+        diff = gen._generate_diff(edits)
+
+        assert "\\ No newline at end of file" in diff
+        assert "+single line without newline" in diff
+
+    def test_create_rejects_readme(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError):
+            gen._validate_create_path(
+                "README.md",
+                allowed_create_paths=["."],
+                allowed_create_patterns=["*.md"],
+            )
+
+    def test_create_rejects_dotenv(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                ".env",
+                allowed_create_paths=["."],
+                allowed_create_patterns=[".*"],
+            )
+        assert "unsafe" in str(excinfo.value).lower() or "hidden" in str(excinfo.value).lower()
+
+    def test_create_rejects_key_extension(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "config/secret.key",
+                allowed_create_paths=["config/"],
+                allowed_create_patterns=["config/*"],
+            )
+        assert "extension" in str(excinfo.value).lower() or "key" in str(excinfo.value).lower()
+
+    def test_create_rejects_pem_extension(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "certs/server.pem",
+                allowed_create_paths=["certs/"],
+                allowed_create_patterns=["certs/*"],
+            )
+        assert "extension" in str(excinfo.value).lower() or "pem" in str(excinfo.value).lower()
+
+    def test_create_rejects_path_traversal(self, tmp_path):
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        with pytest.raises(LLMPatchGeneratorError) as excinfo:
+            gen._validate_create_path(
+                "src/transport/../../.env",
+                allowed_create_paths=["src/transport/"],
+                allowed_create_patterns=["src/transport/*"],
+            )
+        assert "traversal" in str(excinfo.value).lower() or "blocked" in str(excinfo.value).lower()
+
+    def test_replace_diff_unchanged(self, tmp_path):
+        """Verify ACTION:replace still works correctly after create diff changes."""
+        test_file = tmp_path / "exists.py"
+        test_file.write_text("line1\nline2\nline3\n")
+        gen = _dummy_gen(root_dir=str(tmp_path))
+        gen._validate_file_path = lambda *a, **kw: None
+        gen._verify_find_uniqueness = lambda *a, **kw: None
+        gen._scan_for_secrets = lambda *a, **kw: None
+
+        edits = [("exists.py", "replace", "line2\n", "line2_replaced\n")]
+        diff = gen._generate_diff(edits)
+
+        assert "diff --git a/exists.py b/exists.py" in diff
+        assert "--- a/exists.py" in diff
+        assert "+++ b/exists.py" in diff
+        assert "-line2" in diff
+        assert "+line2_replaced" in diff
+        # Must NOT contain /dev/null (that's only for create)
+        assert "/dev/null" not in diff
+
+
+# ---------------------------------------------------------------------------
 # Helper for tests that don't need mock API
 # ---------------------------------------------------------------------------
 

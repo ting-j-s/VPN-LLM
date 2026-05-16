@@ -147,10 +147,13 @@ _TASK_TYPE_RULES: dict[str, dict[str, list[str]]] = {
 # Mapping from task_type to affected area keys
 _TASK_TO_AREA: dict[str, list[str]] = {
     "transport_change": ["transport", "config", "test", "docs"],
+    "transport_addition": ["transport", "config", "test", "docs", "transport_addition"],
     "core_change": ["core", "tun", "config", "test", "docs"],
     "config_change": ["config", "test", "docs"],
     "test_addition": ["test"],
     "docs_update": ["docs"],
+    "feature_addition": ["transport", "config", "test", "docs", "transport_addition"],
+    "mixed_feature_change": ["transport", "config", "test", "docs", "core", "llm_agent"],
     "bugfix": ["transport", "core", "tun", "config", "llm_agent", "test", "docs"],
     "refactor": ["transport", "core", "tun", "config", "llm_agent", "test", "docs"],
     "unknown": ["mixed_feature"],
