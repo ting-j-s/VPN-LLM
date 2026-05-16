@@ -60,7 +60,7 @@ _TASK_TYPE_RULES: dict[str, dict[str, list[str]]] = {
     },
     "core": {
         "patterns": ["src/core/", "src/common/frame.py", "src/common/session.py"],
-        "keywords": ["core", "frame", "session", "forwarding", "tun", "nat", "route"],
+        "keywords": ["core", "frame", "session", "forwarding", "nat", "route"],
         "test_patterns": ["test_core.py", "test_frame.py", "test_session_id_config.py"],
         "doc_patterns": ["docs/", "README.md"],
         "config_patterns": ["config/", "src/common/config.py"],
@@ -148,14 +148,14 @@ _TASK_TYPE_RULES: dict[str, dict[str, list[str]]] = {
 _TASK_TO_AREA: dict[str, list[str]] = {
     "transport_change": ["transport", "config", "test", "docs"],
     "transport_addition": ["transport", "config", "test", "docs", "transport_addition"],
-    "core_change": ["core", "tun", "config", "test", "docs"],
+    "core_change": ["core", "test", "docs"],
     "config_change": ["config", "test", "docs"],
     "test_addition": ["test"],
     "docs_update": ["docs"],
     "feature_addition": ["transport", "config", "test", "docs", "transport_addition"],
     "mixed_feature_change": ["transport", "config", "test", "docs", "core", "llm_agent"],
     "bugfix": ["transport", "core", "tun", "config", "llm_agent", "test", "docs"],
-    "refactor": ["transport", "core", "tun", "config", "llm_agent", "test", "docs"],
+    "refactor": ["transport", "core", "tun", "config", "test", "docs"],
     "unknown": ["mixed_feature"],
 }
 

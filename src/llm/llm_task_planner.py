@@ -181,6 +181,7 @@ class LLMTaskPlanner:
         raw = self._call_api(request)
         parsed = self._parse_json(raw)
         validated = self._validate(parsed)
+        validated = self._normalize_task_type(request, validated)
         return LLMTaskPlan(
             task_type=validated["task_type"],
             target_transport=validated["target_transport"],
@@ -395,3 +396,48 @@ class LLMTaskPlanner:
             "validation_goals": parsed.get("validation_goals", []),
             "ambiguity": parsed.get("ambiguity", []),
         }
+
+    @staticmethod
+    def _normalize_task_type(request: str, validated: dict) -> dict:
+        """Normalize task_type based on request content and affected areas.
+
+        Rules:
+        - refactor with core-related keywords (ClientCore, ServerCore, core,
+          forwarding loop) → core_change
+        - refactor with affected_areas containing src/core/client_core.py or
+          src/core/server_core.py → core_change
+        - All other types pass through unchanged.
+        """
+        task_type = validated.get("task_type", "")
+        if task_type != "refactor":
+            return validated
+
+        request_lower = request.lower()
+        candidate_files = validated.get("candidate_files", [])
+
+        core_keywords = [
+            "clientcore", "servercore", "forwarding loop",
+            "forwarding", "core forwarding",
+        ]
+        has_core_keyword = any(kw in request_lower for kw in core_keywords)
+
+        has_core_candidate = any(
+            f in ("src/core/client_core.py", "src/core/server_core.py")
+            for f in candidate_files
+        )
+
+        # Also check if a majority of affected_areas are under src/core/
+        core_area_count = sum(
+            1 for f in candidate_files
+            if f.startswith("src/core/") or f.startswith("src/common/")
+        )
+        predominantly_core = (
+            len(candidate_files) > 0
+            and core_area_count >= len(candidate_files) * 0.5
+        )
+
+        if has_core_keyword or has_core_candidate or predominantly_core:
+            validated = dict(validated)
+            validated["task_type"] = "core_change"
+
+        return validated

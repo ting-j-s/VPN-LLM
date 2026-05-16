@@ -246,3 +246,21 @@ class Foo:
         assert "__init__" in fi.symbols
         assert "public" in fi.symbols
         assert "Foo" in fi.symbols
+
+    def test_vpn_tunnel_dir_is_excluded(self, tmp_path):
+        """vpn_tunnel/ directory is excluded from indexing by default."""
+        # Create vpn_tunnel subtree
+        vpn_dir = tmp_path / "vpn_tunnel"
+        vpn_dir.mkdir()
+        (vpn_dir / "dummy.py").write_text("x = 1\n")
+        # Create a normal file too
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "real.py").write_text("y = 2\n")
+
+        indexer = RepoIndexer(str(tmp_path))
+        index = indexer.build()
+
+        assert "src/real.py" in index.files
+        assert "vpn_tunnel/dummy.py" not in index.files
+        assert not any(p.startswith("vpn_tunnel/") for p in index.files)

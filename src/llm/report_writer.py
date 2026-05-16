@@ -21,6 +21,13 @@ def write_report(
     commit_message: str | None = None,
     commit_changed_files: list[str] | None = None,
     replacement_smoke_result=None,
+    llm_validation_results: list | None = None,
+    artifact_coverage_warnings: list[str] | None = None,
+    protocol_retry_count: int = 0,
+    protocol_retry_used: bool = False,
+    semantic_retry_count: int = 0,
+    semantic_retry_used: bool = False,
+    patch_generation_error: str | None = None,
 ) -> str:
     """Generate a Markdown validation report.
 
@@ -40,6 +47,10 @@ def write_report(
         post_apply_validation: Dict of label -> ValidationResult for post-apply checks.
         commit_message: Suggested commit message, or None.
         commit_changed_files: List of changed file paths from diff summary, or None.
+        llm_validation_results: Optional list of ValidationResult from LLM-suggested
+            validation commands. Failures here are non-blocking but appear in the report.
+        artifact_coverage_warnings: Optional list of warning strings about missing
+            expected artifacts (e.g., tests, docs, config files).
 
     Returns:
         Markdown report string.
@@ -76,12 +87,48 @@ def write_report(
     _append_result_section(lines, "Full Test Suite", full_result)
     _append_result_section(lines, "Git Status", git_result)
 
-    # Patch section (only when patch was generated)
+    # LLM-suggested validation commands (non-blocking)
+    if llm_validation_results:
+        lines.append("### LLM-Suggested Validation Commands")
+        lines.append("")
+        lines.append("> These commands were suggested by the LLM planner. "
+                     "Failures are **non-blocking** and do not prevent patch generation.")
+        lines.append("")
+        for r in llm_validation_results:
+            status = "PASS" if r.success else "FAIL"
+            lines.append(f"- **[{status}]** `{r.command}` (rc={r.returncode})")
+            if r.stderr:
+                stderr_lines = r.stderr.strip().splitlines()
+                snippet = "\n".join(stderr_lines[-5:])
+                lines.append(f"  ```")
+                for line in snippet.splitlines():
+                    lines.append(f"  {line}")
+                lines.append(f"  ```")
+            if r.stdout:
+                stdout_lines = r.stdout.strip().splitlines()
+                snippet = "\n".join(stdout_lines[-5:])
+                lines.append(f"  ```")
+                for line in snippet.splitlines():
+                    lines.append(f"  {line}")
+                lines.append(f"  ```")
+        lines.append("")
+
+    # Patch section
     if patch_text is not None:
         lines.append("## Patch Generation")
         lines.append("")
         lines.append(f"- **Status**: patch was generated but not applied")
         lines.append(f"- **Patch size**: {len(patch_text)} bytes")
+        if protocol_retry_used:
+            lines.append(f"- **Protocol retry**: {protocol_retry_count} attempt(s) — "
+                         f"first attempt malformed, retry succeeded")
+        else:
+            lines.append(f"- **Protocol retry**: not needed (first attempt passed)")
+        if semantic_retry_used:
+            lines.append(f"- **Semantic retry**: {semantic_retry_count} attempt(s) — "
+                         f"semantic retry succeeded after validation error")
+        else:
+            lines.append(f"- **Semantic retry**: not needed (first valid response passed)")
         if patch_file_paths:
             lines.append("- **Files in patch**:")
             for fp in patch_file_paths:
@@ -91,6 +138,19 @@ def write_report(
         lines.append("")
 
         _append_result_section(lines, "Git Apply Check", git_apply_check_result)
+
+    elif patch_generation_error is not None:
+        lines.append("## Patch Generation")
+        lines.append("")
+        lines.append(f"- **Status**: FAILED")
+        lines.append(f"- **Error**: {patch_generation_error}")
+        if protocol_retry_used:
+            lines.append(f"- **Protocol retry**: {protocol_retry_count} attempt(s) — "
+                         f"malformed patch response after retry")
+        if semantic_retry_used:
+            lines.append(f"- **Semantic retry**: {semantic_retry_count} attempt(s) — "
+                         f"semantic correction failed after retry")
+        lines.append("")
 
     # Patch application section (only when patch was actually applied)
     patch_was_applied = apply_result is not None
@@ -145,6 +205,17 @@ def write_report(
             lines.append("Some replacement smokes failed. Do not commit until fixed.")
         lines.append("")
 
+    # Artifact coverage warnings (expected files missing from patch)
+    if artifact_coverage_warnings:
+        lines.append("## Artifact Coverage Warnings")
+        lines.append("")
+        lines.append("> The user request indicated certain file types should be generated, "
+                     "but they were not found in the patch. Review manually.")
+        lines.append("")
+        for w in artifact_coverage_warnings:
+            lines.append(f"- {w}")
+        lines.append("")
+
     # Failure summary — separate pre-apply from post-apply
     pre_apply_checks = [
         ("Compile Check", compile_result),
@@ -154,6 +225,14 @@ def write_report(
         ("Git Apply Check", git_apply_check_result if patch_text is not None else None),
     ]
     pre_failures = [(l, r) for l, r in pre_apply_checks if r is not None and not r.success]
+
+    # Add LLM-suggested validation failures as non-blocking pre-apply failures
+    if llm_validation_results:
+        for r in llm_validation_results:
+            if not r.success:
+                pre_failures.append(
+                    (f"[Non-blocking] LLM-Suggested: {r.command[:80]}", r)
+                )
 
     post_apply_checks = []
     if patch_was_applied:
@@ -168,6 +247,12 @@ def write_report(
                 "stderr": rs_result.error or "",
             })()))
     post_failures = [(l, r) for l, r in post_apply_checks if not r.success]
+
+    # Compute flags used in both Failure Summary and Conclusion
+    has_coverage_warnings = bool(artifact_coverage_warnings)
+    core_pre_failures = [(l, r) for l, r in pre_failures
+                         if not l.startswith("[Non-blocking]")]
+    has_llm_failures = any(l.startswith("[Non-blocking]") for l, _ in pre_failures)
 
     lines.append("## Failure Summary")
     lines.append("")
@@ -186,17 +271,46 @@ def write_report(
             if result.stderr:
                 lines.append(f"  ```\n  {result.stderr[:500]}\n  ```")
     if not pre_failures and not post_failures:
-        lines.append("No failures detected.")
+        if has_coverage_warnings:
+            lines.append("No validation failures detected. "
+                         "See Artifact Coverage Warnings above.")
+        else:
+            lines.append("No failures detected.")
+    elif not core_pre_failures and not post_failures and has_llm_failures:
+        lines.append(
+            "Core checks passed. Non-blocking LLM-suggested validation "
+            "failures listed above — these do not prevent patch application."
+        )
     lines.append("")
 
     # Conclusion
     post_apply_all_pass = len(post_failures) == 0
-    all_pass = len(pre_failures) == 0 and post_apply_all_pass
+    core_all_pass = len(core_pre_failures) == 0 and post_apply_all_pass
+    all_pass = core_all_pass and not has_llm_failures and not has_coverage_warnings
 
     lines.append("## Conclusion")
     lines.append("")
     if all_pass:
         lines.append("All validation checks passed.")
+    elif core_all_pass and has_llm_failures and not has_coverage_warnings:
+        lines.append(
+            "Core validation passed, patch apply check passed, "
+            "but optional LLM-suggested validation commands had failures "
+            "(non-blocking). See failure summary above."
+        )
+    elif core_all_pass and has_llm_failures and has_coverage_warnings:
+        lines.append(
+            "Core validation passed, but optional LLM-suggested validation "
+            "commands had failures (non-blocking) and some expected artifacts "
+            "were missing from the patch. See failure summary and coverage "
+            "warnings above."
+        )
+    elif core_all_pass and has_coverage_warnings:
+        lines.append(
+            "Core validation passed, but some expected artifacts (tests, docs, "
+            "or config files) were missing from the patch. See artifact "
+            "coverage warnings above."
+        )
     elif patch_was_applied and post_apply_all_pass:
         lines.append(
             f"All post-apply checks passed ({len(pre_failures)} pre-apply "
@@ -242,6 +356,9 @@ def write_report(
     elif patch_text is not None:
         lines.append("> Patch was generated and saved as `patch.diff` — NOT applied.")
         lines.append("> Review the diff manually before applying with `git apply`.")
+    elif patch_generation_error is not None:
+        lines.append("> Patch generation failed. Raw LLM outputs saved for debugging.")
+        lines.append("> Review the raw attempts and re-run with a refined request.")
     else:
         lines.append("> MVP mode: plan + validation only. No code changes were applied.")
 

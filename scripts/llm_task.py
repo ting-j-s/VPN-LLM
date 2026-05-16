@@ -145,6 +145,90 @@ def _validate_llm_commands(commands: list[str]) -> list[str]:
     return kept
 
 
+def _check_artifact_coverage(request: str, task_type: str,
+                            patch_file_paths: list[str] | None,
+                            plan_affected_areas: list[str] | None = None) -> list[str]:
+    """Check whether the patch covers expected artifacts from the request.
+
+    Returns a list of warning strings. Empty list means full coverage or
+    no expected artifacts detected.
+    """
+    import re
+
+    warnings = []
+    if not patch_file_paths:
+        return warnings
+
+    patch_paths_lower = [p.lower() for p in patch_file_paths]
+    request_lower = request.lower()
+
+    # Only apply coverage checks for transport_addition, core_change,
+    # config_change, and mixed_feature task types
+    if task_type not in ("transport_addition", "core_change",
+                         "config_change", "mixed_feature", "unknown"):
+        return warnings
+
+    # Detect transport name from request
+    transport_name = None
+    m = re.search(r'(?:add|new|create|implement)\s+(?:a\s+)?(?:new\s+)?(\w+)\s+transport', request_lower)
+    if m:
+        transport_name = m.group(1)
+
+    # Check for tests
+    if any(kw in request_lower for kw in ("test", "tests")):
+        has_test = any("test_" in p for p in patch_paths_lower)
+        if not has_test:
+            if transport_name:
+                warnings.append(
+                    f"Request mentions tests but no test file was generated "
+                    f"(expected: tests/test_{transport_name}_transport.py)"
+                )
+            else:
+                warnings.append(
+                    "Request mentions tests but no test file was generated"
+                )
+
+    # Check for docs
+    if any(kw in request_lower for kw in ("doc", "docs", "documentation")):
+        has_doc = any(p.endswith(".md") for p in patch_paths_lower)
+        if not has_doc:
+            if transport_name:
+                warnings.append(
+                    f"Request mentions docs but no .md file was generated "
+                    f"(expected: docs/{transport_name}_transport.md)"
+                )
+            else:
+                warnings.append(
+                    "Request mentions docs but no .md file was generated"
+                )
+
+    # Check for config support
+    if any(kw in request_lower for kw in ("config", "configuration")):
+        has_config = any(
+            "config" in p and (p.endswith(".yaml") or p.endswith(".yml") or p.endswith(".json"))
+            for p in patch_paths_lower
+        )
+        has_config_py = any(
+            "config.py" in p or "config." in p
+            for p in patch_paths_lower
+        )
+        if not has_config and not has_config_py:
+            if transport_name:
+                warnings.append(
+                    f"Request mentions config support but no config file or "
+                    f"config.py modification was generated "
+                    f"(expected: config/{transport_name}_transport.yaml "
+                    f"or modification to src/common/config.py)"
+                )
+            else:
+                warnings.append(
+                    "Request mentions config support but no config file or "
+                    "config.py modification was generated"
+                )
+
+    return warnings
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="LLM Task Agent - MVP (plan + validate only)"
@@ -413,6 +497,7 @@ def main():
 
     # Also run LLM-suggested validation commands if available (only safe ones)
     llm_commands = getattr(plan, "validation_commands", [])
+    llm_validation_results = []
     if llm_commands and planner_type == "llm_based":
         llm_commands = _validate_llm_commands(llm_commands)
         print("Running LLM-suggested validation commands...")
@@ -424,6 +509,7 @@ def main():
                 print(f"  Skipping unsafe LLM command: {cmd[:80]}")
                 continue
             r = runner.run_command(cmd)
+            llm_validation_results.append(r)
             status = "PASS" if r.success else f"FAIL (rc={r.returncode})"
             print(f"  [{status}] {cmd[:80]}")
 
@@ -436,7 +522,13 @@ def main():
     # 6. Patch generation (optional, dry-run only)
     patch_text = None
     patch_file_paths = None
+    artifact_coverage_warnings = None
     git_apply_check_result = None
+    protocol_retry_count = 0
+    protocol_retry_used = False
+    semantic_retry_count = 0
+    semantic_retry_used = False
+    patch_generation_error = None
 
     if args.generate_patch:
         from src.llm.patch_generator import LLMPatchGeneratorError
@@ -491,41 +583,79 @@ def main():
             allowed_create_paths = list(file_selection.allowed_create_paths) or None
             allowed_create_patterns = list(file_selection.allowed_create_patterns) or None
 
+        task_dir = record_mgr.get_task_dir(task_id) if record_mgr else None
+
         try:
             patch_text = patch_gen.generate(
                 args.request, plan, repo_context,
                 allowed_edit_files=allowed_edit_files,
                 allowed_create_paths=allowed_create_paths,
                 allowed_create_patterns=allowed_create_patterns,
+                task_dir=task_dir,
             )
             print("Patch generated successfully")
+            protocol_retry_count = patch_gen.protocol_retry_count
+            protocol_retry_used = patch_gen.protocol_retry_used
+            semantic_retry_count = patch_gen.semantic_retry_count
+            semantic_retry_used = patch_gen.semantic_retry_used
+            if protocol_retry_used:
+                print(f"  (protocol retry: {protocol_retry_count} attempt(s), first attempt malformed)")
+            if semantic_retry_used:
+                print(f"  (semantic retry: {semantic_retry_count} attempt(s), validation error corrected)")
         except LLMPatchGeneratorError as e:
             print(f"Patch generation failed: {e}")
-            sys.exit(1)
+            patch_generation_error = str(e)
+            protocol_retry_count = getattr(patch_gen, 'protocol_retry_count', 0)
+            protocol_retry_used = getattr(patch_gen, 'protocol_retry_used', False)
+            semantic_retry_count = getattr(patch_gen, 'semantic_retry_count', 0)
+            semantic_retry_used = getattr(patch_gen, 'semantic_retry_used', False)
+            if task_dir:
+                for fn in ["llm_patch_raw_attempt1.txt", "llm_patch_raw_attempt2.txt",
+                           "llm_patch_raw.txt"]:
+                    raw_path = os.path.join(task_dir, fn)
+                    if os.path.isfile(raw_path):
+                        print(f"Raw LLM output saved to: {raw_path}")
+            # Continue to write report with failure info; exit later
+            patch_text = None
 
-        # Save patch.diff
-        record_mgr.save_patch(task_id, patch_text)
-        patch_path = os.path.join(record_mgr.get_task_dir(task_id), "patch.diff")
-        print(f"Patch saved to: {patch_path}")
+        if patch_text is not None:
+            # Save patch.diff
+            record_mgr.save_patch(task_id, patch_text)
+            patch_path = os.path.join(record_mgr.get_task_dir(task_id), "patch.diff")
+            print(f"Patch saved to: {patch_path}")
 
-        # Parse file paths from patch for reporting
-        from src.llm.patch_generator import LLMPatchGenerator as PG
-        patch_file_paths = PG._parse_file_paths(patch_text)
-        print(f"Files in patch: {', '.join(patch_file_paths) if patch_file_paths else '(none)'}")
+            # Parse file paths from patch for reporting
+            from src.llm.patch_generator import LLMPatchGenerator as PG
+            patch_file_paths = PG._parse_file_paths(patch_text)
+            print(f"Files in patch: {', '.join(patch_file_paths) if patch_file_paths else '(none)'}")
 
-        # git apply --check (dry-run only, does NOT apply)
-        print("Running git apply --check...")
-        git_apply_check_result = runner.run_git_apply_check(patch_path)
-        if git_apply_check_result.success:
-            print("  git apply --check: PASS (patch would apply cleanly)")
+            # Artifact coverage check
+            artifact_coverage_warnings = _check_artifact_coverage(
+                args.request, plan.task_type, patch_file_paths,
+                plan_affected_areas=getattr(plan, "affected_areas", None),
+            )
+            if artifact_coverage_warnings:
+                print("Artifact coverage warnings:")
+                for w in artifact_coverage_warnings:
+                    print(f"  Warning: {w}")
+
+            # git apply --check (dry-run only, does NOT apply)
+            print("Running git apply --check...")
+            git_apply_check_result = runner.run_git_apply_check(patch_path)
+            if git_apply_check_result.success:
+                print("  git apply --check: PASS (patch would apply cleanly)")
+            else:
+                print(f"  git apply --check: FAIL (returncode={git_apply_check_result.returncode})")
+                if git_apply_check_result.stderr:
+                    print(f"  {git_apply_check_result.stderr.strip()[:500]}")
+
+            print()
+            print(">>> PATCH WAS NOT APPLIED. Review patch.diff manually before applying. <<<")
+            print()
         else:
-            print(f"  git apply --check: FAIL (returncode={git_apply_check_result.returncode})")
-            if git_apply_check_result.stderr:
-                print(f"  {git_apply_check_result.stderr.strip()[:500]}")
-
-        print()
-        print(">>> PATCH WAS NOT APPLIED. Review patch.diff manually before applying. <<<")
-        print()
+            print()
+            print(">>> Patch generation failed — no patch.diff was produced. <<<")
+            print()
 
     # 6.5 Patch application (optional, only after explicit --apply-patch)
     apply_result = None
@@ -759,6 +889,13 @@ def main():
         commit_message=commit_message,
         commit_changed_files=commit_changed_files,
         replacement_smoke_result=replacement_smoke_result,
+        llm_validation_results=llm_validation_results if llm_validation_results else None,
+        artifact_coverage_warnings=artifact_coverage_warnings,
+        protocol_retry_count=protocol_retry_count,
+        protocol_retry_used=protocol_retry_used,
+        semantic_retry_count=semantic_retry_count,
+        semantic_retry_used=semantic_retry_used,
+        patch_generation_error=patch_generation_error,
     )
 
     # 8. Save all artifacts
@@ -778,6 +915,8 @@ def main():
         all_pass = all_pass and test_result.success
     if git_apply_check_result is not None:
         all_pass = all_pass and git_apply_check_result.success
+    if patch_generation_error is not None:
+        all_pass = False
     if apply_result is not None:
         all_pass = all_pass and apply_result.success
         if post_apply_validation:

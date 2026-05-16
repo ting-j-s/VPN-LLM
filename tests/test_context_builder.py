@@ -171,3 +171,80 @@ class TestContextBuilder:
         assert "DOC FILES" in repo_context
         assert "README.md" in repo_context
         assert "docs/guide.md" in repo_context
+
+
+class TestContextSizeLimits:
+    """Context builder enforces total byte cap and file count cap."""
+
+    def test_review_files_capped_at_20(self, tmp_path):
+        """At most 20 review files are included in context."""
+        fs = FileSelection(
+            must_edit_files=[],
+            must_review_files=[f"src/core/file_{i}.py" for i in range(30)],
+        )
+        for fpath in fs.must_review_files:
+            (tmp_path / fpath).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / fpath).write_text("# test\n")
+
+        builder = ContextBuilder(str(tmp_path))
+        repo_context, summary = builder.build(fs)
+
+        # Count how many review files actually appear in context
+        review_count = repo_context.count("--- src/core/")
+        assert review_count <= 20
+
+    def test_total_context_size_approaches_100kb_limit(self, tmp_path):
+        """When many large review files exist, context stays near 100KB."""
+        # Create 30 review files, each ~6KB
+        content = "x" * 6000
+        fs = FileSelection(
+            must_edit_files=[],
+            must_review_files=[f"src/core/module_{i}.py" for i in range(30)],
+        )
+        for fpath in fs.must_review_files:
+            (tmp_path / fpath).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / fpath).write_text(content)
+
+        builder = ContextBuilder(str(tmp_path))
+        repo_context, summary = builder.build(fs)
+
+        # Total bytes should be under ~110KB (100KB cap + overhead)
+        assert summary.total_bytes < 110 * 1024, (
+            f"Context size {summary.total_bytes} bytes exceeds 110KB limit"
+        )
+
+
+class TestReviewPriority:
+    """Review file priority ordering puts core/common first."""
+
+    def test_core_files_prioritized_over_llm_files(self, tmp_path):
+        """src/core/ files should appear before src/llm/ files in context."""
+        # Create files in different areas
+        for p in ["src/core/a.py", "src/common/b.py", "src/llm/c.py",
+                   "src/transport/d.py", "config/e.yaml", "tests/f.py",
+                   "docs/g.md", "src/tun/h.py", "scripts/i.sh"]:
+            (tmp_path / p).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / p).write_text("# test\n")
+
+        fs = FileSelection(
+            must_edit_files=[],
+            must_review_files=[
+                "src/llm/c.py", "src/transport/d.py", "src/core/a.py",
+                "src/common/b.py", "config/e.yaml", "tests/f.py",
+                "docs/g.md", "src/tun/h.py", "scripts/i.sh",
+            ],
+        )
+
+        builder = ContextBuilder(str(tmp_path))
+        repo_context, summary = builder.build(fs)
+
+        # Find positions of core vs llm files in the context
+        core_pos = repo_context.find("src/core/a.py")
+        common_pos = repo_context.find("src/common/b.py")
+        llm_pos = repo_context.find("src/llm/c.py")
+        tun_pos = repo_context.find("src/tun/h.py")
+
+        # Core and common should come before llm and tun
+        assert core_pos < llm_pos, "src/core/ should appear before src/llm/"
+        assert common_pos < llm_pos, "src/common/ should appear before src/llm/"
+        assert core_pos < tun_pos, "src/core/ should appear before src/tun/"

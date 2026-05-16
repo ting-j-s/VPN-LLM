@@ -526,3 +526,68 @@ class TestValidateCreateFilename:
         )
         assert err is not None
         assert "pattern" in err.lower()
+
+
+class TestCoreChangeAllowedCreatePaths:
+    """core_change allowed_create_paths should be src/core/, src/common/, tests/, docs/."""
+
+    def test_core_change_create_paths_exclude_llm_and_transport(self):
+        index = _core_index()
+        plan = TaskPlan(
+            task_type="core_change",
+            description="refactor core",
+            target_transport=None,
+        )
+        expander = ImpactExpander(index)
+        selection = expander.expand("refactor core forwarding", plan, [])
+
+        allowed = selection.allowed_create_paths
+        assert "src/core/" in allowed
+        assert "src/common/" in allowed
+        assert "tests/" in allowed
+        assert "docs/" in allowed
+        # Must NOT include these
+        assert "config/" not in allowed
+        assert "src/llm/" not in allowed
+        assert "src/transport/" not in allowed
+        assert "src/tun/" not in allowed
+        assert "scripts/" not in allowed
+
+    def test_core_change_create_patterns_exclude_llm_and_transport(self):
+        index = _core_index()
+        plan = TaskPlan(
+            task_type="core_change",
+            description="add core diagnostics",
+            target_transport=None,
+        )
+        expander = ImpactExpander(index)
+        selection = expander.expand("add structured diagnostics to core", plan, [])
+
+        patterns = selection.allowed_create_patterns
+        assert any("src/core/" in p for p in patterns)
+        assert any("src/common/" in p for p in patterns)
+        assert any("test_" in p for p in patterns)
+        assert any("docs/" in p for p in patterns)
+        # Should NOT include transport or llm patterns
+        assert not any("src/transport/" in p for p in patterns)
+        assert not any("src/llm/" in p for p in patterns)
+        assert not any("src/tun/" in p for p in patterns)
+
+    def test_core_change_review_rules_exclude_tun(self):
+        """core_change must_review should NOT include src/tun/."""
+        index = _core_index()
+        plan = TaskPlan(
+            task_type="core_change",
+            description="update core",
+            target_transport=None,
+        )
+        expander = ImpactExpander(index)
+        selection = expander.expand("update core forwarding", plan, [])
+
+        review = selection.must_review_files
+        # tun files must NOT be in review (tun was removed from core_change review rules)
+        assert "src/tun/tun_device.py" not in review
+        # Core/common files should be in must_edit (not review) or review
+        all_files = set(selection.must_edit_files) | set(review)
+        assert any(f.startswith("src/core/") for f in all_files) or \
+               any(f.startswith("src/common/") for f in all_files)

@@ -527,3 +527,246 @@ class TestDryRunHttp2Transport:
         # clarification_questions.md should NOT exist (not extreme risk)
         assert not (task_dirs[0] / "clarification_questions.md").exists(), \
             "http2 request should not trigger extreme risk"
+
+
+# ---------------------------------------------------------------------------
+# Protocol retry helpers
+# ---------------------------------------------------------------------------
+
+def _setup_mock_api_with_retry(monkeypatch, plan_extra=None, patch_responses=None):
+    """Set up mock HTTP that returns different patch responses per call.
+
+    call 1: planner response (plan_data)
+    call 2: patch_response[0] (first attempt)
+    call 3: patch_response[1] (second attempt, if any)
+    """
+    import urllib.request
+
+    plan_data = {
+        "task_type": "transport_change",
+        "target_transport": "websocket",
+        "summary": "Switch transport to websocket",
+        "candidate_files": ["src/transport/tcp_transport.py", "config/server.yaml"],
+        "validation_commands": [],
+        "risk_level": "low",
+    }
+    if plan_extra:
+        plan_data.update(plan_extra)
+
+    if patch_responses is None:
+        patch_responses = [_valid_edits()]
+
+    call_count = [0]
+
+    def _mock_open(req, timeout=30):
+        call_count[0] += 1
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self):
+                if call_count[0] == 1:
+                    content = json.dumps(plan_data)
+                else:
+                    idx = call_count[0] - 2
+                    if idx < len(patch_responses):
+                        content = patch_responses[idx]
+                    else:
+                        content = patch_responses[-1]
+                return json.dumps({
+                    "choices": [{"message": {"content": content}}]
+                }).encode("utf-8")
+            @property
+            def status(self):
+                return 200
+        return FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _mock_open)
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+
+
+# ---------------------------------------------------------------------------
+# Test: Protocol retry in full flow
+# ---------------------------------------------------------------------------
+
+
+class TestProtocolRetryInFlow:
+    """Verify protocol retry behavior in full llm_task.py flow."""
+
+    def test_retry_success_recorded_in_report(self, tmp_path, monkeypatch):
+        """First malformed LLM response, retry succeeds → report records retry."""
+        repo = _make_temp_git_repo(tmp_path)
+        record_dir = str(tmp_path / ".llm_tasks")
+
+        _setup_mock_api_with_retry(monkeypatch, patch_responses=[
+            "Let me think about what needs to change first...\nAnalysis: the transport needs...",
+            _valid_edits(),
+        ])
+        _mock_validation_methods(monkeypatch)
+
+        rc = _run_main(monkeypatch, repo,
+                       ["--generate-patch", "--apply-patch"],
+                       record_dir)
+
+        task_dirs = list((tmp_path / ".llm_tasks").iterdir())
+        assert len(task_dirs) > 0
+        report = (task_dirs[0] / "report.md").read_text()
+        assert "Protocol retry" in report
+        assert "first attempt malformed, retry succeeded" in report
+        assert (task_dirs[0] / "patch.diff").exists()
+
+    def test_retry_failure_recorded_in_report(self, tmp_path, monkeypatch):
+        """Both LLM attempts malformed → report records failure."""
+        repo = _make_temp_git_repo(tmp_path)
+        record_dir = str(tmp_path / ".llm_tasks")
+
+        _setup_mock_api_with_retry(monkeypatch, patch_responses=[
+            "Let me analyze this first...",
+            "Here is my second attempt at analysis...",
+        ])
+        _mock_validation_methods(monkeypatch)
+
+        rc = _run_main(monkeypatch, repo,
+                       ["--generate-patch"],
+                       record_dir)
+
+        task_dirs = list((tmp_path / ".llm_tasks").iterdir())
+        assert len(task_dirs) > 0
+        report = (task_dirs[0] / "report.md").read_text()
+        assert "FAILED" in report
+        assert "malformed patch response after retry" in report
+        # No patch.diff (generation failed)
+        assert not (task_dirs[0] / "patch.diff").exists()
+
+    def test_retry_raw_attempts_saved(self, tmp_path, monkeypatch):
+        """Raw attempt files are saved in task_dir when retry fails."""
+        repo = _make_temp_git_repo(tmp_path)
+        record_dir = str(tmp_path / ".llm_tasks")
+
+        _setup_mock_api_with_retry(monkeypatch, patch_responses=[
+            "Analysis attempt one: modify the core...",
+            "Analysis attempt two: change the frame...",
+        ])
+        _mock_validation_methods(monkeypatch)
+
+        _run_main(monkeypatch, repo, ["--generate-patch"], record_dir)
+
+        task_dirs = list((tmp_path / ".llm_tasks").iterdir())
+        assert len(task_dirs) > 0
+        task_dir = task_dirs[0]
+
+        attempt1 = task_dir / "llm_patch_raw_attempt1.txt"
+        attempt2 = task_dir / "llm_patch_raw_attempt2.txt"
+        attempt3 = task_dir / "llm_patch_raw_attempt3.txt"
+        assert attempt1.exists(), f"Missing {attempt1}"
+        assert attempt2.exists(), f"Missing {attempt2}"
+        assert attempt3.exists(), f"Missing {attempt3}"
+        assert "Analysis attempt one" in attempt1.read_text()
+        assert "Analysis attempt two" in attempt2.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Test: Semantic retry in full flow
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticRetryInFlow:
+    """Verify semantic retry behavior in full llm_task.py flow."""
+
+    def test_semantic_retry_recorded_in_report(self, tmp_path, monkeypatch):
+        """First valid-protocol response has semantic error → retry → report records it."""
+        repo = _make_temp_git_repo(tmp_path)
+        record_dir = str(tmp_path / ".llm_tasks")
+
+        # Attempt 1: ACTION:create on existing file → semantic retry
+        # Attempt 2: correct ACTION:replace → success
+        _setup_mock_api_with_retry(monkeypatch, patch_responses=[
+            ("FILE: src/transport/base.py\n"
+             "ACTION: create\n"
+             "<<<CONTENT\n"
+             "class BaseTransport:\n"
+             "    '''Base transport interface.'''\n"
+             "    pass\n"
+             ">>>"),
+            _valid_edits(),
+        ])
+        _mock_validation_methods(monkeypatch)
+
+        rc = _run_main(monkeypatch, repo,
+                       ["--generate-patch"],
+                       record_dir)
+
+        task_dirs = list((tmp_path / ".llm_tasks").iterdir())
+        assert len(task_dirs) > 0
+        report = (task_dirs[0] / "report.md").read_text()
+        assert "Semantic retry" in report
+        assert "semantic retry succeeded" in report
+        # Patch should be generated
+        assert (task_dirs[0] / "patch.diff").exists()
+
+    def test_protocol_retry_then_semantic_retry_recorded_in_report(self, tmp_path, monkeypatch):
+        """Attempt1 prose → protocol retry, attempt2 create-existing → semantic retry, attempt3 success."""
+        repo = _make_temp_git_repo(tmp_path)
+        record_dir = str(tmp_path / ".llm_tasks")
+
+        _setup_mock_api_with_retry(monkeypatch, patch_responses=[
+            "Let me think about what needs to change first...\nAnalysis: the transport needs...",
+            ("FILE: src/transport/base.py\n"
+             "ACTION: create\n"
+             "<<<CONTENT\n"
+             "class BaseTransport:\n"
+             "    '''Base transport interface.'''\n"
+             "    pass\n"
+             ">>>"),
+            _valid_edits(),
+        ])
+        _mock_validation_methods(monkeypatch)
+
+        rc = _run_main(monkeypatch, repo,
+                       ["--generate-patch"],
+                       record_dir)
+
+        task_dirs = list((tmp_path / ".llm_tasks").iterdir())
+        assert len(task_dirs) > 0
+        report = (task_dirs[0] / "report.md").read_text()
+        assert "Protocol retry" in report
+        assert "Semantic retry" in report
+        assert "semantic retry succeeded" in report
+        # Patch should be generated
+        assert (task_dirs[0] / "patch.diff").exists()
+
+    def test_semantic_retry_failure_recorded_in_report(self, tmp_path, monkeypatch):
+        """Both semantic attempts fail → report records failure."""
+        repo = _make_temp_git_repo(tmp_path)
+        record_dir = str(tmp_path / ".llm_tasks")
+
+        _setup_mock_api_with_retry(monkeypatch, patch_responses=[
+            """FILE: src/transport/base.py
+ACTION: create
+<<<CONTENT
+attempt 1
+>>>""",
+            """FILE: src/transport/base.py
+ACTION: create
+<<<CONTENT
+attempt 2
+>>>""",
+        ])
+        _mock_validation_methods(monkeypatch)
+
+        rc = _run_main(monkeypatch, repo,
+                       ["--generate-patch"],
+                       record_dir)
+
+        task_dirs = list((tmp_path / ".llm_tasks").iterdir())
+        assert len(task_dirs) > 0
+        task_dir = task_dirs[0]
+        report = (task_dir / "report.md").read_text()
+        assert "FAILED" in report
+        # Check raw attempt files are saved
+        attempt1 = task_dir / "llm_patch_raw_attempt1.txt"
+        attempt2 = task_dir / "llm_patch_raw_attempt2.txt"
+        assert attempt1.exists(), f"Missing {attempt1}"
+        assert attempt2.exists(), f"Missing {attempt2}"
+        assert not (task_dir / "patch.diff").exists()

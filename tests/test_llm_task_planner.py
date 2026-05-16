@@ -514,6 +514,144 @@ class TestLLMTaskPlannerSafety:
 
 
 # ---------------------------------------------------------------------------
+# Test task type normalization (refactor → core_change)
+# ---------------------------------------------------------------------------
+
+class TestLLMTaskPlannerNormalization:
+    """Verify _normalize_task_type converts refactor to core_change when appropriate."""
+
+    def test_refactor_with_clientcore_servercore_in_request_normalizes_to_core(self):
+        """Request mentions ClientCore and ServerCore → refactor → core_change."""
+        from src.llm.llm_task_planner import LLMTaskPlanner
+        validated = {
+            "task_type": "refactor",
+            "target_transport": None,
+            "summary": "refactor client and server core",
+            "candidate_files": [],
+            "validation_commands": [],
+            "risk_level": "medium",
+        }
+        result = LLMTaskPlanner._normalize_task_type(
+            "refactor ClientCore and ServerCore so forwarding loop errors are reported",
+            validated,
+        )
+        assert result["task_type"] == "core_change"
+
+    def test_refactor_with_forwarding_loop_normalizes_to_core(self):
+        """Request mentions forwarding loop → refactor → core_change."""
+        from src.llm.llm_task_planner import LLMTaskPlanner
+        validated = {
+            "task_type": "refactor",
+            "target_transport": None,
+            "summary": "refactor forwarding",
+            "candidate_files": [],
+            "validation_commands": [],
+            "risk_level": "medium",
+        }
+        result = LLMTaskPlanner._normalize_task_type(
+            "improve forwarding loop error reporting",
+            validated,
+        )
+        assert result["task_type"] == "core_change"
+
+    def test_refactor_with_core_candidate_files_normalizes_to_core(self):
+        """Affected areas contain src/core/client_core.py → refactor → core_change."""
+        from src.llm.llm_task_planner import LLMTaskPlanner
+        validated = {
+            "task_type": "refactor",
+            "target_transport": None,
+            "summary": "refactor core",
+            "candidate_files": [
+                "src/core/client_core.py",
+                "src/core/server_core.py",
+                "src/utils/errors.py",
+            ],
+            "validation_commands": [],
+            "risk_level": "medium",
+        }
+        result = LLMTaskPlanner._normalize_task_type(
+            "refactor error handling",
+            validated,
+        )
+        assert result["task_type"] == "core_change"
+
+    def test_refactor_with_predominantly_core_areas_normalizes_to_core(self):
+        """Majority of candidate files under src/core/ → refactor → core_change."""
+        from src.llm.llm_task_planner import LLMTaskPlanner
+        validated = {
+            "task_type": "refactor",
+            "target_transport": None,
+            "summary": "clean up core",
+            "candidate_files": [
+                "src/core/client_core.py",
+                "src/core/server_core.py",
+                "src/common/errors.py",
+            ],
+            "validation_commands": [],
+            "risk_level": "low",
+        }
+        result = LLMTaskPlanner._normalize_task_type(
+            "clean up some code",
+            validated,
+        )
+        assert result["task_type"] == "core_change"
+
+    def test_refactor_without_core_keywords_passes_through(self):
+        """Refactor with no core keywords or files stays as refactor."""
+        from src.llm.llm_task_planner import LLMTaskPlanner
+        validated = {
+            "task_type": "refactor",
+            "target_transport": None,
+            "summary": "clean up transport code",
+            "candidate_files": [
+                "src/transport/tcp_transport.py",
+                "src/transport/factory.py",
+            ],
+            "validation_commands": [],
+            "risk_level": "low",
+        }
+        result = LLMTaskPlanner._normalize_task_type(
+            "refactor transport layer",
+            validated,
+        )
+        assert result["task_type"] == "refactor"
+
+    def test_core_change_passes_through_unchanged(self):
+        """Already-core_change task type is not modified."""
+        from src.llm.llm_task_planner import LLMTaskPlanner
+        validated = {
+            "task_type": "core_change",
+            "target_transport": None,
+            "summary": "replace core forwarding",
+            "candidate_files": ["src/core/client_core.py"],
+            "validation_commands": [],
+            "risk_level": "high",
+        }
+        result = LLMTaskPlanner._normalize_task_type(
+            "replace core forwarding",
+            validated,
+        )
+        assert result["task_type"] == "core_change"
+
+    def test_transport_change_passes_through_unchanged(self):
+        """transport_change is not modified by normalization."""
+        from src.llm.llm_task_planner import LLMTaskPlanner
+        validated = {
+            "task_type": "transport_change",
+            "target_transport": "websocket",
+            "summary": "switch to websocket",
+            "candidate_files": ["src/transport/ws.py"],
+            "validation_commands": [],
+            "risk_level": "low",
+        }
+        result = LLMTaskPlanner._normalize_task_type(
+            "switch transport to websocket",
+            validated,
+        )
+        assert result["task_type"] == "transport_change"
+
+
+# ---------------------------------------------------------------------------
 # Test config and API key handling
 # ---------------------------------------------------------------------------
 

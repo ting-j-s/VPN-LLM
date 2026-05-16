@@ -353,3 +353,145 @@ class TestRetrieveMixedFeature:
         # Should get files from multiple areas
         paths = {c.path for c in candidates}
         assert len(paths) >= 2
+
+
+class TestVpnTunnelExclusion:
+    """vpn_tunnel/ files are excluded by RepoIndexer by default."""
+
+    def test_vpn_tunnel_not_in_index_for_transport_addition(self):
+        """vpn_tunnel/ subtree is not indexed, so transport_addition doesn't recall it."""
+        index = _make_index_with_files([
+            _fi("src/transport/tcp.py", symbols=["TCPTransport"]),
+            _fi("src/transport/factory.py", symbols=["TransportFactory"]),
+            _fi("src/common/config.py", symbols=["load_config"]),
+            _fi("tests/test_transport.py", is_test=True),
+            _fi("README.md", file_type="markdown", is_doc=True),
+        ])
+
+        from src.llm.llm_task_planner import LLMTaskPlan
+        plan = LLMTaskPlan(
+            task_type="transport_addition",
+            target_transport=None,
+            summary="add http2 transport",
+            candidate_files=[],
+            validation_commands=[],
+            risk_level="low",
+        )
+        retriever = FileRetriever(index)
+        candidates = retriever.retrieve("add a new http2 transport", plan)
+        paths = {c.path for c in candidates}
+        # vpn_tunnel/ must not appear — it's excluded by RepoIndexer
+        for p in paths:
+            assert not p.startswith("vpn_tunnel/"), f"vpn_tunnel/ leaked: {p}"
+
+    def test_vpn_tunnel_explicitly_requested_can_be_included(self):
+        """When request includes 'vpn_tunnel' keyword, area inference picks mixed_feature,
+        and the index can contain vpn_tunnel files if manually added."""
+        # RepoIndexer excludes vpn_tunnel/ by default, but a caller can
+        # construct an index with vpn_tunnel/ files if needed.
+        index = _make_index_with_files([
+            _fi("src/transport/tcp.py", symbols=["TCPTransport"]),
+            _fi("vpn_tunnel/src/transport/tcp.py",
+                symbols=["TCPTransport"]),
+        ])
+
+        retriever = FileRetriever(index)
+        candidates = retriever.retrieve(
+            "update vpn_tunnel tcp transport", None,
+            affected_areas=["mixed_feature"],
+        )
+        paths = {c.path for c in candidates}
+        assert "vpn_tunnel/src/transport/tcp.py" in paths
+
+
+class TestCoreChangeFileSelection:
+    """core_change tasks should focus on src/core/, src/common/, tests/, docs/."""
+
+    def test_core_change_does_not_recall_llm_files(self):
+        index = _make_index_with_files([
+            _fi("src/core/client_core.py", symbols=["ClientCore"]),
+            _fi("src/core/server_core.py", symbols=["ServerCore"]),
+            _fi("src/llm/task_planner.py", symbols=["TaskPlanner"]),
+            _fi("config/llm_agent.yaml", file_type="yaml", config_keys=["agent"]),
+            _fi("tests/test_core.py", is_test=True),
+        ])
+
+        plan = TaskPlan(
+            task_type="core_change",
+            description="refactor core forwarding",
+            target_transport=None,
+            affected_areas=["src/core/"],
+        )
+
+        retriever = FileRetriever(index)
+        candidates = retriever.retrieve("refactor core forwarding", plan)
+
+        paths = {c.path for c in candidates}
+        assert "src/llm/task_planner.py" not in paths
+        assert "config/llm_agent.yaml" not in paths
+        assert "src/core/client_core.py" in paths
+        assert "src/core/server_core.py" in paths
+
+    def test_core_change_does_not_recall_config_llm_agent(self):
+        index = _make_index_with_files([
+            _fi("src/core/client_core.py", symbols=["ClientCore"]),
+            _fi("config/llm_agent.yaml", file_type="yaml", config_keys=["llm", "agent"]),
+            _fi("config/llm_agent.yaml.example", file_type="yaml"),
+            _fi("tests/test_core.py", is_test=True),
+        ])
+
+        plan = TaskPlan(
+            task_type="core_change",
+            description="update core",
+            target_transport=None,
+        )
+
+        retriever = FileRetriever(index)
+        candidates = retriever.retrieve("update core forwarding", plan)
+
+        paths = {c.path for c in candidates}
+        assert "config/llm_agent.yaml" not in paths
+        assert "config/llm_agent.yaml.example" not in paths
+
+    def test_core_change_recalls_core_files(self):
+        index = _make_index_with_files([
+            _fi("src/core/client_core.py", symbols=["ClientCore"]),
+            _fi("src/core/server_core.py", symbols=["ServerCore"]),
+            _fi("src/common/frame.py", symbols=["Frame"]),
+            _fi("tests/test_core.py", is_test=True),
+            _fi("tests/test_frame.py", is_test=True),
+        ])
+
+        plan = TaskPlan(
+            task_type="core_change",
+            description="refactor core",
+            target_transport=None,
+        )
+
+        retriever = FileRetriever(index)
+        candidates = retriever.retrieve("refactor client core forwarding", plan)
+
+        paths = {c.path for c in candidates}
+        assert "src/core/client_core.py" in paths
+        assert "src/core/server_core.py" in paths
+        assert any("frame" in p for p in paths)
+
+    def test_core_change_tun_keyword_does_not_pull_tun_files(self):
+        """'tun' was removed from core keywords, so core_change shouldn't recall tun files."""
+        index = _make_index_with_files([
+            _fi("src/core/client_core.py", symbols=["ClientCore"]),
+            _fi("src/tun/tun_device.py", symbols=["TunDevice"]),
+            _fi("tests/test_core.py", is_test=True),
+        ])
+
+        plan = TaskPlan(
+            task_type="core_change",
+            description="refactor core",
+            target_transport=None,
+        )
+
+        retriever = FileRetriever(index)
+        candidates = retriever.retrieve("refactor core forwarding", plan)
+
+        paths = {c.path for c in candidates}
+        assert "src/tun/tun_device.py" not in paths

@@ -20,14 +20,17 @@ _MAX_FILE_BYTES = 12 * 1024
 # Maximum number of must_review files to include in context
 _MAX_REVIEW_FILES = 20
 
+# Maximum total context size (bytes)
+_MAX_TOTAL_BYTES = 100 * 1024
+
 # Priority prefixes for sorting review files (lower index = higher priority)
 _REVIEW_PRIORITY_PREFIXES = [
+    "src/core/",
+    "src/common/",
     "src/transport/",
     "config/",
     "tests/",
     "docs/",
-    "src/common/",
-    "src/core/",
     "src/llm/",
     "src/tun/",
     "scripts/",
@@ -140,6 +143,10 @@ class ContextBuilder:
             skipped = len(file_selection.must_review_files) - len(capped)
 
             for fpath in capped:
+                # Stop adding review files when total context approaches _MAX_TOTAL_BYTES
+                if total_bytes >= _MAX_TOTAL_BYTES:
+                    skipped += 1
+                    continue
                 content, size, truncated = self._read_file(fpath)
                 total_bytes += size
                 summary.files_included.append(fpath)
@@ -151,7 +158,8 @@ class ContextBuilder:
                 lines.append(content)
 
             if skipped > 0:
-                lines.append(f"\n... ({skipped} more review files omitted)")
+                lines.append(f"\n... ({skipped} more review files omitted "
+                             f"due to size/file limits)")
 
         # Add test and doc file listings (paths only, not content)
         if file_selection.test_files:

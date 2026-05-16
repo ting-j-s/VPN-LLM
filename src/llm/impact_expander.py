@@ -127,8 +127,6 @@ _MUST_REVIEW_RULES: dict[str, list[str]] = {
     "core": [
         "src/core/",
         "src/common/",
-        "src/tun/",
-        "src/forwarding/",
     ],
     "tun": [
         "src/tun/",
@@ -167,7 +165,7 @@ _MUST_REVIEW_RULES: dict[str, list[str]] = {
 _ALLOW_CREATE_RULES: dict[str, list[str]] = {
     "transport": ["src/transport/"],
     "transport_addition": ["src/transport/", "tests/", "docs/", "config/"],
-    "core": ["src/core/", "src/common/"],
+    "core": ["src/core/", "src/common/", "tests/", "docs/"],
     "tun": ["src/tun/"],
     "config": ["config/"],
     "llm_agent": ["src/llm/"],
@@ -191,7 +189,7 @@ _ALLOW_CREATE_PATTERNS: dict[str, list[str]] = {
         "docs/*.md",
         "config/*.yaml", "config/*.yaml.example",
     ],
-    "core": ["src/core/*.py", "src/common/*.py"],
+    "core": ["src/core/*.py", "src/common/*.py", "tests/test_*.py", "docs/*.md"],
     "tun": ["src/tun/*.py"],
     "config": ["config/*.yaml", "config/*.yaml.example"],
     "llm_agent": ["src/llm/*.py"],

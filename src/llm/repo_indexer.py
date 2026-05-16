@@ -113,6 +113,7 @@ _IGNORED_DIRS = frozenset({
     ".git", ".llm_tasks", ".llm_index", ".pytest_cache",
     "__pycache__", "venv", ".venv", ".tox", ".mypy_cache",
     ".claude", "node_modules",
+    "vpn_tunnel",
 })
 
 _IGNORED_FILES = frozenset({".env", ".gitignore"})

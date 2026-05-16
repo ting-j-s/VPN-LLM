@@ -26,6 +26,102 @@ class LLMPatchGeneratorError(Exception):
     """Raised when patch generation or validation fails."""
 
 
+def _build_expected_artifacts_guidance(user_request: str, task_plan) -> str:
+    """Build guidance about expected artifacts for transport_addition tasks.
+
+    When the user request explicitly mentions tests, docs, or config support,
+    the LLM must be reminded to generate those file types.
+    """
+    import re
+
+    task_type = task_plan.task_type if hasattr(task_plan, "task_type") else ""
+    if task_type != "transport_addition":
+        return ""
+
+    request_lower = user_request.lower()
+    has_tests = any(kw in request_lower for kw in ("test", "tests"))
+    has_docs = any(kw in request_lower for kw in ("doc", "docs", "documentation"))
+    has_config = any(kw in request_lower for kw in ("config", "configuration"))
+
+    if not (has_tests or has_docs or has_config):
+        return ""
+
+    # Detect transport name
+    transport_name = None
+    m = re.search(
+        r'(?:add|new|create|implement)\s+(?:a\s+)?(?:new\s+)?(\w+)\s+transport',
+        request_lower,
+    )
+    if m:
+        transport_name = m.group(1)
+
+    lines = ["\nEXPECTED ARTIFACTS (you MUST generate ALL of these):"]
+
+    if transport_name:
+        lines.append(
+            f"  - src/transport/{transport_name}_transport.py "
+            f"(transport implementation — MUST be created)"
+        )
+    else:
+        lines.append(
+            "  - src/transport/<name>_transport.py "
+            "(transport implementation — MUST be created)"
+        )
+
+    if has_tests:
+        if transport_name:
+            lines.append(
+                f"  - tests/test_{transport_name}_transport.py "
+                f"(unit tests — MUST be created)"
+            )
+        else:
+            lines.append(
+                "  - tests/test_<name>_transport.py "
+                "(unit tests — MUST be created)"
+            )
+
+    if has_docs:
+        if transport_name:
+            lines.append(
+                f"  - docs/{transport_name}_transport.md "
+                f"(documentation — MUST be created)"
+            )
+        else:
+            lines.append(
+                "  - docs/<name>_transport.md "
+                "(documentation — MUST be created)"
+            )
+
+    if has_config:
+        if transport_name:
+            lines.append(
+                f"  - config/{transport_name}_transport.yaml "
+                f"(configuration example — MUST be created)"
+            )
+        else:
+            lines.append(
+                "  - config/<name>_transport.yaml "
+                "(configuration example — MUST be created)"
+            )
+        lines.append(
+            "  - src/common/config.py or src/transport/__init__.py "
+            "(register the new transport — MUST edit if registration needed)"
+        )
+
+    lines.append(
+        "  - src/transport/__init__.py or src/transport/factory.py "
+        "(register the new transport — MUST edit if registration needed)"
+    )
+    lines.append(
+        "\nIMPORTANT: Use ACTION: create for NEW files and ACTION: replace "
+        "for EXISTING files. All expected artifacts listed above MUST appear "
+        "in your output. Missing any of them will cause the patch to be "
+        "incomplete."
+    )
+
+    return "\n".join(lines)
+
+
 class LLMPatchGenerator:
     """Generate a unified diff via LLM, with strict safety validation.
 
@@ -34,28 +130,59 @@ class LLMPatchGenerator:
         patch_text = gen.generate(request, plan, repo_context)
         # patch_text is a unified diff string, saved to patch.diff
         # System does NOT apply it — human review required.
+
+    Protocol retry:
+        If the LLM response does not start with FILE:, the generator
+        sends a correction prompt and retries once (max 2 attempts).
+        Both raw outputs are saved for debugging. If the retry also
+        fails, LLMPatchGeneratorError is raised.
+
+    Semantic retry:
+        If the response starts with FILE: (protocol OK) but fails semantic
+        validation (e.g., ACTION:create on existing file, path violations),
+        the generator sends a correction prompt and retries once.
+        Total LLM attempts: max 3 (1 protocol retry + 1 semantic retry).
+        Semantic retry does NOT bypass safety constraints (allowed_edit_files,
+        allowed_create_paths, etc.).
     """
+
+    _MAX_PROTOCOL_ATTEMPTS = 2   # total attempts for protocol correctness
+    _MAX_SEMANTIC_ATTEMPTS = 1  # additional attempts for semantic validity
+    _MAX_TOTAL_ATTEMPTS = _MAX_PROTOCOL_ATTEMPTS + _MAX_SEMANTIC_ATTEMPTS
 
     SYSTEM_PROMPT = (
         "You are a patch generator for a VPN software project. "
         "Given a user request, a task plan, and repository context, "
         "output edit instructions in FIND/REPLACE format.\n\n"
-        "FORMAT for editing existing files:\n"
+        "FORMAT for editing EXISTING files (USE THIS for files that already exist):\n"
         "FILE: <path>\n"
         "ACTION: replace\n"
         "<<<FIND\n"
         "exact lines to find in the file (must match exactly, including whitespace)\n"
         "<<<REPLACE\n"
         "replacement lines\n\n"
-        "FORMAT for creating new files:\n"
+        "FORMAT for CREATING NEW files (only for files that do NOT exist yet):\n"
         "FILE: <path>\n"
         "ACTION: create\n"
         "<<<CONTENT\n"
         "full file content\n"
         ">>>\n\n"
         "CRITICAL RULES:\n"
-        "- Output ONLY the edit blocks. No markdown, no explanation, no code fences.\n"
+        "- Output ONLY edit blocks. Start immediately with FILE:. "
+        "No prose before or after edit blocks. No reasoning.\n"
+        "- The first non-whitespace line of your response MUST be 'FILE: <path>'.\n"
+        "- No markdown fences (```). No explanations, analysis, or comments.\n"
+        "- Any output not starting with FILE: is INVALID and will be rejected.\n"
+        "- Do NOT include any introductory or concluding text.\n"
+        "- Use ACTION: create ONLY for files that do NOT exist in the repository.\n"
+        "- For files that ALREADY EXIST (especially __init__.py, factory.py, config.py, "
+        "__init__.py): you MUST use ACTION: replace with a FIND block.\n"
+        "- If you are unsure whether a file exists, assume it EXISTS and use replace.\n"
         "- The FIND block must be an EXACT substring that appears EXACTLY ONCE in the file.\n"
+        "- FIND must be NON-EMPTY for files that already have content.\n"
+        "- FIND must NOT contain the delimiters <<<FIND, <<<REPLACE, or <<<CONTENT.\n"
+        "- REPLACE must NOT contain the delimiters <<<FIND or <<<CONTENT.\n"
+        "- Each FILE: block must be self-contained (do not nest FILE: delimiters).\n"
         "- FIND the smallest specific section that needs changing, not the entire file.\n"
         "- Make ONLY the changes the user requested. Do NOT change unrelated values\n"
         "  (ports, IPs, comments, etc.) unless the request explicitly asks for them.\n"
@@ -109,15 +236,67 @@ class LLMPatchGenerator:
         self._model = self._config["model"]
         self._timeout = int(self._config.get("agent.request_timeout", 30))
         self._root_dir = root_dir
+        self.protocol_retry_count = 0  # set by generate() after protocol retry
+        self.protocol_retry_used = False
+        self.semantic_retry_count = 0  # set by generate() after semantic retry
+        self.semantic_retry_used = False
+        self.last_semantic_error = None  # set by generate() with last semantic error message
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _build_correction_prompt(previous_raw: str) -> str:
+        """Build a correction prompt when the first response violates the FILE: protocol."""
+        preview = previous_raw.strip()[:300]
+        return (
+            "Your previous response was INVALID because it did not start with "
+            "'FILE: <path>'.\n\n"
+            f"Your response started with:\n---\n{preview}\n---\n\n"
+            "CRITICAL: You MUST output ONLY edit blocks in the correct format. "
+            "Start immediately with 'FILE: <path>' on the very first line. "
+            "Do NOT include introductions, explanations, markdown fences (```), "
+            "analysis, reasoning, or any prose before or after the edit blocks. "
+            "The first character of your response MUST be 'F' in 'FILE:'.\n\n"
+            "Generate the edit instructions now."
+        )
+
+    @staticmethod
+    def _build_semantic_correction_prompt(previous_raw: str, semantic_error: str) -> str:
+        """Build a correction prompt when the response has semantic errors.
+
+        Args:
+            previous_raw: The previous LLM response that had semantic errors.
+            semantic_error: The specific semantic validation error message.
+        """
+        preview = previous_raw.strip()[:500]
+        return (
+            f"Your previous response had a SEMANTIC ERROR and could not be processed.\n\n"
+            f"Error: {semantic_error}\n\n"
+            f"Your response preview:\n---\n{preview}\n---\n\n"
+            "You MUST fix the above error and generate a corrected patch.\n\n"
+            "IMPORTANT rules:\n"
+            "- If the error says 'file already exists' or 'ACTION:create cannot be used':\n"
+            "  The file ALREADY EXISTS in the repository. You MUST use ACTION: replace instead.\n"
+            "  Look at the file's current content and write a proper FIND/REPLACE block.\n"
+            "- If the error says 'FIND string not found':\n"
+            "  Your FIND block does not match the actual file content. "
+            "Read the file carefully and write an exact FIND.\n"
+            "- If the error says 'FIND string matches N times':\n"
+            "  Your FIND is not unique. Make it more specific.\n"
+            "- If the error says 'not under allowed_create_paths' or 'not allowed':\n"
+            "  The file path is not permitted. Choose a different path.\n\n"
+            "CRITICAL: Output ONLY edit blocks. Start with 'FILE: <path>'. "
+            "No explanations or prose. Use ACTION: replace for existing files.\n\n"
+            "Generate the corrected edit instructions now."
+        )
+
     def generate(self, user_request: str, task_plan, repository_context: str,
                  allowed_edit_files: list[str] | None = None,
                  allowed_create_paths: list[str] | None = None,
-                 allowed_create_patterns: list[str] | None = None) -> str:
+                 allowed_create_patterns: list[str] | None = None,
+                 task_dir: str | None = None) -> str:
         """Generate a unified diff for the given request and plan.
 
         Args:
@@ -130,23 +309,119 @@ class LLMPatchGenerator:
             allowed_create_patterns: If provided, new files must match one of
                 these fnmatch glob patterns. Also blocks hidden files, binary
                 files, path traversal, and .env/.git/*.key/*.pem.
+            task_dir: If provided, raw LLM output is saved to
+                task_dir/llm_patch_raw.txt when generation fails
+                (for debugging/review).
 
         Returns the raw patch text after passing all safety checks.
 
         Raises LLMPatchGeneratorError on any failure: HTTP error, invalid edit
         format, unsafe file paths, FIND not found / not unique, or sensitive content.
         """
-        raw = self._call_api(user_request, task_plan, repository_context,
-                            allowed_edit_files, allowed_create_paths,
-                            allowed_create_patterns)
-        edits = self._parse_edit_blocks(raw)
-        if not edits:
-            raise LLMPatchGeneratorError("LLM returned no valid edit blocks")
+        self.protocol_retry_count = 0
+        self.protocol_retry_used = False
+        self.semantic_retry_count = 0
+        self.semantic_retry_used = False
+        self.last_semantic_error = None
 
+        extra_messages = None
+        raw = None
+        protocol_attempts = 0
+
+        for attempt in range(self._MAX_TOTAL_ATTEMPTS):
+            raw = self._call_api(user_request, task_plan, repository_context,
+                                allowed_edit_files, allowed_create_paths,
+                                allowed_create_patterns,
+                                extra_messages=extra_messages)
+
+            # Phase 1: Strict protocol — response must start with FILE:
+            if not raw.strip().startswith("FILE:"):
+                protocol_attempts += 1
+                self._save_raw_output(raw, task_dir,
+                                      filename=f"llm_patch_raw_attempt{attempt + 1}.txt")
+
+                if attempt < self._MAX_TOTAL_ATTEMPTS - 1:
+                    self.protocol_retry_count += 1
+                    self.protocol_retry_used = True
+                    extra_messages = [
+                        {"role": "assistant", "content": raw},
+                        {"role": "user", "content": self._build_correction_prompt(raw)},
+                    ]
+                    continue
+
+                # All attempts exhausted due to protocol errors
+                first_line = raw.strip().split("\n")[0] if raw and raw.strip() else "(empty)"
+                raise LLMPatchGeneratorError(
+                    f"Patch response must start with FILE: header after "
+                    f"{self._MAX_TOTAL_ATTEMPTS} attempts. "
+                    f"Last first non-whitespace line: {first_line[:200]}"
+                )
+
+            # Protocol passed on this attempt — try semantic validation
+            try:
+                edits = self._parse_edit_blocks(raw)
+                if not edits:
+                    raise LLMPatchGeneratorError("LLM returned no valid edit blocks")
+
+                self._validate_edits(edits, allowed_edit_files, allowed_create_paths,
+                                    allowed_create_patterns)
+
+                diff_text = self._generate_diff(edits)
+                self._scan_for_secrets(diff_text)
+                return diff_text
+
+            except LLMPatchGeneratorError as e:
+                # Semantic error — save raw, then retry if within limits
+                self.last_semantic_error = str(e)
+                self._save_raw_output(raw, task_dir,
+                                      filename=f"llm_patch_raw_attempt{attempt + 1}.txt")
+
+                if (attempt < self._MAX_TOTAL_ATTEMPTS - 1
+                        and self.semantic_retry_count < self._MAX_SEMANTIC_ATTEMPTS):
+                    self.semantic_retry_count += 1
+                    self.semantic_retry_used = True
+                    extra_messages = [
+                        {"role": "assistant", "content": raw},
+                        {"role": "user",
+                         "content": self._build_semantic_correction_prompt(raw, str(e))},
+                    ]
+                    continue
+
+                # Semantic retries exhausted or no attempts left — raise
+                raise
+
+        # Should never reach here — loop should raise or return
+        raise LLMPatchGeneratorError(
+            f"Patch generation failed after {self._MAX_TOTAL_ATTEMPTS} attempts"
+        )
+
+    @staticmethod
+    def _save_raw_output(raw: str, task_dir: str | None,
+                         filename: str = "llm_patch_raw.txt") -> None:
+        """Save raw LLM output to task_dir for debugging."""
+        if not task_dir:
+            return
+        try:
+            os.makedirs(task_dir, exist_ok=True)
+            filepath = os.path.join(task_dir, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(raw)
+        except OSError:
+            pass  # best-effort, don't mask the original error
+
+    def _validate_edits(self, edits: list[tuple[str, str, str, str]],
+                         allowed_edit_files: list[str] | None,
+                         allowed_create_paths: list[str] | None,
+                         allowed_create_patterns: list[str] | None) -> None:
+        """Validate all edit blocks for semantic correctness.
+
+        Raises LLMPatchGeneratorError on any semantic violation.
+        Does NOT catch SafetyError — let it propagate.
+        """
         for filepath, action, find_str, replace_str in edits:
             if action == "create":
                 self._validate_create_path(filepath, allowed_create_paths,
-                                          allowed_create_patterns)
+                                            allowed_create_patterns)
             else:
                 self._validate_file_path(filepath)
                 if allowed_edit_files is not None and filepath not in allowed_edit_files:
@@ -154,13 +429,7 @@ class LLMPatchGenerator:
                         f"LLM attempted to edit file not in allowed_edit_files: {filepath}. "
                         f"Allowed: {allowed_edit_files}"
                     )
-                # Verify FIND uniqueness
                 self._verify_find_uniqueness(filepath, find_str)
-
-        diff_text = self._generate_diff(edits)
-
-        self._scan_for_secrets(diff_text)
-        return diff_text
 
     def _verify_find_uniqueness(self, filepath: str, find_str: str) -> None:
         """Verify the FIND string appears exactly once in the target file.
@@ -274,7 +543,8 @@ class LLMPatchGenerator:
     def _call_api(self, user_request: str, task_plan, repository_context: str,
                   allowed_edit_files: list[str] | None = None,
                   allowed_create_paths: list[str] | None = None,
-                  allowed_create_patterns: list[str] | None = None) -> str:
+                  allowed_create_patterns: list[str] | None = None,
+                  extra_messages: list[dict] | None = None) -> str:
         planner_type = "llm_based" if hasattr(task_plan, "summary") else "rule_based"
         plan_summary = getattr(task_plan, "summary", "") or getattr(task_plan, "description", "")
         plan_dict = {
@@ -304,22 +574,29 @@ class LLMPatchGenerator:
                 + "\n  Hidden files, path traversal (..), and blocked extensions (.key, .pem, .env) are forbidden."
             )
 
+        # Expected artifact guidance for transport_addition requests
+        constraints += _build_expected_artifacts_guidance(user_request, task_plan)
+
         user_message = (
             f"USER REQUEST:\n{user_request}\n\n"
             f"TASK PLAN:\n{json.dumps(plan_dict, indent=2, ensure_ascii=False)}\n\n"
             f"REPOSITORY CONTEXT:\n{repository_context}\n"
             f"{constraints}\n\n"
             "Generate the edit instructions that implement these changes. "
-            "Output ONLY the edit blocks, no other text."
+            "Output ONLY edit blocks. Start immediately with 'FILE: <path>'. "
+            "No prose before or after edit blocks. No markdown fences. No reasoning."
         )
 
         url = f"{self._base_url}/chat/completions"
+        messages = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]
+        if extra_messages:
+            messages.extend(extra_messages)
         body = json.dumps({
             "model": self._model,
-            "messages": [
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
+            "messages": messages,
             "temperature": 0.1,
             "max_tokens": 4096,
         })
@@ -386,14 +663,6 @@ class LLMPatchGenerator:
         2. Create: FILE: <path>\\nACTION: create\\n<<<CONTENT\\n...>>>
         """
         text = raw.strip()
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
 
         if not text:
             raise LLMPatchGeneratorError("LLM returned empty output")
@@ -430,6 +699,15 @@ class LLMPatchGenerator:
                         f"Create block for {filepath} missing <<<CONTENT section"
                     )
                 content = content_match.group(1)
+
+                # Validate: CONTENT must not contain FILE: delimiter (block nesting)
+                if "FILE:" in content:
+                    raise LLMPatchGeneratorError(
+                        f"Malformed create block for {filepath}: "
+                        "CONTENT must not contain FILE: delimiter. "
+                        "Each block must be self-contained."
+                    )
+
                 edits.append((filepath, "create", "", content))
             else:
                 # Parse FIND / REPLACE sections
@@ -442,13 +720,44 @@ class LLMPatchGenerator:
                     )
                 find_str = find_match.group(1)
 
+                # Post-process: if FIND starts with <<<REPLACE, the LLM intended
+                # empty FIND (e.g., for an empty file). The regex captured
+                # <<<REPLACE into FIND because there is no \n before it.
+                if find_str.startswith("<<<REPLACE"):
+                    find_str = ""
+
+                # Validate: FIND must not contain delimiters
+                LLMPatchGenerator._validate_find_replace_content(
+                    filepath, find_str, "FIND",
+                    block_delimiters=("<<<FIND", "<<<REPLACE", "<<<CONTENT"))
+
                 replace_str = ""
                 if replace_match:
                     replace_str = replace_match.group(1)
+                    # Validate: REPLACE must not contain FIND or CONTENT delimiters
+                    LLMPatchGenerator._validate_find_replace_content(
+                        filepath, replace_str, "REPLACE",
+                        block_delimiters=("<<<FIND", "<<<CONTENT"))
 
                 edits.append((filepath, "replace", find_str, replace_str))
 
         return edits
+
+    @staticmethod
+    def _validate_find_replace_content(filepath: str, content: str, section: str,
+                                       block_delimiters: tuple[str, ...]) -> None:
+        """Validate that FIND/REPLACE content does not contain block delimiters.
+
+        Raises LLMPatchGeneratorError with a clear message if a delimiter is found.
+        """
+        for delim in block_delimiters:
+            if delim in content:
+                raise LLMPatchGeneratorError(
+                    f"Malformed {section} block for {filepath}: "
+                    f"delimiter '{delim}' found inside {section} content. "
+                    f"FIND must contain exact file content to match, "
+                    f"REPLACE must contain only the replacement text."
+                )
 
     def _generate_diff(self, edits: list[tuple[str, str, str, str]]) -> str:
         """Generate a unified diff from edit blocks.
