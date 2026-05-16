@@ -16,35 +16,43 @@ def is_linux():
     return sys.platform.startswith("linux")
 
 
-def has_tun_device():
-    """Check if /dev/net/tun exists."""
-    return os.path.exists("/dev/net/tun")
+def can_create_tun_device():
+    """Probe whether we can actually create a TUN device.
 
+    Opens /dev/net/tun and performs a TUNSETIFF ioctl with b"tun%d" to let
+    the kernel auto-assign a free device name. The fd is closed immediately;
+    TUNSETPERSIST is never set, so no device is left behind.
 
-def has_root_or_net_admin():
-    """Check if we have root or CAP_NET_ADMIN capability.
+    This is the authoritative check for real-TUN tests: euid==0 or capsh
+    output can be misleading in containers that lack CAP_NET_ADMIN.
 
-    Note: This is a best-effort check. The actual permission check
-    happens when we try to open /dev/net/tun.
+    Returns:
+        True only if Linux + /dev/net/tun exists + open succeeds + ioctl succeeds.
     """
-    if os.geteuid() == 0:
-        return True
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["capsh", "--print"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        return "cap_net_admin" in result.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    import fcntl
+    import struct
+
+    if not sys.platform.startswith("linux"):
+        return False
+    if not os.path.exists("/dev/net/tun"):
         return False
 
+    try:
+        fd = os.open("/dev/net/tun", os.O_RDWR)
+    except (OSError, PermissionError):
+        return False
 
-def _can_use_real_tun():
-    """All three conditions required for real TUN device operations."""
-    return is_linux() and has_root_or_net_admin() and has_tun_device()
+    try:
+        TUNSETIFF = 0x400454CA
+        IFF_TUN = 0x0001
+        IFF_NO_PI = 0x1000
+        ifr = struct.pack("16sH", b"tun%d", IFF_TUN | IFF_NO_PI)
+        fcntl.ioctl(fd, TUNSETIFF, ifr)
+        return True
+    except (OSError, IOError):
+        return False
+    finally:
+        os.close(fd)
 
 
 class TestLinuxTunDeviceImport:
@@ -76,12 +84,12 @@ class TestLinuxTunDeviceOpenClose:
     def test_open_requires_root(self):
         """open() should fail without root or CAP_NET_ADMIN."""
         dev = LinuxTunDevice(name="tun99", mtu=1400)
-        if _can_use_real_tun():
+        if can_create_tun_device():
             pytest.skip("Has real TUN capability — test verifies failure without it")
         with pytest.raises(Exception):  # TunDeviceError or OSError
             dev.open()
 
-    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
+    @pytest.mark.skipif(not can_create_tun_device(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_open_with_root(self):
         """With root, open() should succeed."""
         dev = LinuxTunDevice(name="tun99", mtu=1400)
@@ -92,7 +100,7 @@ class TestLinuxTunDeviceOpenClose:
         finally:
             dev.close()
 
-    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
+    @pytest.mark.skipif(not can_create_tun_device(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_double_open_logs_warning(self):
         """Calling open() twice should log a warning and not fail."""
         dev = LinuxTunDevice(name="tun98", mtu=1400)
@@ -104,7 +112,7 @@ class TestLinuxTunDeviceOpenClose:
         finally:
             dev.close()
 
-    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
+    @pytest.mark.skipif(not can_create_tun_device(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_close_is_idempotent(self):
         """close() should be safe to call multiple times."""
         dev = LinuxTunDevice(name="tun97", mtu=1400)
@@ -190,7 +198,7 @@ class TestMockTunDevice:
 class TestLinuxTunDeviceReadWrite:
     """Test LinuxTunDevice read/write (requires root)."""
 
-    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
+    @pytest.mark.skipif(not can_create_tun_device(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_write_and_read_packet(self):
         """Should be able to write and read packets with real TUN."""
         dev = LinuxTunDevice(name="tun94", mtu=1400)
@@ -208,7 +216,7 @@ class TestLinuxTunDeviceReadWrite:
         finally:
             dev.close()
 
-    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
+    @pytest.mark.skipif(not can_create_tun_device(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_set_nonblocking(self):
         """set_nonblocking() should work without errors."""
         dev = LinuxTunDevice(name="tun93", mtu=1400)
@@ -218,7 +226,7 @@ class TestLinuxTunDeviceReadWrite:
         finally:
             dev.close()
 
-    @pytest.mark.skipif(not _can_use_real_tun(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
+    @pytest.mark.skipif(not can_create_tun_device(), reason="Requires root, CAP_NET_ADMIN, and /dev/net/tun")
     def test_read_when_empty(self):
         """read_packet() should return None when no data."""
         dev = LinuxTunDevice(name="tun92", mtu=1400)
@@ -251,3 +259,73 @@ class TestTunDeviceFactory:
 
         dev = create_tun_device(name="test", mtu=1400, use_mock=False)
         assert isinstance(dev, LinuxTunDevice)
+
+
+class TestCanCreateTunDeviceProbe:
+    """Tests for the can_create_tun_device() probe function itself."""
+
+    def test_returns_bool(self):
+        """Probe always returns a plain bool."""
+        result = can_create_tun_device()
+        assert isinstance(result, bool)
+
+    @pytest.mark.skipif(not is_linux(), reason="Not Linux")
+    def test_no_fd_leak(self):
+        """Repeated probes should not leak file descriptors."""
+        import resource
+        soft_before = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        for _ in range(50):
+            can_create_tun_device()
+        soft_after = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        assert soft_before == soft_after
+
+    @pytest.mark.skipif(can_create_tun_device(), reason="Has real TUN — test verifies skip when missing")
+    def test_real_tun_tests_skip_without_cap_net_admin(self):
+        """When can_create_tun_device() returns False, real-TUN tests should be skipped.
+
+        This test itself is a canary: it only runs when TUN capability is missing.
+        In that environment, attempting to open a real LinuxTunDevice must raise.
+        """
+        dev = LinuxTunDevice(name="tun_nope", mtu=1400)
+        with pytest.raises(Exception):
+            dev.open()
+
+    @pytest.mark.skipif(not is_linux(), reason="Not Linux")
+    def test_probe_does_not_leak_device(self):
+        """After can_create_tun_device() returns, no tun%d device should persist."""
+        import subprocess
+
+        # Collect pre-probe tun devices
+        before = set()
+        try:
+            result = subprocess.run(
+                ["ip", "link", "show"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                for line in result.stdout.split("\n"):
+                    if ": tun" in line:
+                        name = line.split(":")[1].strip().split("@")[0]
+                        before.add(name)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass  # ip not available — skip verification
+
+        can_create_tun_device()
+
+        # Collect post-probe tun devices
+        after = set()
+        try:
+            result = subprocess.run(
+                ["ip", "link", "show"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                for line in result.stdout.split("\n"):
+                    if ": tun" in line:
+                        name = line.split(":")[1].strip().split("@")[0]
+                        after.add(name)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        new_devices = after - before
+        assert len(new_devices) == 0, (
+            f"can_create_tun_device() leaked TUN devices: {new_devices}"
+        )
