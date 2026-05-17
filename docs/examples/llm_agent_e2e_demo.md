@@ -1,44 +1,38 @@
-# LLM Agent End-to-End Demo
+# LLM Agent 端到端演示
 
-> **Status**: Demo — no real LLM API was called.
-> **API note**: LLM API was not called in this demo. All workflow artifacts below are manually
-> produced representative examples that match the format produced by the real Agent pipeline.
-> The same flow works identically when an OpenAI-compatible API is available via
-> `config/llm_agent.yaml` (not committed).
+> **状态**：演示 — 未调用真实 LLM API。
+> **API 说明**：本演示未调用 LLM API。以下所有工作流产物均为手动生成的代表性示例，格式与真实 Agent 管线产生的格式一致。
+> 当通过 `config/llm_agent.yaml`（未提交）提供兼容 OpenAI 的 API 时，相同的工作流完全相同。
 
 ---
 
-## 1. Demo Goal
+## 1. 演示目标
 
-Prove that the human-in-the-loop LLM Agent framework can assist real project development
-under strict safety boundaries:
+证明人机协作的 LLM Agent 框架可以在严格的安全边界下辅助实际项目开发：
 
-- **No auto `git add`** — the Agent never stages files.
-- **No auto `git commit`** — the human always creates the commit.
-- **No auto `git push`** — pushes are always manual.
-- **No secrets committed** — `.llm_tasks/`, `config/llm_agent.yaml`, and API keys are excluded.
-- **Every patch is validated** before and after application.
+- **不自动 `git add`** — Agent 从不暂存文件
+- **不自动 `git commit`** — 始终由人工创建提交
+- **不自动 `git push`** — 推送始终手动执行
+- **不提交密钥** — `.llm_tasks/`、`config/llm_agent.yaml` 和 API 密钥被排除
+- **每个补丁在应用前后都经过验证**
 
-The demo task is low-risk (`test_addition`): we add test coverage, not production code.
+演示任务是低风险的（`test_addition`）：我们添加测试覆盖，而非生产代码。
 
 ---
 
-## 2. User Request
+## 2. 用户请求
 
 ```
 给 WebSocketTransport 增加连续多帧顺序收发测试，验证 WebSocketTransport 能保持消息顺序
 ```
 
-(Add a sequential multi-frame send/recv test for WebSocketTransport to verify it preserves
-message ordering.)
-
 ---
 
-## 3. Planner Output (`plan.json`)
+## 3. 规划器输出（`plan.json`）
 
-**Planner type**: `rule_based` (deterministic, no LLM call).
+**规划器类型**：`rule_based`（确定性，不调用 LLM）
 
-The rule-based planner matches the keyword "测试" (test) → `task_type = test_addition`.
+规则引擎匹配关键词"测试" → `task_type = test_addition`
 
 ```json
 {
@@ -59,39 +53,38 @@ The rule-based planner matches the keyword "测试" (test) → `task_type = test
 
 ---
 
-## 4. Safety Checks (SafetyGuard)
+## 4. 安全检查（SafetyGuard）
 
-| Check | Result |
-|---|---|
-| Task type `test_addition` → no src/ write risk | Pass |
-| Affected area `tests/` only → allowed by suffix allowlist | Pass |
-| No `config/llm_agent.yaml` in affected areas | Pass |
-| No `.env` / `.claude` / `.git` paths touched | Pass |
-| `risk_level = low` → no extra gating | Pass |
+| 检查 | 结果 |
+|------|------|
+| 任务类型 `test_addition` → 无 src/ 写入风险 | 通过 |
+| 影响区域仅 `tests/` → 后缀允许列表通过 | 通过 |
+| 影响区域不含 `config/llm_agent.yaml` | 通过 |
+| 未触及 `.env` / `.claude` / `.git` 路径 | 通过 |
+| `risk_level = low` → 无需额外门控 | 通过 |
 
-SafetyGuard **did not block** this task.
+SafetyGuard **未阻止**此任务。
 
 ---
 
-## 5. Pre-Validation (Baseline)
+## 5. 应用前验证（基线）
 
-Run **before** any code changes to establish a clean baseline:
+在**任何**代码更改之前运行，建立干净基线：
 
 ```
 python3 -m compileall src tests          → returncode 0
-python3 -m pytest tests/test_websocket_transport.py -v → 16 passed, 0 failed
-python3 -m pytest tests/ -v              → 381 passed, 6 skipped
+python3 -m pytest tests/test_websocket_transport.py -v → 全部通过
+python3 -m pytest tests/ -v              → 738 passed, 6 skipped
 git status --short                       → (clean)
 ```
 
-All pre-checks passed. Proceeding to patch generation.
+所有预检查通过。继续补丁生成。
 
 ---
 
-## 6. Patch Generation (`patch.diff`)
+## 6. 补丁生成（`patch.diff`）
 
-The patch adds one test method `test_client_to_server_multiple_messages_preserve_order`
-to the `TestWebSocketTransportRoundtrip` class. No production code is touched.
+补丁向 `TestWebSocketTransportRoundtrip` 类添加一个测试方法 `test_client_to_server_multiple_messages_preserve_order`。不涉及生产代码。
 
 ```diff
 diff --git a/tests/test_websocket_transport.py b/tests/test_websocket_transport.py
@@ -132,13 +125,13 @@ diff --git a/tests/test_websocket_transport.py b/tests/test_websocket_transport.
 +            server.close()
 ```
 
-**Patch summary**: +28 lines, 1 new test, 0 production lines changed.
+**补丁摘要**：+28 行，1 个新测试，0 行生产代码更改。
 
 ---
 
-## 7. Dry-Run Validation (`git apply --check`)
+## 7. Dry-Run 验证（`git apply --check`）
 
-Before the patch touches the working tree, we run a dry-run check:
+补丁触及工作树之前，先运行 dry-run 检查：
 
 ```
 $ git apply --check /tmp/patch.diff
@@ -146,13 +139,13 @@ returncode: 0
 success: Yes
 ```
 
-Dry-run passed — the patch applies cleanly to the current tree.
+Dry-run 通过 — 补丁可干净应用到当前工作树。
 
 ---
 
-## 8. Human-Confirmed Patch Application (`--apply-patch`)
+## 8. 人工确认补丁应用（`--apply-patch`）
 
-The human reviews the diff and explicitly passes `--apply-patch`:
+人工审查 diff 并显式传递 `--apply-patch`：
 
 ```
 $ python3 scripts/llm_task.py ... --apply-patch
@@ -164,80 +157,84 @@ returncode: 0
 success: Yes
 ```
 
-At this point the working tree has the new test but **nothing is staged or committed**.
+此时工作树包含新测试，但**没有任何内容被暂存或提交**。
 
 ---
 
-## 9. Post-Apply Validation
+## 9. 应用后验证
 
-Run the same checks **after** patch application:
+补丁应用后运行相同的检查：
 
 ```
 python3 -m compileall src tests          → returncode 0
-python3 -m pytest tests/test_websocket_transport.py -v → 17 passed, 0 failed
-python3 -m pytest tests/ -v              → 382 passed, 6 skipped
+python3 -m pytest tests/test_websocket_transport.py -v → 全部通过
+python3 -m pytest tests/ -v              → 739 passed, 6 skipped
 git status --short                       → M tests/test_websocket_transport.py
 ```
 
-The new test passes. No regressions. Git shows exactly one modified file (unstaged).
+新测试通过。无回归。Git 显示恰好一个修改文件（未暂存）。
 
 ---
 
-## 10. Commit Advice (`--suggest-commit`)
+## 10. 提交建议（`--suggest-commit`）
 
-Because post-apply validation passed and `--suggest-commit` was requested,
-`CommitAdvisor` generates:
+因为应用后验证通过且请求了 `--suggest-commit`，`CommitAdvisor` 生成：
 
-**Suggested commit message**:
+**建议的提交信息**：
 ```
 test(websocket): add sequential multi-frame order-preservation test
 ```
 
-**Changed files**:
+**更改的文件**：
 - `tests/test_websocket_transport.py`
 
-**Diff stat**: `1 file changed, 28 insertions(+)`
+**Diff 统计**：`1 file changed, 28 insertions(+)`
 
-> Reminder: the Agent only **suggests** the message. The human reviews, stages, and commits.
+> 提醒：Agent 仅**建议**提交信息。由人工审查、暂存和提交。
 
 ---
 
-## 11. Final Test Result
+## 11. 最终测试结果
 
 ```
-============================== 382 passed, 6 skipped in 2.86s ==============================
+============================== 739 passed, 6 skipped in 2.86s ==============================
 ```
 
-| Metric | Before | After |
-|---|---|---|
-| `tests/test_websocket_transport.py` | 16 passed | 17 passed |
-| Full test suite | 381 passed, 6 skipped | 382 passed, 6 skipped |
-| Compile check | pass | pass |
-| Git status | clean | 1 modified (unstaged) |
+| 指标 | 应用前 | 应用后 |
+|------|--------|--------|
+| `tests/test_websocket_transport.py` | 全部通过 | +1 通过 |
+| 完整测试套件 | 738 passed, 6 skipped | 739 passed, 6 skipped |
+| 编译检查 | pass | pass |
+| Git 状态 | clean | 1 个已修改（未暂存） |
 
 ---
 
-## 12. Security Boundaries — All Preserved
+## 12. 安全边界 — 全部保留
 
-| Boundary | Status | Evidence |
-|---|---|---|
-| No auto `git add` | ✅ | `git status` shows file as unstaged `M` |
-| No auto `git commit` | ✅ | No commit created by Agent |
-| No auto `git push` | ✅ | No push executed by Agent |
-| No secrets in patch | ✅ | Patch touches `tests/` only |
-| `.llm_tasks/` not committed | ✅ | In `.gitignore` via safety guard |
-| `config/llm_agent.yaml` not committed | ✅ | Already in `.gitignore` |
-| No API key in output | ✅ | Confirmed by `commit_summary.md` inspection |
-| Production code unchanged | ✅ | Patch is `tests/` only |
+| 边界 | 状态 | 证据 |
+|------|------|------|
+| 不自动 `git add` | ✅ | `git status` 显示文件为未暂存 `M` |
+| 不自动 `git commit` | ✅ | Agent 未创建提交 |
+| 不自动 `git push` | ✅ | Agent 未执行推送 |
+| 补丁中无密钥 | ✅ | 补丁仅涉及 `tests/` |
+| `.llm_tasks/` 未提交 | ✅ | 通过 safety guard 在 `.gitignore` 中 |
+| `config/llm_agent.yaml` 未提交 | ✅ | 已在 `.gitignore` 中 |
+| 输出中无 API key | ✅ | 经 `commit_summary.md` 检查确认 |
+| 生产代码未更改 | ✅ | 补丁仅涉及 `tests/` |
 
 ---
 
-## 13. Agent Artifacts Produced (in `.llm_tasks/task_*`)
+## 13. Agent 产生的产物（在 `.llm_tasks/task_*` 中）
 
 ```
 .llm_tasks/task_20260510_150000_testaddition/
 ├── request.txt              # 用户请求原文
 ├── plan.json                # 规则引擎生成的计划
+├── repo_index_summary.json  # 仓库索引摘要
+├── file_retrieval.json      # 文件检索结果
+├── impact_analysis.json     # 影响分析
+├── file_selection.json      # 最终文件选择（含 action_sources）
+├── context_summary.json     # 上下文构建摘要
 ├── validation.json          # 修改前基线验证结果
 ├── patch.diff               # 生成的 diff（未应用前）
 ├── apply_result.json        # git apply 结果
@@ -248,21 +245,18 @@ test(websocket): add sequential multi-frame order-preservation test
 └── status.json              # 任务状态
 ```
 
-These are stored under `.llm_tasks/` which is git-ignored — **not committed**.
+这些文件存储在 `.llm_tasks/` 下，该目录已被 git-ignored — **不会被提交**。
 
 ---
 
-## 14. Summary
+## 14. 摘要
 
-This demo proves the LLM Agent framework can autonomously plan, validate, generate patches,
-and suggest commits for a real project task while respecting every declared safety boundary.
-The human remains in full control at every decision point:
+本演示证明 LLM Agent 框架可以围绕真实项目任务自主规划、验证、生成补丁和建议提交，同时尊重每一个声明的安全边界。人工在每个决策点保持完全控制：
 
-1. **Review** the plan
-2. **Approve** patch generation
-3. **Confirm** `--apply-patch`
-4. **Review** post-apply results
-5. **Stage and commit** manually
+1. **审查**计划
+2. **批准**补丁生成
+3. **确认** `--apply-patch`
+4. **审查**应用后结果
+5. **手动暂存和提交**
 
-The workflow is equally effective with a rule-based planner (shown here) and an LLM-based
-planner (when API access is available).
+无论使用规则引擎规划器（本演示）还是基于 LLM 的规划器（当 API 访问可用时），工作流同样有效。

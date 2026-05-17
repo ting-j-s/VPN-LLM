@@ -116,8 +116,12 @@ VPN-LLM 的 LLM Agent 采用 **Agent 化的文件选择管线**。LLM 不再凭�
 
 - **Extreme Risk Control** — 检测 .git/、.env、sudo、rm -rf、auto push 等极端风险，直接停止
 - **allowed_edit_files 约束** — PatchGenerator 拒绝编辑不在列表中的文件
-- **FIND 唯一性** — FIND 必须在目标文件中恰好出现 1 次
-- **allowed_create_paths 约束** — 新文件只能在允许的目录下创建
+- **FIND 唯一性** — FIND 必须在目标文件中恰好出现 1 次；空 FIND、纯空白 FIND 立即拒绝（Phase 11.2）
+- **Candidate 阈值** — 候选文件评分需 ≥0.9 才能进入 must_edit；低于阈值仅能进入 must_review（Phase 11.2）
+- **allowed_create_paths 约束** — 新文件只能在允许的目录下创建，且须匹配 allowed_create_patterns（fnmatch glob 命名模式）
+- **allowed_create_patterns 约束** — 禁止创建 README.md、隐藏文件、路径穿越、.env、.git、*.key、*.pem
+- **语义重试** — LLM patch action 错误时自动重试，提高补丁生成成功率（Phase 11.2）
+- **reasoning_content 回退** — 支持 LLM 响应中 `reasoning_content` 字段回退到 `content` 字段（Phase 11.2）
 - **Dry-run first** — 所有修改先 dry-run
 - **永不自动 commit/push**
 

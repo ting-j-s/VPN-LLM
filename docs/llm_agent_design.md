@@ -1,499 +1,286 @@
-# LLM Agent Design for VPN-LLM
+# VPN-LLM LLM Agent 设计文档
 
-## Overview
+## 概述
 
-A controlled LLM/Vibe Coding engineering proxy framework that allows users to
-request code changes in natural language (e.g. "switch the default transport
-from TCP to WebSocket"). The system calls an OpenAI-compatible LLM API to
-generate a modification plan and code changes, then automatically validates
-them.
+VPN-LLM 包含一个受控的 LLM/Vibe Coding 工程代理框架，允许用户用自然语言请求代码变更（例如"把默认传输协议从 TCP 改为 WebSocket"）。系统调用兼容 OpenAI 的 LLM API 生成修改计划和代码变更，并自动对其进行验证。
 
-**The LLM Agent is designed primarily for Transport/Core replacement tasks in
-VPN-LLM. It is not a general-purpose auto-coder.** Its main role is to help
-generate, validate, and audit changes to the outer transport protocol layer
-and VPN core/data-plane behavior. Every step includes safety boundaries,
-verification gates, and audit reports.
+**LLM Agent 专为 VPN-LLM 中的 Transport/Core 替换任务设计，不是通用自动编码器。** 其主要职责是帮助生成、验证和审计外层传输协议层和 VPN 核心/数据平面行为的变更。每一步都包含安全边界、验证 Gate 和审计报告。
 
-## Architecture
+## 架构
 
 ```
-User Request (natural language)
-       |
-       v
-  TaskPlanner           -- classify intent, generate structured TaskPlan
-       |
-       v
-  SafetyGuard           -- check blocked paths and commands BEFORE changes
-       |
-       v
-  Plan generation       -- LLM generates structured modification plan
-       |
-       v
-  Controlled execution  -- apply changes within allowed paths only
-       |
-       v
-  ValidationRunner      -- compileall, targeted tests, full tests
-       |
-       v
-  Failure recovery      -- if validation fails, feed errors back to LLM (max 3 retries)
-       |
-       v
-  Report output         -- structured report of what was done and results
+用户请求（自然语言）
+       │
+       ▼
+  TaskPlanner           -- 分类意图，生成结构化 TaskPlan
+       │
+       ▼
+  Extreme Risk Control  -- 检测极端风险（.git/、.env、sudo、rm -rf、auto push 等）
+       │
+       ▼
+  SafetyGuard           -- 对所有候选路径做安全检查
+       │
+       ▼
+  RepoIndexer           -- 扫描仓库，AST 提取 Python symbols/imports、提取 config keys、识别 test/doc 文件（纯本地，不用 LLM）
+       │
+       ▼
+  FileRetriever         -- 多路文件召回：关键词 + symbol + config key + task type 规则 + test/doc 映射
+       │
+       ▼
+  ImpactExpander        -- 影响面扩展：生成 FileSelection（must_edit / must_review / test / doc / allowed_create）
+       │
+       ▼
+  ContextBuilder        -- 读取 selected files 构建 LLM 上下文（12KB/file cap）
+       │
+       ▼
+  PatchGenerator        -- LLM 生成补丁，受 allowed_edit_files / allowed_create_paths 约束，FIND 唯一性校验
+       │
+       ▼
+  git apply --check     -- dry-run 校验 patch 是否可应用
+       │
+       ▼
+  --apply-patch         -- 人工闸门（显式确认，不可跳过）
+       │
+       ▼
+  Post-apply Validation -- compileall + pytest + git status
+       │
+       ▼
+  Replacement Smoke     -- Gate 1：smoke matrix（MockTun，localhost）
+       │
+       ▼
+  netns + TUN E2E       -- Gate 2/3：真实 TUN + IP 包转发验证（需 root，手动）
+       │
+       ▼
+  Report + Commit Advice -- 结构化报告 + Conventional Commits 建议（永不自动提交）
 ```
 
-## Replacement-Oriented Design
+## 替换导向设计
 
-The LLM Agent is architected around two replaceable dimensions of the VPN system:
+LLM Agent 围绕 VPN 系统的两个可替换维度构建：
 
-### Transport Replacement
+### Transport 替换
 
-When the user requests an outer protocol change (e.g., TCP → WebSocket, add TLS,
-switch to SSH), the agent:
+当用户请求外层协议变更（例如 TCP → WebSocket、添加 TLS、切换到 SSH）时，Agent：
 
-1. Classifies the request as `transport_change`
-2. Identifies the `target_transport`
-3. Generates a patch targeting `src/transport/` and related configs
-4. Validates via smoke matrix with the target transport
-5. Progresses through netns/TUN E2E validation for real-kernel verification
+1. 将请求分类为 `transport_change`
+2. 识别 `target_transport`
+3. 生成针对 `src/transport/` 和相关配置的补丁
+4. 通过 smoke matrix 使用目标 transport 进行验证
+5. 继续通过 netns/TUN E2E 验证进行真实内核验证
 
-### Core Replacement
+### Core 替换
 
-When the user requests a VPN Core behavior change (e.g., alter session validation,
-change Frame codec, modify forwarding strategy), the agent:
+当用户请求 VPN Core 行为变更（例如修改 session 验证、更改 Frame 编解码器、修改转发策略）时，Agent：
 
-1. Classifies the request as `core_change`
-2. Generates a patch targeting `src/core/`, `src/common/frame.py`, etc.
-3. Runs the full smoke matrix (mock, tcp, tls, websocket) since Core changes
-   affect all transport combinations
-4. Validates session_id isolation and TUN forwarding remain functional
+1. 将请求分类为 `core_change`
+2. 生成针对 `src/core/`、`src/common/frame.py` 等的补丁
+3. 运行完整 smoke matrix（mock, tcp, tls, websocket），因为 Core 变更影响所有 transport 组合
+4. 验证 session_id 隔离和 TUN 转发功能仍然正常
 
-### Validation-First Workflow
+### 验证优先工作流
 
-Every replacement, whether Transport or Core, must pass a layered validation
-pipeline before being considered complete:
+每次替换（无论是 Transport 还是 Core）都必须通过分层验证管线才能被视为完成：
 
 ```
 pytest → compileall → smoke matrix → netns/TUN E2E → benchmark
 ```
 
-The agent never skips gates. Each gate failure is surfaced in the report.
+Agent 从不跳过 Gate。每个 Gate 失败都会在报告中反映。
 
-### Human-in-the-Loop Safety
+### 人机协作安全
 
-- `--apply-patch` is an explicit human opt-in — never automatic
-- `git push` is blocked at the SafetyGuard level
-- Commit messages are suggestions only (`--suggest-commit`)
-- All changes remain local until the human explicitly commits and pushes
+- `--apply-patch` 是显式人工选择加入 — 从不自动执行
+- `git push` 在 SafetyGuard 级别被阻止
+- 提交信息仅为建议（`--suggest-commit`）
+- 所有更改保持本地状态，直到人工显式提交和推送
 
-## Key Principles
+## 核心原则
 
-### Safety Boundaries
+### 安全边界
 
-- **No automatic `git push`**: All changes stay local; pushing requires manual user action.
-- **No reading or modifying `.env`**: Prevents credential leaks.
-- **No reading or modifying `.claude/`**: Prevents config/token tampering.
-- **No reading or modifying private key files** (`*.key`, `id_rsa`, `id_ed25519`, etc.).
-- **No reading or modifying API key files**.
-- **No reading or modifying real certificates** (`cert.pem`, `key.pem` in config paths).
-- **No dangerous shell commands**: `sudo`, `rm -rf`, `curl | bash`, `wget | bash`, `git push` are blocked.
+- **不自动 `git push`**：所有更改保持本地；推送需要手动用户操作
+- **不读取或修改 `.env`**：防止凭据泄露
+- **不读取或修改 `.claude/`**：防止配置/token 被篡改
+- **不读取或修改私钥文件**（`*.key`、`id_rsa`、`id_ed25519` 等）
+- **不读取或修改 API key 文件**
+- **不读取或修改真实证书**（配置路径中的 `cert.pem`、`key.pem`）
+- **不执行危险 shell 命令**：阻止 `sudo`、`rm -rf`、`curl | bash`、`wget | bash`、`git push`
+- **LLM 不再猜文件**：文件选择由 RepoIndexer + FileRetriever + ImpactExpander 本地完成，LLM 只做 patch 生成且受 allowed_edit_files 约束
 
-### Protocol Change Synchronization
+### 协议变更同步
 
-When changing the transport protocol (e.g. TCP -> WebSocket), the agent MUST also:
+当更改传输协议（例如 TCP → WebSocket）时，Agent 必须同时：
 
-1. Update `config/server.yaml` and `config/client.yaml` (or equivalent transport-specific configs).
-2. Update `README.md` if it references the old transport default.
-3. Update or add relevant tests in `tests/`.
-4. Run the full test suite before reporting success.
+1. 更新 `config/server.yaml` 和 `config/client.yaml`（或等效的 transport 特定配置）
+2. 如果 README.md 引用了旧传输默认值，则更新之
+3. 在 `tests/` 中更新或添加相关测试
+4. 在报告成功之前运行完整测试套件
 
-### Verification Pipeline
+### 验证管线
 
-Every modification must pass:
+每次修改必须通过：
 
-| Stage | Command | Purpose |
-|-------|---------|---------|
-| 1. Compile check | `python3 -m compileall src tests` | Syntax validity |
-| 2. Targeted tests | `python3 -m pytest tests/<relevant> -v` | Feature-specific checks |
-| 3. Full test suite | `python3 -m pytest tests/ -v` | Regression check |
-| 4. Git status | `git status --short` | Audit what changed |
+| 阶段 | 命令 | 目的 |
+|------|------|------|
+| 1. 编译检查 | `python3 -m compileall src tests` | 语法有效性 |
+| 2. 针对性测试 | `python3 -m pytest tests/<relevant> -v` | 功能特定检查 |
+| 3. 完整测试套件 | `python3 -m pytest tests/ -v` | 回归检查 |
+| 4. Git 状态 | `git status --short` | 审计变更内容 |
 
-Optional:
-- Cross-process smoke test (TCP/WebSocket/TLS end-to-end with MockTun)
+可选：
+- 跨进程 smoke 测试（TCP/WebSocket/TLS 使用 MockTun 进行端到端测试）
 
-## Module Design
+## 模块设计
 
-### `src/llm/validation_runner.py` — ValidationRunner
+### `src/llm/task_planner.py` — TaskPlanner（规则引擎）
 
-Runs shell commands and captures structured results.
+基于规则的请求分类（MVP：不调用真实 LLM）。
 
-- `run_command(cmd)` -> `ValidationResult` (returncode, stdout, stderr)
-- `run_compileall()` -> `ValidationResult`
-- `run_targeted_tests(test_paths)` -> `ValidationResult`
-- `run_full_tests()` -> `ValidationResult`
-- `run_git_status()` -> `ValidationResult`
+任务类型：
+- `transport_change` — 请求提及 websocket/tcp/tls/ssh 时检测到
+- `core_change` — 请求提及 core/session/frame/forwarding/tun 时检测到
+- `config_change` — 请求提及 config/configuration 时检测到
+- `test_addition` — 请求提及 test/add test 时检测到
+- `docs_update` — 请求提及 doc/readme/documentation 时检测到
+- `bugfix` — 请求提及 fix/bug/error/repair 时检测到
+- `refactor` — 请求提及 refactor/restructure/clean 时检测到
+- `unknown` — 回退类型
 
-### `src/llm/safety_guard.py` — SafetyGuard
+从关键词中提取 `target_transport`：websocket、tcp、tls、ssh、mock。
 
-Enforces security boundaries before any file write or command execution.
+### `src/llm/llm_task_planner.py` — LLMTaskPlanner（基于 LLM）
 
-- `validate_write_path(path)` — blocks sensitive paths
-- `validate_command(command)` — blocks dangerous commands
-- Raises `SafetyError` on violation
+可选的基于 LLM 的任务规划器，使用兼容 OpenAI 的 API 进行 **请求理解、任务分解、候选文件预测和验证命令建议**。
 
-Blocked file patterns:
+**LLM 仅用于规划 — 它不能执行命令、写文件、修改代码、提交或推送。**
+
+关键设计决策：
+- **默认关闭**：`agent.use_llm_planner` 为 `false`。用户必须显式传递 `--use-llm-planner` 给 CLI
+- **API key 仅从环境变量读取**：API key 从环境变量（如 `LLM_API_KEY`）读取，从不在配置文件或代码中
+- **对所有 LLM 输出进行 Schema 验证**：每个字段在接受之前都进行类型检查和允许列表验证
+- **对所有 LLM 输出进行 SafetyGuard 检查**：每个候选文件路径和验证命令都由 SafetyGuard 检查
+
+LLM 输出 Schema：
+
+| 字段 | 类型 | 验证 |
+|------|------|------|
+| `task_type` | string | 必须在允许列表中 |
+| `target_transport` | string 或 null | 必须在允许列表中或为 null |
+| `summary` | string | 必须非空 |
+| `candidate_files` | list of strings | 每个路径由 SafetyGuard 检查 |
+| `validation_commands` | list of strings | 每个命令由 SafetyGuard 检查 |
+| `risk_level` | string | 必须为 low、medium 或 high |
+
+> **注意**：`candidate_files` 仅作为 hints（提示），最终文件选择由 RepoIndexer + FileRetriever + ImpactExpander 本地完成。
+
+### `src/llm/repo_indexer.py` — RepoIndexer（仓库索引器）
+
+纯本地仓库扫描器，不使用 LLM：
+
+- 递归扫描仓库目录
+- 忽略 .git、__pycache__、.llm_tasks、venv 等目录
+- 忽略 .env、.key、.pem 等敏感文件
+- 对 Python 文件使用 `ast` 提取 class/function/import
+- 对 YAML/JSON 提取顶层 config keys
+- 识别 test files（test_*.py、*_test.py）
+- 识别 doc files（README.md、docs/*.md）
+- 输出可序列化的 `RepoIndex`
+
+### `src/llm/file_retriever.py` — FileRetriever（文件检索器）
+
+多路文件召回策略（按优先级排序）：
+
+| # | 策略 | 权重 | 说明 |
+|---|---|---|---|
+| 1 | 关键词匹配 | 0.90 | 请求中的关键词匹配文件路径 |
+| 2 | Symbol 匹配 | 0.85 | 关键词匹配 Python class/function/import 名 |
+| 3 | Config key 匹配 | 0.80 | 关键词匹配 YAML/JSON 顶层 key |
+| 4 | Task type 规则 | 0.70 | 根据 task_type 召回预定义路径模式 |
+| 5 | Test 文件映射 | 0.50 | 根据 task_type 映射相关测试文件 |
+| 6 | Doc 文件映射 | 0.40 | 根据 task_type 映射相关文档文件 |
+
+LLM planner hints 以 0.60 分数合并。
+
+### `src/llm/impact_expander.py` — ImpactExpander（影响面扩展器）
+
+规则驱动的影响面扩展，生成 FileSelection：
+
+- `must_edit_files`：仅高置信度文件（规则结构性文件 + 评分 ≥0.9 的候选文件）
+- `must_review_files`：相关但不一定修改的文件
+- `test_files` / `doc_files`
+- `allowed_create_paths`：创建新文件的目录前缀
+- `allowed_create_patterns`：fnmatch glob 命名模式（如 `*_transport.py`、`test_*.py`）
+- `action_sources`：每个文件分类来源的可审计追踪
+- `rejected_hints`：LLM 猜的不存在的文件
+
+### `src/llm/context_builder.py` — ContextBuilder（上下文构建器）
+
+读取 selected files 构建 LLM 上下文：
+- 每个文件最多 12KB（防止 token 溢出）
+- 附带 candidates 详情、allowed paths、rejected hints
+- 附带 test_files 和 doc_files 路径列表
+
+### `src/llm/patch_generator.py` — PatchGenerator（补丁生成器）
+
+使用 LLM API 生成统一 diff。**补丁保存到磁盘并通过 `git apply --check` 验证，但从不自动应用、提交或推送。**
+
+关键约束：
+1. **FILE 必须在 allowed_edit_files 中** — 否则拒绝（除非 ACTION: create）
+2. **ACTION: create 必须在 allowed_create_paths 下** — 否则拒绝
+3. **FIND 必须恰好出现 1 次** — 0 次或多次匹配均拒绝；空 FIND、纯空白 FIND 均拒绝
+4. **敏感路径扫描** — .env、.git、.key、.pem、README.md（禁止 create）、隐藏文件、路径穿越均永远拒绝
+5. **Secret scanning** — 扫描 private key、API key、password、JWT 等模式
+6. **语义重试** — LLM patch action 错误时自动重试（Phase 11.2）
+7. **reasoning_content 回退** — 支持 `reasoning_content` 字段回退到 `content` 字段（Phase 11.2）
+
+### `src/llm/safety_guard.py` — SafetyGuard（安全守卫）
+
+在任何文件写入或命令执行之前强制执行安全边界。
+
+阻止的文件模式：
 - `.env`
-- `.claude/` (directory or files within)
-- `*.key` (private keys)
-- `id_rsa`, `id_ed25519`, `id_ecdsa` (SSH private keys)
-- `cert.pem`, `key.pem` (certificate material)
-- Files in `.git/` (git internals)
+- `.claude/`（目录或内部文件）
+- `*.key`（私钥）
+- `id_rsa`、`id_ed25519`、`id_ecdsa`（SSH 私钥）
+- `cert.pem`、`key.pem`（证书材料）
+- `.git/` 中的文件（git 内部文件）
 
-Blocked command patterns:
+阻止的命令模式：
 - `sudo`
-- `rm -rf` (and variants like `rm -r`, `rm -fr`)
-- `curl ... | bash`, `wget ... | bash`, `curl ... | sh`
-- `git push` (automatic push is disallowed)
+- `rm -rf`（及变体如 `rm -r`、`rm -fr`）
+- `curl ... | bash`、`wget ... | bash`、`curl ... | sh`
+- `git push`（禁止自动推送）
 
-### `src/llm/task_planner.py` — TaskPlanner
+### `src/llm/validation_runner.py` — ValidationRunner（验证执行器）
 
-Rule-based classification of user requests (MVP: no real LLM call).
+运行 shell 命令并捕获结构化结果：
 
-Task types:
-- `transport_change` — detected when request mentions websocket/tcp/tls/ssh
-- `core_change` — detected when request mentions core/session/frame/forwarding/tun
-- `config_change` — detected when request mentions config/configuration
-- `test_addition` — detected when request mentions test/add test
-- `docs_update` — detected when request mentions doc/readme/documentation
-- `bugfix` — detected when request mentions fix/bug/error/repair
-- `refactor` — detected when request mentions refactor/restructure/clean
-- `unknown` — fallback
+- `run_command(cmd)` → `ValidationResult`（returncode、stdout、stderr）
+- `run_compileall()` / `run_full_tests()` / `run_git_status()`
+- `ensure_clean_worktree()` — 如果工作树有未提交更改则抛出 `DirtyWorktreeError`
+- `run_git_apply(patch_path)` — 通过 `["git", "apply", patch_path]` 应用补丁（不使用 shell）
 
-Extracts `target_transport` from keywords: websocket, tcp, tls, ssh, mock.
+### `src/llm/replacement_validator.py` — ReplacementValidator（替换验证器）
 
-### `scripts/llm_task.py` — CLI Entry Point
+编排 smoke matrix 运行：
+- 根据 `target_transport` 和 `task_type` 选择 transports
+- 运行 `smoke_replacement_matrix.py --json`
+- 解析 JSON 输出
+- 报告每个 transport 的 pass/fail/skip
 
-```
-python3 scripts/llm_task.py --request "switch default transport to WebSocket"
-```
+### `src/llm/commit_advisor.py` — CommitAdvisor（提交建议器）
 
-Flow:
-1. Parse `--request`
-2. TaskPlanner.plan() -> TaskPlan
-3. Print plan
-4. SafetyGuard checks
-5. ValidationRunner runs compileall + targeted tests + full tests + git status
-6. Print structured report
+只读类，从不修改仓库：
+- 生成 Conventional Commits 格式的提交信息
+- 运行 `git diff --stat` 和 `git diff --name-only`
+- 写入 `suggested_commit_message.txt` 和 `commit_summary.md`
 
-### `scripts/validate_llm_task.sh` — Validation Script
+提交信息格式：
 
-Runs compileall, targeted tests, full test suite, and git status. Serves as a
-quick validation entry point for the LLM agent framework.
-
-## MVP Scope
-
-- TaskPlanner uses rule-based classification (no real LLM API call)
-- `llm_task.py` performs plan + validation only; does NOT generate or apply code changes
-- No automatic `git commit` or `git push`
-- All safety boundaries enforced
-
-## Phase 9.7: Optional LLM-Based Task Planner
-
-### Overview
-
-An optional LLM-based task planner (`LLMTaskPlanner`) that uses an
-OpenAI-compatible API for **request understanding, task decomposition,
-candidate file prediction, and validation command suggestion**.
-
-**The LLM is ONLY used for planning — it cannot execute commands, write files,
-modify code, commit, or push.**
-
-### Key Design Decisions
-
-- **Default OFF**: `agent.use_llm_planner` is `false`. Users must explicitly
-  pass `--use-llm-planner` to the CLI.
-- **API key from environment only**: The API key is read from an environment
-  variable (e.g. `LLM_API_KEY`), never from config files or code.
-- **Schema validation on ALL LLM output**: Every field is type-checked and
-  whitelist-validated before acceptance.
-- **SafetyGuard on ALL LLM output**: Every candidate file path is checked
-  by `SafetyGuard.validate_write_path()`. Every validation command is checked
-  by `SafetyGuard.validate_command()`. Any violation raises
-  `LLMTaskPlannerError` — the plan is rejected, nothing is written.
-- **Config file is git-ignored**: `config/llm_agent.yaml` is in `.gitignore`.
-  Only the example file `config/llm_agent.yaml.example` is committed.
-
-### LLM Output Schema
-
-The LLM must return a JSON object with these fields:
-
-| Field | Type | Validation |
-|-------|------|------------|
-| `task_type` | string | Must be in: transport_change, config_change, test_addition, docs_update, bugfix, refactor, unknown |
-| `target_transport` | string or null | Must be in: tcp, tls, ssh, websocket, mock, or null |
-| `summary` | string | Must be non-empty |
-| `candidate_files` | list of strings | Each path checked by SafetyGuard.validate_write_path() |
-| `validation_commands` | list of strings | Each command checked by SafetyGuard.validate_command() |
-| `risk_level` | string | Must be in: low, medium, high |
-
-### Failure Modes
-
-If the LLM returns:
-- **Invalid JSON** → `LLMTaskPlannerError("not valid JSON")`
-- **Missing fields** → `LLMTaskPlannerError("missing required fields: [...]")`
-- **Illegal task_type** → `LLMTaskPlannerError("Invalid task_type")`
-- **Illegal transport** → `LLMTaskPlannerError("Invalid target_transport")`
-- **Dangerous file path** → `LLMTaskPlannerError("unsafe file path")`
-- **Dangerous command** → `LLMTaskPlannerError("unsafe command")`
-
-All failures are hard errors — the system never silently accepts invalid or
-dangerous LLM output.
-
-### Configuration
-
-See `config/llm_agent.yaml.example` for the full configuration format.
-
-### CLI Usage
-
-```
-# Rule-based (default, no network)
-python3 scripts/llm_task.py --request "..."
-
-# LLM-based
-python3 scripts/llm_task.py --request "..." --use-llm-planner
-```
-
-## Phase 9.8: LLM Patch Generation (Dry-Run Only)
-
-### Overview
-
-An optional LLM-based patch generator (`LLMPatchGenerator`) that produces unified
-diffs for a given task plan. **The patch is saved to disk and validated via
-`git apply --check` but is NEVER automatically applied, committed, or pushed.**
-
-The LLM is ONLY used for diff generation — it cannot write files, apply patches,
-commit, or push. The generated patch must pass strict format validation AND
-SafetyGuard checks before being saved.
-
-### Key Design Decisions
-
-- **Requires `--generate-patch` AND `--use-llm-planner`**: Both flags must be
-  present. `--generate-patch` alone exits with an error.
-- **Dry-run only**: The CLI saves `patch.diff` and runs `git apply --check`.
-  The patch is NOT applied. A human must review and manually apply it.
-- **Dual safety validation**: Every file path in the diff is checked against
-  SafetyGuard AND a patch-specific blocklist. Diff content is scanned for
-  secrets.
-- **Strict diff format**: The LLM output must contain `diff --git`, `--- a/`,
-  and `+++ b/` headers. Non-diff output is rejected.
-
-### Patch Blocklist
-
-Beyond the standard SafetyGuard paths, the patch generator also blocks:
-- `config/llm_agent.yaml` and `config/llm_agent.yaml.example`
-- `.claude/` prefix paths
-- `.git/` prefix paths
-- `*.key`, `*.pem`, `*.crt` extensions
-
-### Secret Scanning
-
-The diff content is scanned for:
-- `-----BEGIN ... PRIVATE KEY-----` (RSA, EC, DSA, OpenSSH)
-- `-----BEGIN CERTIFICATE-----`
-- `sk-...` API key patterns
-- `AIza...` Google API keys
-- `eyJ...` JWT tokens (base64url-encoded JSON)
-- `api_key = "..."` / `api_key: "..."` assignments
-- `password = "..."` / `password: "..."` assignments
-- `Bearer ...` authorization tokens
-
-Any match causes immediate rejection.
-
-### Validation Pipeline (Extended)
-
-| Stage | Command | Purpose |
-|-------|---------|---------|
-| 1. Compile check | `python3 -m compileall src tests` | Syntax validity |
-| 2. Targeted tests | `python3 -m pytest tests/<relevant> -v` | Feature-specific checks |
-| 3. Full test suite | `python3 -m pytest tests/ -v` | Regression check |
-| 4. Git status | `git status --short` | Audit what changed |
-| 5. Patch generation | LLM API call | Generate unified diff (optional) |
-| 6. Git apply check | `git apply --check <patch.diff>` | Validate patch applicability |
-
-### CLI Usage
-
-```bash
-# Generate patch (dry-run)
-python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch
-
-# Error: --generate-patch alone is rejected
-python3 scripts/llm_task.py --request "switch to websocket" --generate-patch
-# Error: --generate-patch requires --use-llm-planner
-```
-
-### Module: `src/llm/patch_generator.py`
-
-- `LLMPatchGenerator(config_path)` — loads config, reads API key from env
-- `generate(request, task_plan, repo_context) -> str` — returns validated diff
-- `_extract_diff(raw)` — strips markdown fences, validates diff format
-- `_parse_file_paths(diff_text)` — extracts file paths from diff headers
-- `_validate_file_path(path)` — SafetyGuard + patch-specific blocklist
-- `_scan_for_secrets(diff_text)` — rejects diffs containing secrets
-
-### Task Record Extensions
-
-- `patch.diff` — the raw generated unified diff
-- `validation.json` now includes `git_apply_check` result
-- `report.md` includes Patch Generation section with file list and status
-
-### Report Extensions
-
-When a patch is generated, the report includes:
-- **Patch Generation** section with status (always "not applied"), size, file list
-- **Git Apply Check** result section
-- Conclusion note: "Patch was generated and saved as `patch.diff` — NOT applied."
-
-## Phase 9.9: Human-Confirmed Patch Application
-
-### Overview
-
-An explicit opt-in mechanism (`--apply-patch`) for applying a generated and
-validated patch to the working tree. **The patch is NEVER applied automatically.**
-A human must explicitly pass `--apply-patch`. Post-apply validation runs
-automatically, but the system never commits or pushes.
-
-### Key Design Decisions
-
-- **Explicit opt-in**: `--apply-patch` is required. Without it, patch generation
-  remains dry-run only.
-- **Pre-condition gates**: All of these must be true before apply:
-  1. `--apply-patch` is passed
-  2. `--generate-patch` is passed (enforced by CLI)
-  3. `--use-llm-planner` is passed (enforced by CLI)
-  4. `git apply --check` has succeeded
-  5. Working tree is clean (unless `--allow-dirty-worktree` is passed)
-- **No auto-commit, no auto-push**: The system applies the patch to the working
-  tree, runs validation, and reports results. All committing and pushing is
-  manual.
-- **Git apply bypasses SafetyGuard command validation**: `run_git_apply()` uses
-  a controlled argument list (`["git", "apply", patch_path]`) via subprocess
-  without shell interpolation, so it is not subject to `validate_command()`
-  interception. The patch path must be under `.llm_tasks/`.
-- **Post-apply validation**: After apply, the system automatically runs:
-  - `python3 -m compileall src tests`
-  - LLM-suggested validation commands (only safe ones, re-checked by SafetyGuard)
-  - Targeted tests for the target transport
-  - `python3 -m pytest tests/ -v`
-  - `git status --short`
-
-### Clean Worktree Requirement
-
-`ValidationRunner.ensure_clean_worktree()` runs `git status --porcelain`. If
-the output is non-empty, a `DirtyWorktreeError` is raised. The CLI catches this
-and exits with an error unless `--allow-dirty-worktree` is passed.
-
-This prevents accidental application on top of uncommitted changes.
-
-### Post-Apply Report Section
-
-The report includes a **Patch Application** section showing:
-- `Patch applied: Yes` / `Patch applied: No`
-- Git apply returncode
-- Post-apply validation results (compile check, targeted tests, full test suite, git status)
-- Guidance: "Commit the changes manually when ready" on success, or
-  "Do not commit until failures are fixed" on failure
-
-### CLI Usage
-
-```bash
-# Default: dry-run only (Phase 9.8 behavior)
-python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch
-
-# Apply after check passes (requires clean worktree)
-python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch --apply-patch
-
-# Apply even if worktree is dirty
-python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch --apply-patch --allow-dirty-worktree
-
-# Error: --apply-patch requires --generate-patch
-python3 scripts/llm_task.py --request "switch to websocket" --apply-patch
-# Error: --apply-patch requires --generate-patch
-```
-
-### Module: `src/llm/validation_runner.py`
-
-New methods:
-- `ensure_clean_worktree()` — raises `DirtyWorktreeError` if working tree has uncommitted changes
-- `run_git_apply(patch_path)` — applies patch via `["git", "apply", patch_path]` (no shell). Requires path under `.llm_tasks/`. Returns `ValidationResult`.
-
-### Module: `src/llm/task_record.py`
-
-New method:
-- `save_apply_result(task_id, apply_result, post_apply_results)` — saves `apply_result.json` and `post_apply_validation.json`
-
-### Module: `src/llm/report_writer.py`
-
-Extended `write_report()` parameters:
-- `apply_result` — `ValidationResult` from `git apply`, or `None`
-- `post_apply_validation` — dict of label → `ValidationResult` for post-apply checks
-
-### SafetyGuard
-
-- `git push` remains blocked by `BLOCKED_COMMAND_PATTERNS`
-- `run_git_apply()` uses a fixed argument list (not `shell=True`), so it does not pass through `validate_command()`. This avoids accidental blocking of `git apply`.
-- Patch path must be under `.llm_tasks/` — arbitrary external paths are rejected
-
-### Failure Handling
-
-| Condition | Behavior |
-|-----------|----------|
-| `--apply-patch` without `--generate-patch` | CLI exits with error |
-| `git apply --check` failed | CLI exits — nothing applied |
-| Dirty worktree (no `--allow-dirty-worktree`) | CLI exits with `DirtyWorktreeError` |
-| `git apply` fails | Patch not applied; report shows failure |
-| Post-apply validation fails | Report says "Do not commit until failures are fixed" |
-| Post-apply validation passes | Report says "Commit the changes manually when ready" |
-
-### Artifacts
-
-When `--apply-patch` is used, the task directory additionally contains:
-- `apply_result.json` — git apply result
-- `post_apply_validation.json` — post-apply validation results
-
-## Phase 9.10: Commit Advice Generation
-
-### Overview
-
-After a successful patch application and post-apply validation, the system can
-generate a commit message suggestion and change summary. **The commit is NEVER
-created automatically.** The human remains the final authority on all
-version-control actions.
-
-### Key Design Decisions
-
-- **Explicit opt-in**: `--suggest-commit` is required. Without it, no commit
-  advice is generated.
-- **Strict pre-condition gating**: Commit advice is only generated when ALL of
-  these are true:
-  1. `--suggest-commit` is passed
-  2. `--apply-patch` is passed (enforced by CLI)
-  3. Patch application succeeded (`git apply` returncode == 0)
-  4. All post-apply validation checks passed
-- **Rule-based message generation**: The first version uses a simple rule-based
-  approach (no real LLM call) to generate the commit message. This ensures
-  deterministic, predictable output.
-- **No auto-commit, no auto-push**: The system writes `suggested_commit_message.txt`
-  and `commit_summary.md` to the task directory. All committing and pushing is
-  manual.
-- **Validation failure blocks advice**: If any post-apply check fails, the
-  suggested commit message is prefixed with `[DO NOT COMMIT]`.
-
-### Commit Message Format
-
-The commit message follows the Conventional Commits format:
-
-| Task Type | Prefix | Example |
-|-----------|--------|---------|
+| 任务类型 | 前缀 | 示例 |
+|---------|------|------|
 | `transport_change` | `feat(transport)` | `feat(websocket): switch default transport` |
+| `core_change` | `feat(core)` | `feat(core): add strict session validation` |
 | `config_change` | `config` | `config: update server port` |
 | `test_addition` | `test` | `test: add websocket transport tests` |
 | `docs_update` | `docs` | `docs: update transport documentation` |
@@ -501,172 +288,102 @@ The commit message follows the Conventional Commits format:
 | `refactor` | `refactor` | `refactor: extract transport base class` |
 | `unknown` | `chore` | `chore: apply changes` |
 
-The scope `(transport)` is included when `target_transport` is set. The subject
-line is taken from the task plan description (truncated to 72 chars).
+### `src/llm/task_record.py` — TaskRecordManager（任务记录管理器）
 
-### Module: `src/llm/commit_advisor.py`
+管理任务目录（`.llm_tasks/<task_id>/`），持久化：
+- `request.txt` — 用户请求原文
+- `plan.json` — 任务计划
+- `patch.diff` — 生成的统一 diff
+- `validation.json` — 基线验证结果
+- `apply_result.json` — git apply 结果
+- `post_apply_validation.json` — 应用后验证结果
+- `replacement_validation.json` — smoke matrix 结果
+- `repo_index_summary.json` — 仓库索引摘要
+- `file_retrieval.json` — 文件检索结果
+- `impact_analysis.json` — 影响分析结果
+- `file_selection.json` — 最终文件选择（含 action_sources）
+- `context_summary.json` — 上下文构建摘要
+- `suggested_commit_message.txt` — 建议的提交信息
+- `commit_summary.md` — 提交建议摘要
+- `report.md` — 完整报告
 
-- `CommitAdvisor` — read-only class, never modifies the repository
-- `collect_diff_summary()` → dict — runs `git diff --stat` and `git diff --name-only`
-- `suggest_commit_message(task_plan, changed_files, validation_passed)` → str
-- `write_commit_advice(task_dir, advice)` — writes `suggested_commit_message.txt`
-  and `commit_summary.md`
+### `src/llm/report_writer.py` — ReportWriter（报告生成器）
 
-### Module: `src/llm/task_record.py`
+生成结构化 Markdown 报告，包含以下部分：
+- Task Info
+- Planned Changes
+- File Selection（Phase 11.1+）
+- Patch Generation（如果生成）
+- Patch Application（如果应用）
+- Post-apply Validation
+- Replacement Smoke Validation（如果运行）
+- Commit Advice（如果生成）
+- Failure Summary
+- Conclusion
 
-New method:
-- `save_commit_advice(task_id, advice)` — persists commit advice files
+### `scripts/llm_task.py` — CLI 入口
 
-### Module: `src/llm/report_writer.py`
-
-Extended `write_report()` parameters:
-- `commit_message` — suggested commit message, or None
-- `commit_changed_files` — list of changed file paths, or None
-
-A **Commit Advice** section appears in the report when commit advice was
-generated, containing:
-- "Commit was suggested but NOT created" notice
-- "Push was NOT performed" notice
-- Suggested commit message in a code block
-- Changed file list
-- Manual review guidance
-
-### CLI Usage
-
-```bash
-# Default: no commit advice (even with apply)
-python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch --apply-patch
-
-# Generate commit advice after successful apply
-python3 scripts/llm_task.py --request "switch to websocket" --use-llm-planner --generate-patch --apply-patch --suggest-commit
-
-# Error: --suggest-commit requires --apply-patch
-python3 scripts/llm_task.py --request "switch to websocket" --suggest-commit
-# Error: --suggest-commit requires --apply-patch
+```
+python3 scripts/llm_task.py --request "把默认传输协议换成 WebSocket"
 ```
 
-### Artifacts
+完整参数门控：
+- `--request` — 用户请求文本
+- `--use-llm-planner` — 启用 LLM 规划器（默认为规则引擎）
+- `--generate-patch` — 生成补丁（需要 `--use-llm-planner`）
+- `--apply-patch` — 应用补丁（需要 `--generate-patch`）
+- `--allow-dirty-worktree` — 允许脏工作树情况下应用
+- `--run-replacement-smoke` — 运行 smoke matrix
+- `--suggest-commit` — 生成提交建议（需要 `--apply-patch`）
 
-When `--suggest-commit` is used and all conditions are met, the task directory
-additionally contains:
-- `suggested_commit_message.txt` — one-line conventional commit message
-- `commit_summary.md` — markdown summary with changed files, diff stat, and guidance
+## 验证 Gate 体系
 
-### Safety
+| Gate | 目的 | 命令 | 自动化 |
+|------|------|------|--------|
+| **Gate 1** | 单元/集成测试 | `python3 -m pytest tests/ -v` | 完全自动化 |
+| **Gate 2** | Replacement smoke matrix | `python3 scripts/smoke_replacement_matrix.py --json` | 完全自动化 |
+| **Gate 3** | netns + TUN 环境验证 | `sudo bash scripts/phase10_netns_tun_validation.sh --transport tcp` | 半自动化（需 root） |
+| **Gate 4** | netns + TUN E2E ping | `sudo bash scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping` | 半自动化（需 root） |
+| **Gate 5** | benchmark / stability | 计划中 | TODO |
 
-- The `CommitAdvisor` class never runs `git add`, `git commit`, or `git push`
-- All git commands are read-only: `git diff --stat` and `git diff --name-only`
-- Commit advice files are written to the task directory (under `.llm_tasks/`),
-  never to arbitrary paths
+## Phase 11 增强：本地索引驱动的文件选择
 
-## Phase 10.1: Replacement Smoke Validation Matrix
+Phase 11.1 和 11.2 将 LLM Agent 工作流从"LLM 猜测文件"升级为"本地索引驱动的文件选择管线"：
 
-See [docs/phase10_replacement_smoke_matrix.md](phase10_replacement_smoke_matrix.md) for full details.
+### Phase 11.1 加固要点
 
-`scripts/smoke_replacement_matrix.py` is a unified smoke matrix that validates
-minimal runnability of Transport × Core combinations. It is designed as the
-first runtime validation gate for LLM-driven Transport or Core replacement.
+- **must_edit / must_review 严格分区** — must_edit 仅包含高置信度文件；纯 planner hint 只能进入 must_review
+- **allowed_create_paths 收紧** — 加入 fnmatch glob 命名模式；README.md 禁止 create；隐藏文件/路径穿越/危险后缀均拒绝
+- **FIND 唯一性校验增强** — 空 FIND、纯空白 FIND 均立即拒绝
+- **action_sources 可审计** — file_selection.json 记录每个文件的分类来源
+- **Planner hints 不能直接授予 must_edit** — LLM planner 的 candidate_files 仅是 hints（0.6 分），必须经过 FileRetriever 多路召回 + ImpactExpander 评分才能进入 must_edit
 
-Supported transports: mock, tcp, tls, websocket, ssh (always skip).
-Supported cores: default (extensible via `CORE_SMOKE_REGISTRY`).
+### Phase 11.2 加固要点
 
-Output is available as text or JSON (`--json`). Exit code 0 = all pass/skip,
-exit code 1 = any fail.
+- **Candidate 阈值过滤** — FileRetriever 候选文件必须达到分数阈值才能被考虑
+- **空 FIND 拒绝** — PatchGenerator 严格拒绝空 FIND 和纯空白 FIND
+- **reasoning_content 回退** — 支持 LLM 响应中 `reasoning_content` 字段回退到 `content` 字段
+- **语义重试** — LLM patch action 错误时自动重试，提高补丁生成成功率
 
-## Phase 10.2: Replacement Smoke Integration with LLM Agent
+## Phase 10.6：netns + TUN E2E 验证结果
 
-### Overview
+**日期**：2026-05-10 | **环境**：Debian 12, Linux 6.1.0-45-amd64
 
-Glues the Phase 10.1 smoke matrix into the LLM Agent post-apply validation
-pipeline. When the human passes `--run-replacement-smoke`, the agent
-automatically:
+| Transport | 默认模式 | E2E Ping | 丢包率 | RTT |
+|-----------|---------|----------|--------|-----|
+| TCP | PASS | PASS | 0% | 0.5–1.8ms |
+| WebSocket | PASS | PASS | 0% | 2.5–4.6ms |
 
-1. Selects appropriate transports based on `target_transport` and `task_type`
-2. Runs `smoke_replacement_matrix.py --json`
-3. Parses results
-4. Saves `replacement_validation.json` to the task directory
-5. Includes a "Replacement Smoke Validation" section in the report
-6. If any smoke fails, the report states: "Do not commit until replacement smoke failures are fixed."
+**关键发现**：
+- 共享 `--session-id` 机制工作正常 — E2E ping 期间无 "Dropping frame" 错误
+- 不需要 Core 更改 — ServerCore/ClientCore 已支持显式 session ID
+- Session ID 隔离得以保留 — 不匹配丢弃逻辑未被修改
+- WebSocket 比原始 TCP 增加约 2–3ms 开销（由于 framing 和 async event loop）
 
-Explicit opt-in only — never runs by default.
+## 未来扩展
 
-### New Modules
-
-| Module | Purpose |
-|---|---|
-| `src/llm/replacement_validator.py` | `ReplacementValidator` — selects transports, runs smoke matrix, parses JSON |
-| `src/llm/task_planner.py` | Added `core_change` task type with keyword detection |
-| `src/llm/llm_task_planner.py` | Added `core_change` to valid task type whitelist and system prompt |
-| `src/llm/task_record.py` | Added `save_replacement_validation()` |
-| `src/llm/report_writer.py` | Added "Replacement Smoke Validation" report section |
-| `scripts/llm_task.py` | Added `--run-replacement-smoke`, `--include-tls-smoke`, `--include-ssh-smoke` |
-
-### CLI Usage
-
-```bash
-# Transport change + replacement smoke
-python3 scripts/llm_task.py \
-    --request "switch transport to websocket" \
-    --use-llm-planner \
-    --generate-patch --apply-patch \
-    --run-replacement-smoke
-
-# Core change + replacement smoke (runs broad matrix: mock,tcp,tls,websocket)
-python3 scripts/llm_task.py \
-    --request "replace the VPN core session validation strategy" \
-    --use-llm-planner \
-    --generate-patch --apply-patch \
-    --run-replacement-smoke
-```
-
-### Transport Selection Rules
-
-| Condition | Selected Transports |
-|---|---|
-| `target_transport` = websocket | mock, websocket |
-| `target_transport` = tcp | mock, tcp |
-| `target_transport` = tls | mock, tls |
-| `target_transport` = ssh | mock, ssh |
-| `task_type` = core_change / refactor / bugfix / unknown | mock, tcp, tls, websocket |
-| All other types | mock, tcp, websocket |
-
-### Safety
-
-- Never runs without explicit `--run-replacement-smoke`
-- No real SSH connection (SSH always skip unless `--include-ssh-smoke`)
-- No real TUN device (uses MockTunDevice in core smoke)
-- TLS certs are ephemeral (tempfile.mkdtemp, cleaned up immediately)
-- No LLM API call, no config/llm_agent.yaml read
-- Still never auto git add, commit, or push
-
-## Phase 10.6: netns + TUN E2E Verification
-
-After Phase 10.2 integrated the smoke matrix into the LLM Agent post-apply pipeline,
-Phase 10.6 added the second runtime gate: real Linux network namespace + TUN device
-validation with end-to-end ICMP ping.
-
-**Results (Debian 12, Linux 6.1, 2026-05-10):**
-
-| Transport | Default mode | E2E Ping | RTT |
-|---|---|---|---|
-| TCP | PASS | PASS | 0.5–1.8ms |
-| WebSocket | PASS | PASS | 2.5–4.6ms |
-
-**Key findings:**
-- Shared `--session-id` mechanism works — no "Dropping frame" errors during e2e ping
-- No Core changes were needed — `ServerCore`/`ClientCore` already supported explicit session IDs
-- Two bugs were found and fixed during verification:
-  1. `config/client_netns.yaml` had wrong veth subnet (Phase 3 `192.168.100.1` vs Phase 10.3 `192.168.200.1`)
-  2. `websocket_transport.py` used `websockets.asyncio` subpackage (incompatible with both v10.4 and v16.0)
-- Session ID isolation is preserved — the mismatch drop logic was not modified
-- WebSocket adds ~2–3ms overhead vs raw TCP due to framing and async event loop
-
-This confirms that the LLM Agent replacement pipeline — from natural language request
-through patch generation, smoke matrix, and real-kernel TUN validation — produces
-working Transport replacements without breaking Core functionality.
-
-## Future Extensions
-
-- Failure-feedback loop (retry on validation failure, max 3)
-- Session audit log
-- Dry-run preview mode
+- Phase 10.7：稳定性与性能 benchmark（长时间运行、吞吐量对比、资源占用评估）
+- SSHTransport 服务端侧完善
+- Core variant 扩展：strict_session、alt_frame_codec、experimental_forwarding
+- 故障反馈循环（验证失败时重试，最多 3 次）
+- Session 审计日志

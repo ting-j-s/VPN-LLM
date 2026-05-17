@@ -63,8 +63,11 @@ ImpactExpander(repo_index).expand(request, plan, candidates) → FileSelection
 | mixed_feature | — | src/*, tests/* | src/transport/, src/core/, src/common/, src/llm/, src/tun/, tests/, docs/, scripts/, config/ |
 
 LLM planner hints (candidate_files) 的处理:
-- **文件存在** → 提升为 must_edit (即使分数较低)
+- **文件存在且评分 ≥0.9** → 可进入 must_edit
+- **文件存在但评分 <0.9** → 进入 must_review（不能直接进入 must_edit）
 - **文件不存在** → 记录为 rejected_hints
+
+> Phase 11.2 引入了候选文件评分阈值（0.9），低于阈值的候选文件不能进入 must_edit。
 
 ### Phase 4: ContextBuilder — 上下文构建
 

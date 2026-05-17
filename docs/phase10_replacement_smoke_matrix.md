@@ -1,58 +1,52 @@
-# Phase 10.1: Transport/Core Replacement Smoke Validation Matrix
+# Phase 10.1：Transport/Core 替换 Smoke 验证矩阵
 
-## Goal
+## 目标
 
-This phase builds a **unified smoke validation matrix** for verifying the minimal
-runnability of Transport and Core replacements. It is the verification entry point
-for LLM-driven protocol and kernel replacement.
+本阶段构建了一个**统一的 smoke 验证矩阵**，用于验证 Transport 和 Core 替换的最小可运行性。它是 LLM 驱动协议和内核替换的验证入口。
 
-When the LLM Agent generates or modifies a Transport or Core implementation, the
-system can call this matrix to answer a single question:
+当 LLM Agent 生成或修改 Transport 或 Core 实现时，系统可以调用此矩阵来回答一个问题：
 
-> **"Does the replacement still pass minimum smoke?"**
+> **"替换后的系统是否仍通过最小 smoke 检查？"**
 
-This is *not* ordinary transport testing — it is a **replacement validation gateway**
-designed to serve the LLM Agent workflow.
+这*不是*普通的传输测试 — 它是为 LLM Agent 工作流设计的**替换验证 Gate**。
 
-## Motivation
+## 动机
 
-The VPN project has two replaceable dimensions:
+VPN 项目有两个可替换维度：
 
-| Dimension | What can change | Example |
-|---|---|---|
-| **Transport** | Outer protocol (wire format) | TCP → WebSocket, add HTTP/2, add QUIC |
-| **Core** | VPN kernel (session, forwarding, frame) | Default → strict-session, alt-frame-codec |
+| 维度 | 可变更内容 | 示例 |
+|------|-----------|------|
+| **Transport** | 外层协议（线格式） | TCP → WebSocket、添加 HTTP/2、添加 QUIC |
+| **Core** | VPN 内核（会话、转发、帧） | Default → strict-session、alt-frame-codec |
 
-When the LLM Agent proposes a replacement in either dimension, we need a fast,
-deterministic answer to: "Is this minimally runnable?"
+当 LLM Agent 在任一维度提出替换时，我们需要快速、确定性地回答："这个替换是否最小可运行？"
 
-## Role in LLM-Driven Replacement
+## 在 LLM 驱动替换中的角色
 
-The smoke matrix is the **first runtime gate** after an LLM-generated Transport or Core patch.
-It answers a single question: "Is the replacement minimally runnable?"
+Smoke matrix 是 LLM 生成的 Transport 或 Core 补丁之后的**第一道运行时 Gate**。
 
-### When it runs
+### 何时运行
 
-- After `--apply-patch` and post-apply validation pass
-- Only when `--run-replacement-smoke` is explicitly passed (opt-in)
-- `ReplacementValidator` (`src/llm/replacement_validator.py`) orchestrates the run
+- 在 `--apply-patch` 和应用后验证通过之后
+- 仅在显式传递 `--run-replacement-smoke` 时（选择加入）
+- `ReplacementValidator`（`src/llm/replacement_validator.py`）编排运行
 
-### Transport selection logic
+### Transport 选择逻辑
 
-The transports tested depend on the task type and target transport:
+测试的 transports 取决于任务类型和目标 transport：
 
-| Task condition | Transports selected |
-|---|---|
+| 任务条件 | 选择的 Transports |
+|----------|-------------------|
 | `target_transport` = websocket | mock, websocket |
 | `target_transport` = tcp | mock, tcp |
 | `target_transport` = tls | mock, tls |
-| `task_type` = core_change | mock, tcp, tls, websocket (broad matrix — Core affects all transports) |
+| `task_type` = core_change | mock, tcp, tls, websocket（广泛矩阵 — Core 影响所有 transports） |
 | `task_type` = refactor / bugfix / unknown | mock, tcp, tls, websocket |
-| All other types | mock, tcp, websocket (default) |
+| 所有其他类型 | mock, tcp, websocket（默认） |
 
-### JSON output for agent consumption
+### JSON 输出供 Agent 消费
 
-The `--json` flag produces structured output consumable by `ReplacementValidator`:
+`--json` 参数产生可供 `ReplacementValidator` 消费的结构化输出：
 
 ```json
 {
@@ -61,101 +55,93 @@ The `--json` flag produces structured output consumable by `ReplacementValidator
 }
 ```
 
-The agent parses this to generate the "Replacement Smoke Validation" report section
-and saves `replacement_validation.json` to the task directory.
+Agent 解析此输出来生成"Replacement Smoke Validation"报告部分，并将 `replacement_validation.json` 保存到任务目录。
 
-### What it is NOT
+### Smoke matrix 的边界
 
-The smoke matrix does NOT:
-- Use real TUN devices (uses MockTunDevice)
-- Run in real network namespace (no root required)
-- Measure performance or stability
-- Replace netns/TUN E2E validation (Gate 3/4)
-- Replace benchmark testing (Gate 5)
+Smoke matrix **不**做以下事情：
+- 使用真实 TUN 设备（使用 MockTunDevice）
+- 在真实网络命名空间中运行（不需要 root）
+- 测量性能或稳定性
+- 替代 netns/TUN E2E 验证（Gate 3/4）
+- 替代 benchmark 测试（Gate 5）
 
-It is intentionally lightweight — a fast "does it still work?" check before proceeding
-to heavier validation gates.
+它有意保持轻量 — 在进入更重的验证 Gate 之前进行快速的"还能用吗？"检查。
 
-## Transport Dimension
+## Transport 维度
 
-| Transport | Smoke check | Status in CI |
-|---|---|---|
-| `mock` | In-process MockTransport inject/recv | Stable |
-| `tcp` | localhost client/server send/recv | Stable |
-| `tls` | localhost client/server with ephemeral certs | Stable |
-| `websocket` | localhost client/server send/recv | Stable |
-| `ssh` | **Always skipped** — requires external SSH server | N/A |
+| Transport | Smoke 检查 | CI 状态 |
+|-----------|-----------|---------|
+| `mock` | 进程内 MockTransport 注入/接收 | 稳定 |
+| `tcp` | localhost 客户端/服务端 发送/接收 | 稳定 |
+| `tls` | localhost 客户端/服务端，临时证书 | 稳定 |
+| `websocket` | localhost 客户端/服务端 发送/接收 | 稳定 |
+| `ssh` | **始终跳过** — 需要外部 SSH 服务器 | N/A |
 
-### Why SSH defaults to skip
+### 为什么 SSH 默认跳过
 
-SSH transport requires a running SSH server (`sshd`) on the target host with valid
-credentials. This is not available in CI or local smoke runs. The matrix marks SSH
-as `skip` with the message `requires external SSH server`.
+SSH transport 需要目标主机上运行 SSH 服务器（`sshd`）和有效凭据。这在 CI 或本地 smoke 运行中不可用。矩阵将 SSH 标记为 `skip`，消息为 `requires external SSH server`。
 
-Use `--include-ssh` to explicitly run the SSH smoke when an SSH server is available.
+使用 `--include-ssh` 在有 SSH 服务器可用时显式运行 SSH smoke。
 
-### TLS ephemeral certs
+### TLS 临时证书
 
-TLS smoke generates self-signed certificates in a `tempfile.mkdtemp()` directory.
-These are cleaned up immediately after the check. No certs are persisted or committed.
+TLS smoke 在 `tempfile.mkdtemp()` 目录中生成自签名证书。这些证书在检查后立即清理。不持久化或提交任何证书。
 
-## Core Dimension
+## Core 维度
 
-### `default` (current)
+### `default`（当前）
 
-The default core smoke verifies:
+默认 Core smoke 验证：
 
-1. `ClientCore` and `ServerCore` are importable
-2. `session_id` validation works — frames with wrong `session_id` are dropped
-3. Core start/stop cycle completes without error
+1. `ClientCore` 和 `ServerCore` 可导入
+2. `session_id` 验证正常工作 — 携带错误 `session_id` 的帧被丢弃
+3. Core 启动/停止周期无错误完成
 
-It uses `MockTransport` and `MockTunDevice` — no real TUN device is created.
+它使用 `MockTransport` 和 `MockTunDevice` — 不创建真实 TUN 设备。
 
-### Extension interface
+### 扩展接口
 
-Each core registers via `CORE_SMOKE_REGISTRY`:
+每个 Core 通过 `CORE_SMOKE_REGISTRY` 注册：
 
 ```python
 _CORE_SMOKE_REGISTRY = {
     "default": _smoke_core_default,
-    # Future entries:
+    # 未来条目：
     # "strict_session": _smoke_core_strict_session,
     # "alt_frame_codec": _smoke_core_alt_frame,
     # "experimental_forwarding": _smoke_core_experimental,
 }
 ```
 
-To add a new core smoke:
-1. Implement a handler with signature `(transport_result: SmokeResult) -> SmokeResult`
-2. Register it in `CORE_SMOKE_REGISTRY`
-3. Run: `--cores default,new_core`
+添加新 Core smoke：
+1. 实现签名为 `(transport_result: SmokeResult) -> SmokeResult` 的处理函数
+2. 将其注册到 `CORE_SMOKE_REGISTRY`
+3. 运行：`--cores default,new_core`
 
-### Why no real TUN
+### 为什么不使用真实 TUN
 
-Real TUN devices require `root` privileges and kernel `tun` module support.
-The smoke matrix targets CI and developer laptops without root.
-Core logic (session_id validation, start/stop, data path) is verified via
-`MockTunDevice` instead.
+真实 TUN 设备需要 `root` 权限和内核 `tun` 模块支持。Smoke matrix 面向没有 root 权限的 CI 和开发者笔记本。Core 逻辑（session_id 验证、启动/停止、数据路径）通过 `MockTunDevice` 验证。
 
-## Usage
+## 用法
 
-### Command line
+### 命令行
 
 ```bash
-# Default: mock, tcp, tls, websocket with default core
+# 默认：mock, tcp, tls, websocket 与 default core
 python3 scripts/smoke_replacement_matrix.py
 
-# Specific transports
+# 指定 transports
 python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,websocket --cores default
 
-# Include SSH (when sshd is available)
+# 包含 SSH（当 sshd 可用时）
 python3 scripts/smoke_replacement_matrix.py --transports tcp,ssh --cores default --include-ssh
 
-# JSON output (for LLM Agent consumption)
+# JSON 输出（供 LLM Agent 消费）
 python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,tls,websocket --cores default --json
 ```
 
-### Text output
+### 文本输出
 
 ```
 Transport/Core Smoke Matrix
@@ -167,7 +153,7 @@ websocket/default  PASS     0.06s
 ssh/default        SKIP     (requires external SSH server)
 ```
 
-### JSON output
+### JSON 输出
 
 ```json
 {
@@ -188,29 +174,28 @@ ssh/default        SKIP     (requires external SSH server)
 }
 ```
 
-### Exit codes
+### 退出码
 
-| Code | Meaning |
-|---|---|
-| 0 | All non-skipped entries pass (or only skips) |
-| 1 | At least one entry failed |
+| 码 | 含义 |
+|----|------|
+| 0 | 所有非跳过条目通过（或仅跳过） |
+| 1 | 至少一个条目失败 |
 
-## Interpreting pass / fail / skip
+## 理解 pass / fail / skip
 
-| Status | Meaning |
-|---|---|
-| `pass` | Minimal send/recv roundtrip succeeded. The transport is runnable. |
-| `fail` | Smoke check raised an exception or assertion error. The error field contains details. |
-| `skip` | Pre-condition not met (e.g., SSH requires external server). Not a failure. |
+| 状态 | 含义 |
+|------|------|
+| `pass` | 最小发送/接收往返成功。Transport 可运行 |
+| `fail` | Smoke 检查抛出异常或断言错误。error 字段包含详细信息 |
+| `skip` | 前置条件不满足（例如 SSH 需要外部服务器）。不是失败 |
 
-## Integration with LLM Agent
+## 与 LLM Agent 的集成
 
-The smoke matrix is integrated into the LLM Agent post-apply validation pipeline
-via `ReplacementValidator` (`src/llm/replacement_validator.py`).
+Smoke matrix 通过 `ReplacementValidator`（`src/llm/replacement_validator.py`）集成到 LLM Agent 应用后验证管线中。
 
-### Explicit invocation
+### 显式调用
 
-The replacement smoke runs **only** when explicitly requested:
+替换 smoke **仅**在显式请求时运行：
 
 ```bash
 python3 scripts/llm_task.py \
@@ -220,14 +205,14 @@ python3 scripts/llm_task.py \
     --run-replacement-smoke
 ```
 
-Without `--run-replacement-smoke`, the matrix is not executed — it is opt-in.
+不使用 `--run-replacement-smoke` 则不会执行矩阵 — 它是选择加入的。
 
-### Transport selection rules
+### Transport 选择规则
 
-`ReplacementValidator` automatically selects transports based on the task plan:
+`ReplacementValidator` 根据任务计划自动选择 transports：
 
-| Task condition | Transports selected |
-|---|---|
+| 任务条件 | 选择的 Transports |
+|----------|-------------------|
 | `target_transport` = websocket | mock, websocket |
 | `target_transport` = tcp | mock, tcp |
 | `target_transport` = tls | mock, tls |
@@ -236,73 +221,58 @@ Without `--run-replacement-smoke`, the matrix is not executed — it is opt-in.
 | `task_type` = refactor | mock, tcp, tls, websocket |
 | `task_type` = bugfix | mock, tcp, tls, websocket |
 | `task_type` = unknown | mock, tcp, tls, websocket |
-| All other types | mock, tcp, websocket (default) |
+| 所有其他类型 | mock, tcp, websocket（默认） |
 
-Use `--include-tls-smoke` or `--include-ssh-smoke` to force TLS/SSH regardless
-of the task plan.
+使用 `--include-tls-smoke` 或 `--include-ssh-smoke` 强制包含 TLS/SSH，无论任务计划如何。
 
-### Agent workflow
+### Agent 工作流
 
-1. Agent proposes a Transport or Core patch
-2. `git apply --check` passes
-3. Human confirms `--apply-patch`
-4. Post-apply validation passes
-5. **`--run-replacement-smoke`** triggers `ReplacementValidator`:
-   - Selects transports based on `target_transport` and `task_type`
-   - Runs `smoke_replacement_matrix.py --json`
-   - Parses JSON output
-   - Reports pass/fail/skip per transport
-6. Results are saved to `.llm_tasks/<task_id>/replacement_validation.json`
-7. Results appear in the report under "Replacement Smoke Validation"
-8. If any smoke fails, the report states: "Do not commit until replacement smoke failures are fixed."
+1. Agent 提出 Transport 或 Core 补丁
+2. `git apply --check` 通过
+3. 人工确认 `--apply-patch`
+4. 应用后验证通过
+5. **`--run-replacement-smoke`** 触发 `ReplacementValidator`：
+   - 根据 `target_transport` 和 `task_type` 选择 transports
+   - 运行 `smoke_replacement_matrix.py --json`
+   - 解析 JSON 输出
+   - 报告每个 transport 的 pass/fail/skip
+6. 结果保存到 `.llm_tasks/<task_id>/replacement_validation.json`
+7. 结果显示在报告的"Replacement Smoke Validation"部分
+8. 如果任何 smoke 失败，报告声明："在替换 smoke 失败修复之前不要提交"
 
-## Future Extensions
+## 未来扩展
 
-### New Transports
+### 新 Transport
 
-| Transport | What needs to be done |
-|---|---|
-| HTTP/2 | Implement `src/transport/http2_transport.py`, add `_smoke_http2()`, register in `_TRANSPORT_SMOKE` |
-| QUIC | Implement `src/transport/quic_transport.py`, add `_smoke_quic()`, register |
-| gRPC | Implement `src/transport/grpc_transport.py`, add `_smoke_grpc()`, register |
+| Transport | 需要做的 |
+|-----------|---------|
+| HTTP/2 | 实现 `src/transport/http2_transport.py`，添加 `_smoke_http2()`，注册到 `_TRANSPORT_SMOKE` |
+| QUIC | 实现 `src/transport/quic_transport.py`，添加 `_smoke_quic()`，注册 |
+| gRPC | 实现 `src/transport/grpc_transport.py`，添加 `_smoke_grpc()`，注册 |
 
-### New Cores
+### 新 Core
 
-| Core | What needs to be done |
-|---|---|
-| `strict_session` | Implement stricter session validation in Core, register smoke handler |
-| `alt_frame_codec` | Implement alternative Frame encoding, register smoke handler |
-| `experimental_forwarding` | Implement experimental NAT/route strategies, register smoke handler |
+| Core | 需要做的 |
+|------|---------|
+| `strict_session` | 在 Core 中实现更严格的 session 验证，注册 smoke handler |
+| `alt_frame_codec` | 实现替代 Frame 编码，注册 smoke handler |
+| `experimental_forwarding` | 实现实验性 NAT/路由策略，注册 smoke handler |
 
-### Linux netns + real TUN validation
+### CI 集成
 
-For integration tests that need real TUN devices without root on the host:
-
-```bash
-# In a network namespace, regular users can create TUN devices
-ip netns add vpn-test
-ip netns exec vpn-test python3 scripts/smoke_replacement_matrix.py --transports tcp --cores default
-```
-
-The smoke matrix does not currently create netns automatically.
-This is a future enhancement for deeper integration testing.
-
-### CI Integration
-
-The smoke matrix can be added to `.github/workflows/tests.yml`:
+Smoke matrix 可以添加到 `.github/workflows/tests.yml`：
 
 ```yaml
 - name: Smoke replacement matrix
   run: python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,websocket --cores default --json
 ```
 
-TLS requires `openssl` in the CI environment (usually pre-installed).
-WebSocket requires the `websockets` Python package.
+TLS 需要 CI 环境中安装 `openssl`（通常预装）。WebSocket 需要 `websockets` Python 包。
 
-## Files
+## 相关文件
 
-| File | Purpose |
-|---|---|
-| `scripts/smoke_replacement_matrix.py` | Main script |
-| `tests/test_smoke_replacement_matrix.py` | Tests (29 tests) |
-| `docs/phase10_replacement_smoke_matrix.md` | This document |
+| 文件 | 用途 |
+|------|------|
+| `scripts/smoke_replacement_matrix.py` | 主脚本 |
+| `tests/test_smoke_replacement_matrix.py` | 测试（29 tests） |
+| `docs/phase10_replacement_smoke_matrix.md` | 本文档 |
