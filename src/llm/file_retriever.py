@@ -125,6 +125,43 @@ _TASK_TYPE_RULES: dict[str, dict[str, list[str]]] = {
         "config_patterns": [],
         "script_patterns": [],
     },
+    "fingerprint_evaluation": {
+        "patterns": [
+            "src/evaluation/fingerprint/",
+            "scripts/trace_capture.py",
+            "scripts/run_trace_scenarios.py",
+            "scripts/summarize_fingerprint_reports.py",
+        ],
+        "keywords": ["fingerprint", "trace", "pcap", "burst", "ngram", "detection",
+                     "small_packet", "repeated_length", "risk_score"],
+        "test_patterns": ["test_fingerprint_", "test_trace_", "test_summarize_"],
+        "doc_patterns": ["docs/fingerprint_", "docs/trace_capture.md"],
+        "config_patterns": [],
+        "script_patterns": ["scripts/trace_capture.py", "scripts/summarize_fingerprint_reports.py"],
+    },
+    "llm_detection": {
+        "patterns": [
+            "src/llm/detection/",
+            "src/llm/",
+            "scripts/llm_task.py",
+        ],
+        "keywords": ["detection", "gate", "countermeasure", "adversarial",
+                     "patch_loop", "prompt_builder", "detector_report",
+                     "fingerprint_mitigation", "probe_resistance"],
+        "test_patterns": ["test_llm_detection_", "test_llm_countermeasure_"],
+        "doc_patterns": ["docs/llm_detection_"],
+        "config_patterns": [],
+        "script_patterns": ["scripts/llm_task.py"],
+    },
+    "traffic_shaping": {
+        "patterns": ["src/shaping/"],
+        "keywords": ["shaping", "shaper", "padding", "pacing", "jitter",
+                     "fragmentation", "scheduling", "countermeasure"],
+        "test_patterns": ["test_shaping", "test_shaper"],
+        "doc_patterns": ["docs/shaping", "docs/shaper"],
+        "config_patterns": [],
+        "script_patterns": [],
+    },
     "ci": {
         "patterns": [],
         "keywords": ["ci", "github", "workflow", "action"],
@@ -156,6 +193,11 @@ _TASK_TO_AREA: dict[str, list[str]] = {
     "mixed_feature_change": ["transport", "config", "test", "docs", "core", "llm_agent"],
     "bugfix": ["transport", "core", "tun", "config", "llm_agent", "test", "docs"],
     "refactor": ["transport", "core", "tun", "config", "test", "docs"],
+    "fingerprint_mitigation": ["fingerprint_evaluation", "llm_detection", "traffic_shaping", "test", "docs"],
+    "traffic_shaping": ["traffic_shaping", "transport", "test", "docs"],
+    "llm_detection": ["llm_detection", "fingerprint_evaluation", "test", "docs"],
+    "probe_resistance": ["llm_detection", "test", "docs"],
+    "rtt_evaluation": ["fingerprint_evaluation", "llm_detection", "test", "docs"],
     "unknown": ["mixed_feature"],
 }
 
@@ -498,6 +540,13 @@ class FileRetriever:
             "llm_agent": ["llm", "agent", "planner", "patch", "task"],
             "validation": ["validation", "smoke", "replacement", "gate"],
             "security": ["security", "safety", "secret"],
+            "fingerprint_evaluation": ["fingerprint", "trace", "pcap", "burst", "ngram",
+                                        "small_packet", "repeated_length", "risk_score"],
+            "llm_detection": ["detection", "gate", "countermeasure", "adversarial",
+                            "patch_loop", "prompt_builder", "detector_report",
+                            "fingerprint_mitigation", "probe_resistance"],
+            "traffic_shaping": ["shaping", "shaper", "padding", "pacing", "jitter",
+                              "fragmentation", "scheduling"],
         }
         for area, kws in area_keywords.items():
             if any(kw in request_lower for kw in kws):

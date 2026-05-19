@@ -36,6 +36,11 @@ VALID_TASK_TYPES = frozenset({
     "mixed_feature_change",
     "bugfix",
     "refactor",
+    "fingerprint_mitigation",
+    "traffic_shaping",
+    "llm_detection",
+    "probe_resistance",
+    "rtt_evaluation",
     "unknown",
 })
 
@@ -132,7 +137,8 @@ class LLMTaskPlanner:
         "Rules:\n"
         "- Output ONLY valid JSON. No markdown, no explanation, no code fences.\n"
         "- task_type: one of transport_change, transport_addition, config_change, test_addition, docs_update,"
-        " core_change, feature_addition, mixed_feature_change, bugfix, refactor, unknown\n"
+        " core_change, feature_addition, mixed_feature_change, bugfix, refactor,"
+        " fingerprint_mitigation, traffic_shaping, llm_detection, probe_resistance, rtt_evaluation, unknown\n"
         "- target_transport: ONLY for EXISTING transports (tcp, tls, ssh, websocket, mock). "
         "For requests that ADD a NEW transport (e.g. http2, quic, grpc), target_transport MUST be null "
         "and task_type MUST be transport_addition or feature_addition. "
