@@ -335,6 +335,94 @@ def from_fingerprint_report(report: dict[str, Any],
     )
 
 
+def from_probe_report(report: dict[str, Any],
+                      source_path: str | None = None) -> DetectionReport:
+    """Create a DetectionReport from a probe resistance report dict.
+
+    Extracts probe-specific metrics (probe_response_variance,
+    malformed_close_time_variance) and preserves the full raw dict
+    including behavior_summary and per-scenario results.
+    """
+    notes: list[str] = []
+    metrics: list[DetectionMetric] = []
+
+    detector_name = report.get("detector_name", "active_probe_resistance")
+    risk_score = report.get("risk_score") or report.get("fingerprint_risk_score")
+    risk_level = report.get("risk_level")
+    # Use the probe report's inner "raw" as the DetectionReport raw
+    raw = dict(report.get("raw", report))
+
+    # Extract probe-specific metrics
+    for m in report.get("metrics", []):
+        if not isinstance(m, dict):
+            continue
+        name = m.get("name", "")
+        value = m.get("value")
+        if name in ("probe_response_variance", "malformed_close_time_variance"):
+            metrics.append(DetectionMetric(
+                name=name,
+                value=value,
+                threshold=None,
+                passed=True,
+                severity="info",
+                explanation=m.get("explanation", f"{name}={value}"),
+            ))
+
+    # Also extract from raw if metrics not in standard format
+    if not any(m.name == "probe_response_variance" for m in metrics):
+        pv = report.get("probe_response_variance")
+        if pv is not None:
+            try:
+                metrics.append(DetectionMetric(
+                    name="probe_response_variance",
+                    value=float(pv),
+                    threshold=None,
+                    passed=True,
+                    severity="info",
+                    explanation=f"probe_response_variance={pv}",
+                ))
+            except (TypeError, ValueError):
+                notes.append(f"probe_response_variance not numeric: {pv}")
+
+    if not any(m.name == "malformed_close_time_variance" for m in metrics):
+        mcv = report.get("malformed_close_time_variance")
+        if mcv is not None:
+            try:
+                metrics.append(DetectionMetric(
+                    name="malformed_close_time_variance",
+                    value=float(mcv),
+                    threshold=None,
+                    passed=True,
+                    severity="info",
+                    explanation=f"malformed_close_time_variance={mcv}",
+                ))
+            except (TypeError, ValueError):
+                notes.append(f"malformed_close_time_variance not numeric: {mcv}")
+
+    # Report notes
+    report_notes = report.get("notes", [])
+    if isinstance(report_notes, list):
+        notes.extend(report_notes)
+    elif isinstance(report_notes, str) and report_notes:
+        notes.append(report_notes)
+
+    trace_type = report.get("trace_type", "synthetic")
+
+    return DetectionReport(
+        detector_name=detector_name,
+        source_path=source_path,
+        trace_type=trace_type,
+        transport=report.get("transport", "tcp"),
+        scenario=report.get("scenario", "probe"),
+        passed=report.get("passed", True),
+        risk_score=float(risk_score) if risk_score is not None else None,
+        risk_level=risk_level,
+        metrics=metrics,
+        notes=notes,
+        raw=raw,
+    )
+
+
 def load_detection_report(path: str | Path) -> DetectionReport:
     """Load a fingerprint report JSON and convert to DetectionReport."""
     p = Path(path)
@@ -356,6 +444,10 @@ def load_detection_report(path: str | Path) -> DetectionReport:
             passed=False,
             notes=[f"failed to read report: {e}"],
         )
+    # Route to appropriate factory based on detector_name
+    detector_name = raw.get("detector_name", "fingerprint")
+    if detector_name in ("active_probe_resistance", "probe"):
+        return from_probe_report(raw, source_path=str(p))
     return from_fingerprint_report(raw, source_path=str(p))
 
 
