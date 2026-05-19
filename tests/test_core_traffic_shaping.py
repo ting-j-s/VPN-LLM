@@ -12,7 +12,7 @@ import pytest
 from src.common.frame import FrameType, create_frame, decode_frame, encode_frame
 from src.core.client_core import ClientCore
 from src.core.server_core import ServerCore
-from src.shaping.aggregation import AggregationShaper
+from src.shaping.aggregation import MAGIC_AGG, AggregationShaper
 from src.shaping.base import NoopTrafficShaper, ShapedChunk, TrafficShaper
 from src.shaping.config import ShapingConfig
 from src.shaping.factory import create_traffic_shaper
@@ -479,5 +479,166 @@ class TestFactoryShaperWithCore:
                     data_found = True
                     break
             assert data_found, f"DATA payload not found in padded frames"
+        finally:
+            core.stop()
+
+
+# ---------------------------------------------------------------------------
+# 10. Aggregation integration — DATA buffering + control pre-flush
+# ---------------------------------------------------------------------------
+
+class TestAggregationIntegration:
+    def test_data_frame_buffered_by_aggregation(self):
+        """DATA frames through aggregation-enabled shaper are buffered."""
+        rng = random.Random(42)
+        agg = AggregationShaper(max_bytes=4096, rng=rng, enabled=True)
+        core, tun, transport, sid = _make_core_pair(traffic_shaper=agg)
+        core.start()
+        try:
+            payload = b"\x45\x00\x00\x14" + b"\x00" * 16
+            tun.inject_packet(payload)
+            time.sleep(0.3)
+            # With aggregation, the frame is buffered, not sent immediately
+            sent = transport.get_sent()
+            # AUTH frame was sent during start(), then DATA was buffered
+            agg_sent = [s for s in sent if s[:4] == MAGIC_AGG]
+            assert len(agg_sent) == 0, f"Single DATA should be buffered, not sent as aggregation"
+        finally:
+            core.stop()
+
+    def test_heartbeat_triggers_pre_flush_of_buffered_data(self):
+        """HEARTBEAT must flush pending DATA before itself."""
+        rng = random.Random(42)
+        # Small buffer: 20 bytes triggers flush on second frame
+        agg = AggregationShaper(max_bytes=20, rng=rng, enabled=True)
+        core, tun, transport, sid = _make_core_pair(traffic_shaper=agg)
+        core.heartbeat_interval = 0.05
+        core.start()
+        try:
+            payload = b"\x45\x00\x00\x14" + b"\x00" * 16  # 20 bytes
+            tun.inject_packet(payload)
+            time.sleep(1.5)
+            sent = transport.get_sent()
+            # Should have: AUTH, possibly aggregated DATA, HEARTBEAT
+            assert len(sent) >= 1, f"No data sent: {sent}"
+            # decode all chunks
+            all_frames: list[bytes] = []
+            for s in sent:
+                all_frames.extend(agg.decode_chunk(s))
+            # Find DATA frame
+            data_found = any(
+                decode_frame(raw).payload == payload
+                for raw in all_frames
+            )
+            assert data_found, f"DATA payload not found in sent frames"
+        finally:
+            core.stop()
+
+    def test_heartbeat_not_cached_by_aggregation(self):
+        """HEARTBEAT must not be buffered — must arrive quickly."""
+        rng = random.Random(42)
+        agg = AggregationShaper(max_bytes=4096, rng=rng, enabled=True)
+        core, tun, transport, sid = _make_core_pair(traffic_shaper=agg)
+        core.heartbeat_interval = 0.05
+        core.start()
+        try:
+            time.sleep(1.5)
+            sent = transport.get_sent()
+            all_frames: list[bytes] = []
+            for s in sent:
+                all_frames.extend(agg.decode_chunk(s))
+            has_hb = False
+            for raw in all_frames:
+                try:
+                    f = decode_frame(raw)
+                    if f.frame_type == FrameType.HEARTBEAT:
+                        has_hb = True
+                        break
+                except Exception:
+                    pass
+            assert has_hb, f"HEARTBEAT was buffered by aggregation: {all_frames}"
+        finally:
+            core.stop()
+
+    def test_auth_sent_immediately(self):
+        """AUTH frame must trigger pre-flush and be sent immediately."""
+        rng = random.Random(42)
+        agg = AggregationShaper(max_bytes=4096, rng=rng, enabled=True)
+        core, tun, transport, sid = _make_core_pair(traffic_shaper=agg)
+        core.start()
+        try:
+            time.sleep(0.3)
+            sent = transport.get_sent()
+            # AUTH is sent as FrameType.AUTH — must appear in transport
+            all_frames: list[bytes] = []
+            for s in sent:
+                all_frames.extend(agg.decode_chunk(s))
+            has_auth = False
+            for raw in all_frames:
+                try:
+                    f = decode_frame(raw)
+                    if f.frame_type == FrameType.AUTH:
+                        has_auth = True
+                        break
+                except Exception:
+                    pass
+            assert has_auth, f"AUTH was buffered by aggregation"
+        finally:
+            core.stop()
+
+    def test_close_flushes_pending_aggregation(self):
+        """stop() must flush shaper buffer before closing transport."""
+        rng = random.Random(42)
+        agg = AggregationShaper(max_bytes=4096, rng=rng, enabled=True)
+        core, tun, transport, sid = _make_core_pair(traffic_shaper=agg)
+        core.start()
+        try:
+            payload = b"\x45\x00\x00\x14" + b"\x00" * 16
+            tun.inject_packet(payload)
+            time.sleep(0.3)
+            # DATA should be buffered by aggregation
+            assert len(agg._buffer) >= 1, f"DATA should be buffered: buffer={agg._buffer}"
+            # stop() must flush the buffer (MockTransport.close clears _tx_data,
+            # so we check shaper internal state instead)
+            core.stop()
+            assert len(agg._buffer) == 0, f"Buffer not flushed after stop: {agg._buffer}"
+        finally:
+            try:
+                core.stop()
+            except Exception:
+                pass
+
+    def test_aggregation_pipeline_roundtrip(self):
+        """Aggregation + padding pipeline: decode_chunk recovers all frames."""
+        config = ShapingConfig(
+            enabled=True,
+            aggregation_enabled=True,
+            aggregation_max_bytes=4096,
+            padding_enabled=True,
+            min_padding_bytes=4,
+            max_padding_bytes=4,
+        )
+        shaper = create_traffic_shaper(config, seed=42)
+        core, tun, transport, sid = _make_core_pair(traffic_shaper=shaper)
+        core.start()
+        try:
+            payload = b"\x45\x00\x00\x14" + b"\x00" * 16
+            tun.inject_packet(payload)
+            time.sleep(0.3)
+            # flush shaper to emit buffered DATA
+            flushed = shaper.flush()
+            for ch in flushed:
+                transport.send(ch.data)
+            sent = transport.get_sent()
+            assert len(sent) >= 1
+            # Decode everything
+            all_frames: list[bytes] = []
+            for s in sent:
+                all_frames.extend(shaper.decode_chunk(s))
+            data_found = any(
+                decode_frame(raw).payload == payload
+                for raw in all_frames
+            )
+            assert data_found, f"Pipeline roundtrip lost DATA payload"
         finally:
             core.stop()

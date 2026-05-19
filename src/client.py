@@ -12,6 +12,7 @@ from .common.config import load_client_config
 from .common.logger import get_logger
 from .common.errors import VPNError
 from .common.session import parse_session_id, mask_session_id
+from .shaping import create_traffic_shaper
 from .tun.tun_device import create_tun_device
 from .transport.factory import create_transport
 from .core.client_core import ClientCore
@@ -117,6 +118,10 @@ def main():
         else:
             logger.info(f"Session ID: auto-generated (source={session_id_source})")
 
+        # Create traffic shaper from config (Noop by default)
+        traffic_shaper = create_traffic_shaper(config.shaping)
+        logger.info(f"Traffic shaper: {type(traffic_shaper).__name__}")
+
         # Create client core
         global _client
         _client = ClientCore(
@@ -125,6 +130,7 @@ def main():
             session_id=session_id_bytes,
             heartbeat_interval=config.session.heartbeat_interval,
             heartbeat_timeout=config.session.heartbeat_timeout,
+            traffic_shaper=traffic_shaper,
         )
         logger.info("ClientCore created")
 

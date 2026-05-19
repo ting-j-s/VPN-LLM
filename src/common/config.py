@@ -10,6 +10,7 @@ from typing import Optional
 import yaml
 
 from .errors import VPNError
+from ..shaping.config import ShapingConfig
 
 
 class ConfigError(VPNError):
@@ -93,6 +94,7 @@ class ClientConfig:
     server: ServerEndpointConfig = field(default_factory=ServerEndpointConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    shaping: ShapingConfig = field(default_factory=ShapingConfig)
 
 
 @dataclass
@@ -102,6 +104,7 @@ class ServerConfig:
     forwarding: ForwardingConfig = field(default_factory=ForwardingConfig)
     transport: TransportConfig = field(default_factory=TransportConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    shaping: ShapingConfig = field(default_factory=ShapingConfig)
 
 
 def _load_yaml(path: Path) -> dict:
@@ -148,6 +151,19 @@ def _validate_transport(data: dict) -> None:
             f"Invalid transport.type: '{transport_type}'. "
             f"Allowed: {ALLOWED_TRANSPORT_TYPES}"
         )
+
+
+def _load_shaping(data: dict) -> ShapingConfig:
+    """Load shaping configuration from YAML data.
+
+    The shaping section is optional — missing keys default to disabled.
+    """
+    shaping_data = data.get("shaping", {})
+    if not isinstance(shaping_data, dict):
+        raise ConfigError("shaping must be a mapping")
+    config = ShapingConfig.from_dict(shaping_data)
+    config.validate()
+    return config
 
 
 def load_client_config(path: str) -> ClientConfig:
@@ -212,7 +228,9 @@ def load_client_config(path: str) -> ClientConfig:
         session_id=session_data.get("session_id"),
     )
 
-    return ClientConfig(client=tun, server=endpoint, transport=transport, session=session)
+    shaping = _load_shaping(data)
+
+    return ClientConfig(client=tun, server=endpoint, transport=transport, session=session, shaping=shaping)
 
 
 def load_server_config(path: str) -> ServerConfig:
@@ -268,4 +286,6 @@ def load_server_config(path: str) -> ServerConfig:
         session_id=session_data.get("session_id"),
     )
 
-    return ServerConfig(server=tun, forwarding=forwarding, transport=transport, session=session)
+    shaping = _load_shaping(data)
+
+    return ServerConfig(server=tun, forwarding=forwarding, transport=transport, session=session, shaping=shaping)

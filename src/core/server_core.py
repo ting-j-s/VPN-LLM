@@ -184,6 +184,16 @@ class ServerCore:
         self._running = False
         self._stop_event.set()
 
+        # Flush shaper buffers (e.g. aggregation) before tearing down transport
+        try:
+            for chunk in self.traffic_shaper.flush():
+                try:
+                    self.transport.send(chunk.data)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Shaper flush during stop skipped: {e}")
+
         # Close transport first to interrupt blocking recv() calls
         try:
             self.transport.close()
@@ -209,15 +219,27 @@ class ServerCore:
         logger.info(f"Graceful shutdown completed (transport->tun={self._transport_to_tun_bytes} bytes, "
                     f"tun->transport={self._tun_to_transport_bytes} bytes)")
 
-    def _send_shaped(self, encoded_frame: bytes) -> None:
+    def _send_shaped(self, encoded_frame: bytes, frame_type: FrameType = FrameType.DATA) -> None:
         """Send an encoded frame through the traffic shaper.
 
-        If the shaper buffers the frame (returns empty), flushes immediately.
+        DATA frames may be buffered by aggregation-enabled shapers.
+        Control frames (HEARTBEAT, AUTH, CLOSE) trigger a pre-flush of
+        buffered DATA, and are themselves flushed immediately so they
+        are never delayed by aggregation.
         Jitter delay_ms metadata is logged but not slept (scheduler not active).
         """
+        if frame_type != FrameType.DATA:
+            # Flush buffered DATA before control/management frames
+            for chunk in self.traffic_shaper.flush():
+                if chunk.delay_ms > 0:
+                    logger.debug(f"Jitter delay {chunk.delay_ms:.1f}ms ignored (no scheduler)")
+                self.transport.send(chunk.data)
+
         chunks = self.traffic_shaper.encode_frame(encoded_frame)
-        if not chunks:
+        if not chunks and frame_type != FrameType.DATA:
+            # Control frame was buffered by aggregation — emit immediately
             chunks = self.traffic_shaper.flush()
+
         for chunk in chunks:
             if chunk.delay_ms > 0:
                 logger.debug(f"Jitter delay {chunk.delay_ms:.1f}ms ignored (no scheduler)")
@@ -244,7 +266,7 @@ class ServerCore:
             if now - self._last_sent_time >= self.heartbeat_interval:
                 try:
                     heartbeat = create_frame(FrameType.HEARTBEAT, self.session_id)
-                    self._send_shaped(encode_frame(heartbeat))
+                    self._send_shaped(encode_frame(heartbeat), frame_type=FrameType.HEARTBEAT)
                     self._last_sent_time = now
                     logger.debug("Sent HEARTBEAT")
                 except Exception as e:

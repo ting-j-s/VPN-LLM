@@ -1,0 +1,28 @@
+# Example: TCP client configuration with padding-only traffic shaping.
+#
+# This file is an EXAMPLE — copy it to your working config and customize.
+# Default config/client.yaml remains shipping-enabled with shaping disabled.
+
+client:
+  tun_name: tun0
+  tun_ip: 10.8.0.2
+  tun_peer: 10.8.0.1
+  mtu: 1400
+
+server:
+  host: 127.0.0.1
+  port: 2222
+
+transport:
+  type: tcp
+
+session:
+  heartbeat_interval: 10
+  reconnect: true
+  reconnect_interval: 3
+
+shaping:
+  enabled: true
+  padding_enabled: true
+  min_padding_bytes: 8
+  max_padding_bytes: 64

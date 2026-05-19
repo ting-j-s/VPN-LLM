@@ -12,11 +12,13 @@ Default: NoopTrafficShaper (all shaping disabled).
 from .base import NoopTrafficShaper, ShapedChunk, TrafficShaper
 from .config import ShapingConfig
 from .factory import create_traffic_shaper
+from .scheduler import SendScheduler
 
 __all__ = [
     "ShapingConfig",
     "ShapedChunk",
     "TrafficShaper",
     "NoopTrafficShaper",
+    "SendScheduler",
     "create_traffic_shaper",
 ]

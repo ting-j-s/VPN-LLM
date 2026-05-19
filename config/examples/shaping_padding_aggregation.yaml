@@ -1,0 +1,35 @@
+# Example: TCP client configuration with padding + aggregation shaping.
+#
+# Aggregation buffers small DATA frames and emits combined chunks, reducing
+# small_packet_ratio. Control frames (HEARTBEAT, AUTH, CLOSE) always trigger
+# a pre-flush so they are never delayed by aggregation.
+
+client:
+  tun_name: tun0
+  tun_ip: 10.8.0.2
+  tun_peer: 10.8.0.1
+  mtu: 1400
+
+server:
+  host: 127.0.0.1
+  port: 2222
+
+transport:
+  type: tcp
+
+session:
+  heartbeat_interval: 10
+  reconnect: true
+  reconnect_interval: 3
+
+shaping:
+  enabled: true
+  padding_enabled: true
+  min_padding_bytes: 8
+  max_padding_bytes: 64
+  aggregation_enabled: true
+  aggregation_max_delay_ms: 50.0
+  aggregation_max_bytes: 4096
+  jitter_enabled: true
+  jitter_min_ms: 5.0
+  jitter_max_ms: 50.0
