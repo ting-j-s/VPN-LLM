@@ -26,16 +26,18 @@ class TestBehaviorSummary:
         summary = compute_behavior_summary(results)
         assert summary["total_scenarios"] == len(PROBE_SCENARIOS)
         assert summary["connected_count"] == len(PROBE_SCENARIOS)
-        assert summary["close_time_min_ms"] > 0
-        assert summary["close_time_max_ms"] > 0
-        assert summary["close_time_range_ms"] >= 0
+        # unified policy: all scenarios timeout, no closes
+        assert summary["close_time_min_ms"] == 0
+        assert summary["close_time_max_ms"] == 0
+        assert summary["close_time_range_ms"] == 0
+        assert summary["timeout_count"] == len(PROBE_SCENARIOS)
 
     def test_timeout_count(self):
         runner = MockProbeRunner()
         results = runner.run_all()
         summary = compute_behavior_summary(results)
-        # empty_connection should be the only timeout
-        assert summary["timeout_count"] == 1
+        # unified policy: all 12 scenarios show timeout (silent drop, no close)
+        assert summary["timeout_count"] == len(PROBE_SCENARIOS)
 
     def test_response_count_zero_for_malformed(self):
         runner = MockProbeRunner()

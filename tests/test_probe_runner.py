@@ -26,7 +26,8 @@ class TestMockProbeRunner:
         assert isinstance(result, ProbeResult)
         assert result.scenario.name == "test_mock"
         assert result.connected
-        assert result.close_observed
+        assert result.timeout_observed  # unified policy: silent drop → timeout
+        assert not result.close_observed  # server does not close on malformed input
 
     def test_empty_connection_timeout(self):
         runner = MockProbeRunner()
@@ -55,7 +56,8 @@ class TestMockProbeRunner:
         result = runner.run_scenario(s)
         assert result.connected
         assert not result.close_observed
-        assert not result.timeout_observed
+        # unified policy: all malformed/session scenarios silently dropped → timeout
+        assert result.timeout_observed
 
     def test_run_all_builtin_scenarios(self):
         runner = MockProbeRunner()

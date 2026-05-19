@@ -87,13 +87,14 @@ class MockProbeRunner:
     def run_scenario(self, scenario: ProbeScenario) -> ProbeResult:
         """Simulate one probe scenario with deterministic behavior.
 
-        Behavior mapping (by tags):
-        - "empty": timeout (server waits, client sends nothing)
-        - "short" or "truncated": immediate close, no response
-        - "protocol": close after brief delay, no response
-        - "session": connected, no close (valid frame, wrong session)
-        - "noise" or "http" or "tls": immediate close, no response
-        - "large": close after brief delay, no response
+        Phase 6B unified policy: all malformed / unexpected input is silently
+        dropped — the server never sends an application-layer response and
+        never closes the connection on error.  Probes therefore see a timeout
+        for every scenario (empty connection naturally times out, all other
+        payloads are silently dropped and the connection stays open).
+
+        This gives a single external error_type ("timeout") and zero close
+        events, producing minimal probe_response_variance.
         """
         tags = set(scenario.tags)
 
@@ -104,31 +105,12 @@ class MockProbeRunner:
             result.elapsed_ms = scenario.timeout_s * 1000
             result.error_type = "timeout"
             result.notes = "mock: idle timeout (no data sent)"
-        elif "session" in tags:
-            result.bytes_sent = len(scenario.payload or b"")
-            result.bytes_received = 0
-            result.elapsed_ms = 5.0
-            result.close_observed = False
-            result.notes = "mock: frame silently dropped, connection stays open"
-        elif "short" in tags or "truncated" in tags:
-            result.bytes_sent = len(scenario.payload or b"")
-            result.elapsed_ms = 3.0
-            result.close_observed = True
-            result.error_type = "close"
-            result.notes = "mock: immediate close after malformed short data"
-        elif "protocol" in tags:
-            result.bytes_sent = len(scenario.payload or b"")
-            result.elapsed_ms = 8.0
-            result.close_observed = True
-            result.error_type = "close"
-            result.notes = "mock: close after brief delay on protocol error"
         else:
-            # "noise", "http", "tls", "large"
             result.bytes_sent = len(scenario.payload or b"")
-            result.elapsed_ms = 5.0
-            result.close_observed = True
-            result.error_type = "close"
-            result.notes = "mock: close after malformed data"
+            result.elapsed_ms = scenario.timeout_s * 1000
+            result.timeout_observed = True
+            result.error_type = "timeout"
+            result.notes = "mock: server silently drops malformed data, probe times out"
 
         self._results.append(result)
         return result

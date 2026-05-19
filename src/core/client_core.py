@@ -11,7 +11,7 @@ import uuid
 from typing import Optional
 
 from ..common.errors import VPNError, TransportTimeout
-from ..common.frame import Frame, FrameType, create_frame, encode_frame, decode_frame
+from ..common.frame import Frame, FrameDecodeError, FrameType, create_frame, encode_frame, decode_frame
 from ..common.logger import get_logger
 from ..shaping.base import NoopTrafficShaper, TrafficShaper
 from ..transport.base import Transport
@@ -322,11 +322,15 @@ class ClientCore:
                 if isinstance(e, TransportTimeout):
                     # Timeout is normal, no data available
                     continue
+                if isinstance(e, FrameDecodeError):
+                    # Malformed frame — silent drop, no response, continue loop
+                    logger.debug(f"Malformed frame dropped: {e}")
+                    continue
                 # Check if transport is truly disconnected (not just idle)
                 if not self.transport.is_connected():
                     logger.debug(f"Transport disconnected, stopping loop: {e}")
                     break
-                logger.warning(f"Frame error: {e}")
+                logger.warning(f"Transport error: {e}")
                 break
             except Exception as e:
                 if self._stop_event.is_set():
@@ -345,7 +349,11 @@ class ClientCore:
             frame: Decoded frame.
         """
         if frame.session_id != self.session_id:
-            logger.warning("Dropping frame with unexpected session_id")
+            logger.debug(
+                "Dropping frame with unexpected session_id "
+                f"(expected={uuid.UUID(bytes=self.session_id).hex[:8]}, "
+                f"got={uuid.UUID(bytes=frame.session_id).hex[:8]})"
+            )
             return
 
         if frame.frame_type == FrameType.DATA:
@@ -371,7 +379,7 @@ class ClientCore:
             logger.debug("Received AUTH")
 
         else:
-            logger.warning(f"Unknown frame type: {frame.frame_type:#04x}")
+            logger.debug(f"Unknown frame type silently dropped: {frame.frame_type:#04x}")
 
     def _tun_to_transport_loop(self) -> None:
         """Read from TUN and send frames to Transport.

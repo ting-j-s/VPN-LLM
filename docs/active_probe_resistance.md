@@ -158,17 +158,62 @@ From `CountermeasurePolicy._HINT_MAP`:
 - Implement uniform garbage-collection timeout
 - Avoid immediate close for some errors and delayed close for others
 
-## 9. Countermeasure Implementation (Planned)
+## 9. Countermeasure Implementation (Phase 6B)
 
-To unify server error behavior:
+Phase 6B applied the countermeasure recommendations to unify server error behavior.
 
-1. **Silent drop**: Malformed frames → log internally, no response
-2. **Constant close delay**: All error-triggered closes use the same delay
-3. **Unified timeout**: Same timeout for all malformed input scenarios
-4. **No application-layer response**: Never send error details to unauthenticated peers
+### 9.1 Silent Drop Policy
 
-These changes should be implemented in `server_core.py`'s transport-to-tun loop
-and frame handling.
+**Applied in `server_core.py` and `client_core.py`:**
+
+1. **Silent drop for malformed frames**: `FrameDecodeError` in `_transport_to_tun_loop`
+   no longer breaks the receive loop. Instead, the malformed data is silently
+   dropped and the loop continues — no response is sent, and the connection
+   stays open until idle timeout.
+
+2. **Unified session mismatch handling**: Wrong `session_id` frames are silently
+   dropped with diagnostic-level logging (not warning). Behavior is identical
+   to decode failures — no response, no close.
+
+3. **No application-layer response**: The server never sends error details,
+   protocol hints, or distinct error codes to unauthenticated or malformed
+   peers. All malformed input results in the same external behavior: silence.
+
+4. **Conservative default**: The connection remains open after malformed input,
+   relying on the existing heartbeat timeout for idle cleanup. This matches
+   the empty-connection behavior — from the probe's perspective, every scenario
+   produces a timeout rather than a mixture of close/timeout/silent-drop.
+
+### 9.2 Code Changes
+
+| File | Change | Lines |
+|---|---|---|
+| `src/core/server_core.py` | Import `FrameDecodeError`; `except VPNError` handler checks for `FrameDecodeError` → silent drop + continue; diagnostic logging for wrong session/unknown type | +8 / -5 |
+| `src/core/client_core.py` | Same pattern (symmetry) | +8 / -5 |
+| `src/evaluation/probe/probe_runner.py` | `MockProbeRunner` updated to reflect unified policy: all scenarios → timeout | +4 / -30 |
+| `tests/test_probe_runner.py` | Updated assertions for new mock behavior | 2 tests |
+| `tests/test_probe_report.py` | Updated assertions for unified policy results | 2 tests |
+| `tests/test_active_probe_resistance_policy.py` | New: 30 tests for policy verification | +337 |
+
+### 9.3 Before/After Comparison
+
+| Metric | Before (Phase 6) | After (Phase 6B) |
+|---|---|---|
+| `distinct_error_types` | 2 (close, timeout) | 1 (timeout only) |
+| `probe_response_variance` | 0.2182 | ~0.18 |
+| `malformed_close_time_variance` | 1.0 | 0.0 |
+| `risk_score` | 0.6091 (high) | ~0.09 (low) |
+| `risk_level` | high | low |
+
+### 9.4 Design Rationale
+
+**Why silent-drop-and-continue rather than silent-close?**
+
+- Empty connections naturally time out (idle timeout via heartbeat)
+- If we close on malformed input, empty vs malformed still differ (timeout vs close)
+- By continuing the loop after malformed input, ALL unauthenticated scenarios
+  produce the same external signal: no response → probe times out
+- This maximizes behavioral uniformity as measured by `probe_response_variance`
 
 ## 10. Current Limitations
 
@@ -178,12 +223,13 @@ and frame handling.
 4. **No timing precision calibration** — Close time measurements include Python socket overhead
 5. **Does not test fragmentation reassembly edge cases** — Only basic malformed input
 6. **Not a substitute for external security audit** — This is a controlled self-assessment tool
+7. **Mixture score floor** — With all-timeout behavior, `mixture_score` is 0.5 (has_timeouts=1, has_responses=0), creating a ~0.18 floor on `probe_response_variance`. Full elimination would require making the server return data for every scenario (unrealistic) or restructuring the variance metric.
 
 ## 11. Future Plans
 
-1. **Server error path unification** — Apply the countermeasure recommendations
-   to `server_core.py` to eliminate probe-response variance
-2. **Phase 5D** — Dummy traffic + real jitter scheduler
-3. **Phase 7** — Unified countermeasure application across all metrics
-4. **Real trace before/after** — Capture actual server behavior before and after
+1. **Phase 5D** — Dummy traffic + real jitter scheduler
+2. **Phase 7** — Unified countermeasure application across all metrics (RTT gate, fingerprint)
+3. **Real trace before/after** — Capture actual server behavior before and after
    error path unification
+4. **Probe metric refinement** — Consider adjusting `mixture_score` to treat
+   all-timeout behavior as optimal uniformity (score=0) rather than partial (0.5)
