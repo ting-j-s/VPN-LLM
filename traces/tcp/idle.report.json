@@ -1,0 +1,88 @@
+{
+  "trace_path": "/data/xjr/VPN-LLM/traces/tcp/idle.csv",
+  "packet_count": 5,
+  "first_n_lengths": [
+    74,
+    74,
+    66,
+    96,
+    66
+  ],
+  "first_n_directions": [
+    "C2S",
+    "S2C",
+    "C2S",
+    "C2S",
+    "S2C"
+  ],
+  "small_packet_ratio": 1.0,
+  "repeated_length_ratio": 0.8,
+  "unique_length_count": 3,
+  "avg_inter_arrival_ms": 0.027,
+  "median_inter_arrival_ms": 0.016,
+  "stdev_inter_arrival_ms": 0.03,
+  "max_burst_packets_10ms": 5,
+  "direction_switch_count": 3,
+  "c2s_packet_count": 3,
+  "s2c_packet_count": 2,
+  "fingerprint_risk_score": 0.6287,
+  "risk_level": "medium",
+  "notes": [
+    "high repeated-length ratio (0.800)",
+    "high small-packet ratio (1.000)",
+    "high packet-level burst — 5 packets in 10 ms window",
+    "stable 3-gram pattern (dominant_ratio=0.333, entropy=1.585)"
+  ],
+  "signed_sizes": [
+    74,
+    -74,
+    66,
+    96,
+    -66
+  ],
+  "bucket_sequence": [
+    "+L1",
+    "-L1",
+    "+L1",
+    "+L1",
+    "-L1"
+  ],
+  "ngram_entropy": 1.585,
+  "unique_ngram_count": 3,
+  "dominant_ngram_ratio": 0.3333,
+  "top_ngrams": [
+    {
+      "ngram": "+L1|-L1|+L1",
+      "count": 1,
+      "ratio": 0.3333
+    },
+    {
+      "ngram": "-L1|+L1|+L1",
+      "count": 1,
+      "ratio": 0.3333
+    },
+    {
+      "ngram": "+L1|+L1|-L1",
+      "count": 1,
+      "ratio": 0.3333
+    }
+  ],
+  "burst_count": 4,
+  "burst_total_lengths": [
+    74,
+    74,
+    162,
+    66
+  ],
+  "burst_directions": [
+    "C2S",
+    "S2C",
+    "C2S",
+    "S2C"
+  ],
+  "avg_burst_size": 94,
+  "median_burst_size": 74.0,
+  "p95_burst_size": 162,
+  "max_burst_size": 162,
+  "dominant_burst_direction_ratio": 0.5
+}

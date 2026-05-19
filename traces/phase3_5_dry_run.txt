@@ -1,0 +1,77 @@
+[dry-run] Would run 16 scenario(s):
+  tcp/idle :9000
+    pcap  → traces/tcp/idle.pcap
+    csv   → traces/tcp/idle.csv
+    report → traces/tcp/idle.report.json
+  tcp/ping :9000
+    pcap  → traces/tcp/ping.pcap
+    csv   → traces/tcp/ping.csv
+    report → traces/tcp/ping.report.json
+    cmd   → ping -c 5 10.0.0.2
+  tcp/curl :9000
+    pcap  → traces/tcp/curl.pcap
+    csv   → traces/tcp/curl.csv
+    report → traces/tcp/curl.report.json
+    cmd   → curl -s -o /dev/null http://10.0.0.2:8080/
+  tcp/bulk :9000
+    pcap  → traces/tcp/bulk.pcap
+    csv   → traces/tcp/bulk.csv
+    report → traces/tcp/bulk.report.json
+    cmd   → dd if=/dev/zero bs=1M count=10 | nc 10.0.0.2 8080
+  tls/idle :9001
+    pcap  → traces/tls/idle.pcap
+    csv   → traces/tls/idle.csv
+    report → traces/tls/idle.report.json
+  tls/ping :9001
+    pcap  → traces/tls/ping.pcap
+    csv   → traces/tls/ping.csv
+    report → traces/tls/ping.report.json
+    cmd   → ping -c 5 10.0.0.2
+  tls/curl :9001
+    pcap  → traces/tls/curl.pcap
+    csv   → traces/tls/curl.csv
+    report → traces/tls/curl.report.json
+    cmd   → curl -s -o /dev/null http://10.0.0.2:8080/
+  tls/bulk :9001
+    pcap  → traces/tls/bulk.pcap
+    csv   → traces/tls/bulk.csv
+    report → traces/tls/bulk.report.json
+    cmd   → dd if=/dev/zero bs=1M count=10 | nc 10.0.0.2 8080
+  websocket/idle :9002
+    pcap  → traces/websocket/idle.pcap
+    csv   → traces/websocket/idle.csv
+    report → traces/websocket/idle.report.json
+  websocket/ping :9002
+    pcap  → traces/websocket/ping.pcap
+    csv   → traces/websocket/ping.csv
+    report → traces/websocket/ping.report.json
+    cmd   → ping -c 5 10.0.0.2
+  websocket/curl :9002
+    pcap  → traces/websocket/curl.pcap
+    csv   → traces/websocket/curl.csv
+    report → traces/websocket/curl.report.json
+    cmd   → curl -s -o /dev/null http://10.0.0.2:8080/
+  websocket/bulk :9002
+    pcap  → traces/websocket/bulk.pcap
+    csv   → traces/websocket/bulk.csv
+    report → traces/websocket/bulk.report.json
+    cmd   → dd if=/dev/zero bs=1M count=10 | nc 10.0.0.2 8080
+  ssh/idle :9003
+    pcap  → traces/ssh/idle.pcap
+    csv   → traces/ssh/idle.csv
+    report → traces/ssh/idle.report.json
+  ssh/ping :9003
+    pcap  → traces/ssh/ping.pcap
+    csv   → traces/ssh/ping.csv
+    report → traces/ssh/ping.report.json
+    cmd   → ping -c 5 10.0.0.2
+  ssh/curl :9003
+    pcap  → traces/ssh/curl.pcap
+    csv   → traces/ssh/curl.csv
+    report → traces/ssh/curl.report.json
+    cmd   → curl -s -o /dev/null http://10.0.0.2:8080/
+  ssh/bulk :9003
+    pcap  → traces/ssh/bulk.pcap
+    csv   → traces/ssh/bulk.csv
+    report → traces/ssh/bulk.report.json
+    cmd   → dd if=/dev/zero bs=1M count=10 | nc 10.0.0.2 8080

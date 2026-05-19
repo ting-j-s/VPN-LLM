@@ -1,0 +1,21 @@
+transport,scenario,trace_type,packet_count,risk_level,fingerprint_risk_score,small_packet_ratio,repeated_length_ratio,ngram_entropy,dominant_ngram_ratio,burst_count,max_burst_size,dominant_burst_direction_ratio,avg_inter_arrival_ms,notes
+ssh,bulk,skipped,0,skipped,,,,,,,,,,report not found
+ssh,curl,skipped,0,skipped,,,,,,,,,,report not found
+ssh,idle,skipped,0,skipped,,,,,,,,,,report not found
+ssh,ping,skipped,0,skipped,,,,,,,,,,report not found
+ssh,reconnect,skipped,0,skipped,,,,,,,,,,report not found
+tcp,bulk,skipped,0,skipped,,,,,,,,,,report not found
+tcp,curl,skipped,0,skipped,,,,,,,,,,report not found
+tcp,idle,real,5,medium,0.6287,1.0,0.8,1.585,0.3333,4,162,0.5,0.027,"high repeated-length ratio (0.800); high small-packet ratio (1.000); high packet-level burst — 5 packets in 10 ms window; stable 3-gram pattern (dominant_ratio=0.333, entropy=1.585)"
+tcp,ping,skipped,0,skipped,,,,,,,,,,report not found
+tcp,reconnect,skipped,0,skipped,,,,,,,,,,report not found
+tls,bulk,skipped,0,skipped,,,,,,,,,,report not found
+tls,curl,skipped,0,skipped,,,,,,,,,,report not found
+tls,idle,real,12,medium,0.6385,0.5833,0.6667,3.1219,0.2,9,1469,0.5556,4.72,"high repeated-length ratio (0.667); high small-packet ratio (0.583); high packet-level burst — 11 packets in 10 ms window; distinctive burst profile (dir_ratio=0.556, max_burst=1469B)"
+tls,ping,skipped,0,skipped,,,,,,,,,,report not found
+tls,reconnect,skipped,0,skipped,,,,,,,,,,report not found
+websocket,bulk,skipped,0,skipped,,,,,,,,,,report not found
+websocket,curl,skipped,0,skipped,,,,,,,,,,report not found
+websocket,idle,real,9,medium,0.5843,0.7778,0.6667,2.8074,0.1429,6,435,0.5,6.066,"high repeated-length ratio (0.667); high small-packet ratio (0.778); high packet-level burst — 8 packets in 10 ms window; distinctive burst profile (dir_ratio=0.500, max_burst=435B)"
+websocket,ping,skipped,0,skipped,,,,,,,,,,report not found
+websocket,reconnect,skipped,0,skipped,,,,,,,,,,report not found

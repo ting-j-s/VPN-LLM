@@ -1,0 +1,128 @@
+{
+  "trace_path": "/data/xjr/VPN-LLM/traces/websocket/idle.csv",
+  "packet_count": 9,
+  "first_n_lengths": [
+    74,
+    74,
+    66,
+    333,
+    66,
+    369,
+    66,
+    100,
+    66
+  ],
+  "first_n_directions": [
+    "C2S",
+    "S2C",
+    "C2S",
+    "C2S",
+    "S2C",
+    "S2C",
+    "C2S",
+    "C2S",
+    "S2C"
+  ],
+  "small_packet_ratio": 0.7778,
+  "repeated_length_ratio": 0.6667,
+  "unique_length_count": 5,
+  "avg_inter_arrival_ms": 6.066,
+  "median_inter_arrival_ms": 0.459,
+  "stdev_inter_arrival_ms": 15.681,
+  "max_burst_packets_10ms": 8,
+  "direction_switch_count": 5,
+  "c2s_packet_count": 5,
+  "s2c_packet_count": 4,
+  "fingerprint_risk_score": 0.5843,
+  "risk_level": "medium",
+  "notes": [
+    "high repeated-length ratio (0.667)",
+    "high small-packet ratio (0.778)",
+    "high packet-level burst — 8 packets in 10 ms window",
+    "distinctive burst profile (dir_ratio=0.500, max_burst=435B)"
+  ],
+  "signed_sizes": [
+    74,
+    -74,
+    66,
+    333,
+    -66,
+    -369,
+    66,
+    100,
+    -66
+  ],
+  "bucket_sequence": [
+    "+L1",
+    "-L1",
+    "+L1",
+    "+L2",
+    "-L1",
+    "-L2",
+    "+L1",
+    "+L1",
+    "-L1"
+  ],
+  "ngram_entropy": 2.8074,
+  "unique_ngram_count": 7,
+  "dominant_ngram_ratio": 0.1429,
+  "top_ngrams": [
+    {
+      "ngram": "+L1|-L1|+L1",
+      "count": 1,
+      "ratio": 0.1429
+    },
+    {
+      "ngram": "-L1|+L1|+L2",
+      "count": 1,
+      "ratio": 0.1429
+    },
+    {
+      "ngram": "+L1|+L2|-L1",
+      "count": 1,
+      "ratio": 0.1429
+    },
+    {
+      "ngram": "+L2|-L1|-L2",
+      "count": 1,
+      "ratio": 0.1429
+    },
+    {
+      "ngram": "-L1|-L2|+L1",
+      "count": 1,
+      "ratio": 0.1429
+    },
+    {
+      "ngram": "-L2|+L1|+L1",
+      "count": 1,
+      "ratio": 0.1429
+    },
+    {
+      "ngram": "+L1|+L1|-L1",
+      "count": 1,
+      "ratio": 0.1429
+    }
+  ],
+  "burst_count": 6,
+  "burst_total_lengths": [
+    74,
+    74,
+    399,
+    435,
+    166,
+    66
+  ],
+  "burst_directions": [
+    "C2S",
+    "S2C",
+    "C2S",
+    "S2C",
+    "C2S",
+    "S2C"
+  ],
+  "avg_burst_size": 202.33,
+  "median_burst_size": 120.0,
+  "p95_burst_size": 435,
+  "max_burst_size": 435,
+  "dominant_burst_direction_ratio": 0.5
+}

@@ -95,3 +95,6 @@ api_key*
 # Phase 10 netns/TUN validation artifacts (pcap files in repo)
 *.pcap
 *.pcapng
+
+# Phase 3.5 trace temporary files
+traces/*.tmp
