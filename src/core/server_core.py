@@ -13,6 +13,7 @@ from typing import Optional
 from ..common.errors import VPNError, TransportTimeout
 from ..common.frame import Frame, FrameType, create_frame, encode_frame, decode_frame
 from ..common.logger import get_logger
+from ..shaping.base import NoopTrafficShaper, TrafficShaper
 from ..transport.base import Transport
 from ..tun.tun_device import TunDevice
 
@@ -47,6 +48,7 @@ class ServerCore:
         session_id: Optional[bytes] = None,
         heartbeat_interval: float = 10.0,
         heartbeat_timeout: float = 30.0,
+        traffic_shaper: TrafficShaper | None = None,
     ):
         """Initialize server core.
 
@@ -56,6 +58,7 @@ class ServerCore:
             session_id: Expected session ID. Auto-generated if None.
             heartbeat_interval: Interval between HEARTBEAT frames (seconds).
             heartbeat_timeout: Timeout for no received data (seconds).
+            traffic_shaper: Optional TrafficShaper. Defaults to NoopTrafficShaper.
         """
         self.tun = tun
         self.transport = transport
@@ -70,6 +73,9 @@ class ServerCore:
         self._session_adopted = False
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
+
+        # Traffic shaping (default: no-op, zero impact on existing behavior)
+        self.traffic_shaper: TrafficShaper = traffic_shaper or NoopTrafficShaper()
 
         self._running = False
         self._stop_event: threading.Event = threading.Event()
@@ -203,6 +209,20 @@ class ServerCore:
         logger.info(f"Graceful shutdown completed (transport->tun={self._transport_to_tun_bytes} bytes, "
                     f"tun->transport={self._tun_to_transport_bytes} bytes)")
 
+    def _send_shaped(self, encoded_frame: bytes) -> None:
+        """Send an encoded frame through the traffic shaper.
+
+        If the shaper buffers the frame (returns empty), flushes immediately.
+        Jitter delay_ms metadata is logged but not slept (scheduler not active).
+        """
+        chunks = self.traffic_shaper.encode_frame(encoded_frame)
+        if not chunks:
+            chunks = self.traffic_shaper.flush()
+        for chunk in chunks:
+            if chunk.delay_ms > 0:
+                logger.debug(f"Jitter delay {chunk.delay_ms:.1f}ms ignored (no scheduler)")
+            self.transport.send(chunk.data)
+
     def _heartbeat_loop(self) -> None:
         """Dedicated heartbeat thread.
 
@@ -224,7 +244,7 @@ class ServerCore:
             if now - self._last_sent_time >= self.heartbeat_interval:
                 try:
                     heartbeat = create_frame(FrameType.HEARTBEAT, self.session_id)
-                    self.transport.send(encode_frame(heartbeat))
+                    self._send_shaped(encode_frame(heartbeat))
                     self._last_sent_time = now
                     logger.debug("Sent HEARTBEAT")
                 except Exception as e:
@@ -254,16 +274,23 @@ class ServerCore:
                 if data is None:
                     continue
 
-                # Refresh last received time on any valid frame
+                # Refresh last received time on any valid data
                 self._last_received_time = time.time()
 
-                frame = decode_frame(data)
-                logger.debug(
-                    f"Transport->TUN RECEIVED frame: type={frame.frame_type.name} "
-                    f"session={uuid.UUID(bytes=frame.session_id).hex[:8] if frame.session_id else '?'} "
-                    f"payload_len={len(frame.payload) if frame.payload else 0}"
-                )
-                self._handle_frame(frame)
+                try:
+                    encoded_frames = self.traffic_shaper.decode_chunk(data)
+                except Exception as e:
+                    logger.warning(f"Shaper decode error, dropping chunk (len={len(data)}): {e}")
+                    continue
+
+                for encoded in encoded_frames:
+                    frame = decode_frame(encoded)
+                    logger.debug(
+                        f"Transport->TUN RECEIVED frame: type={frame.frame_type.name} "
+                        f"session={uuid.UUID(bytes=frame.session_id).hex[:8] if frame.session_id else '?'} "
+                        f"payload_len={len(frame.payload) if frame.payload else 0}"
+                    )
+                    self._handle_frame(frame)
 
             except VPNError as e:
                 if self._stop_event.is_set():
@@ -345,8 +372,7 @@ class ServerCore:
                 packet = self.tun.read_packet()
                 if packet:
                     frame = create_frame(FrameType.DATA, self.session_id, packet)
-                    data = encode_frame(frame)
-                    self.transport.send(data)
+                    self._send_shaped(encode_frame(frame))
                     self._tun_to_transport_bytes += len(packet)
                     self._last_sent_time = time.time()
                     logger.debug(

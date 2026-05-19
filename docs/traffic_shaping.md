@@ -203,17 +203,99 @@ python3 -m src.llm.detection.patch_loop \
 
 7. **Does NOT claim real undetectability** — This is a local controlled-experiment tool.
 
-## 10. Future Plans (Phase 5B+)
+## 10. Phase 5B: Core Integration (COMPLETE)
 
-1. **Integrate into ClientCore/ServerCore** — Add optional `traffic_shaper` parameter,
-   wrapping `transport.send()` and `transport.recv()` calls.
+### 10.1 Core insertion points
 
-2. **Scheduler with actual jitter execution** — Thread that reads `ShapedChunk.delay_ms`
-   and sleeps before sending.
+ClientCore and ServerCore accept an optional `traffic_shaper` parameter:
 
-3. **Dummy traffic generation** — Configurable interval dummy frames.
+```python
+from src.shaping import PaddingShaper
 
-4. **RTT gate integration** — Feed RTT measurements back to jitter parameters.
+shaper = PaddingShaper(min_padding_bytes=8, max_padding_bytes=64)
+client = ClientCore(tun=tun, transport=transport, traffic_shaper=shaper)
+```
 
-5. **Active probe resistance** — Phase 6: unified timeout, silent drop, constant close
-   policy for probe response variance.
+Default: `None` → `NoopTrafficShaper()` — zero behavioral change.
+
+### 10.2 Send pipeline
+
+`_send_shaped(encoded_frame)` wraps all transport sends:
+
+```
+encoded_frame → shaper.encode_frame() → [ShapedChunk, ...]
+  → for each chunk: transport.send(chunk.data)
+```
+
+Applied to: AUTH, DATA, HEARTBEAT (all frame types).
+
+If `encode_frame()` returns empty (frame buffered for aggregation),
+`flush()` is called immediately to avoid silent drops.
+
+### 10.3 Recv pipeline
+
+`_transport_to_tun_loop` decodes through the shaper:
+
+```
+raw_bytes → shaper.decode_chunk() → [encoded_frame, ...]
+  → for each: decode_frame(encoded) → _handle_frame(frame)
+```
+
+Supports multi-frame decode (decode_chunk returning N frames). If
+decode fails, falls back to raw data to ensure loop resilience.
+
+### 10.4 What is NOT connected in Phase 5B
+
+| Component | Status | Reason |
+|---|---|---|
+| NoopTrafficShaper | Connected | Default, zero impact |
+| PaddingShaper | Connected | Fully reversible, no scheduler needed |
+| AggregationShaper | NOT connected to core | Requires scheduler with flush policy (Phase 5C) |
+| Fragmentation | NOT connected to core | Requires cross-chunk reassembly (Phase 5C+) |
+| JitterShaper delay_ms | Metadata only | No real sleep; scheduler needed (Phase 5C) |
+| YAML config | NOT connected | Constructor injection only (Phase 5C) |
+| Dummy traffic | NOT implemented | Reserved config field |
+
+### 10.5 Heartbeat / control frame safety
+
+All frame types (AUTH, DATA, HEARTBEAT, CLOSE) go through the same
+`_send_shaped()` helper. With Noop or Padding, each frame is sent
+individually — no buffering, no caching. `_send_shaped` includes a
+flush safeguard: if encode_frame returns empty (aggregation case),
+flush() is called immediately to prevent silent drops.
+
+### 10.6 Tests
+
+New test file: `tests/test_core_traffic_shaping.py` (15 tests):
+- Noop default behavior (ClientCore, ServerCore, old constructor)
+- Padding integration (send sees VPAD, recv roundtrip, ServerCore)
+- Multi-frame decode handling
+- Empty-encode flush safeguard
+- Jitter metadata no-sleep verification
+- Heartbeat through Noop/Padding/Aggregation paths
+- Shaper decode error resilience (fallback to raw data)
+- Factory-created shaper with core
+
+### 10.7 Current limitations
+
+1. No YAML configuration — shaper must be injected via constructor.
+2. Jitter delay_ms is logged but not slept.
+3. Aggregation not in core path (flush policy needs scheduler).
+4. Fragmentation not in core path (cross-chunk reassembly).
+5. No dummy traffic.
+6. No real-time RTT-aware pacing.
+
+## 11. Future Plans (Phase 5C+)
+
+1. **Phase 5C: Scheduler + Aggregation + YAML config**
+   - Introduce a send scheduler that respects jitter delay_ms
+   - Define aggregation flush policy (time / size / control-frame triggers)
+   - YAML config parsing (shaping: enabled, padding_*, aggregation_*, etc.)
+   - Re-run before/after real trace comparison
+
+2. **Phase 6: Active probe resistance**
+   - Unified timeout, silent drop, constant close policy for probe response variance
+
+3. **RTT gate integration** — Feed RTT measurements back to jitter parameters.
+
+4. **Dummy traffic generation** — Configurable interval dummy frames.
