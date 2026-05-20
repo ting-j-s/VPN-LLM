@@ -270,6 +270,104 @@ _HINT_MAP: dict[str, CountermeasureHint] = {
             "immediate vs delayed close distinction",
         ],
     ),
+    "app_transport_diff_ms": CountermeasureHint(
+        metric_name="app_transport_diff_ms",
+        problem="High RTT difference between application and transport layers — "
+                "cross-layer timing discrepancy enables CalcuLatency-style detection "
+                "(application vs transport RTT mismatch).",
+        recommended_changes=[
+            "implement RTT-aware pacing to align layer latencies",
+            "add latency budget tracking in scheduler",
+            "reduce transport-layer buffering to minimize artificial delay",
+            "evaluate multiplex / scheduler interaction for latency impact",
+            "target app-transport diff < 15ms for low-risk profile",
+        ],
+        affected_layers=[
+            "scheduler",
+            "transport adapter",
+        ],
+        tradeoffs=[
+            "performance cost of latency alignment",
+            "may require transport-level buffering changes",
+            "RTT-aware pacing may reduce throughput",
+        ],
+        avoid=[
+            "constant excessive delay as a blanket fix",
+            "ignoring application-layer latency in scheduling",
+        ],
+    ),
+    "app_network_diff_ms": CountermeasureHint(
+        metric_name="app_network_diff_ms",
+        problem="High RTT difference between application and network layers — "
+                "cross-layer timing discrepancy across three layers enables "
+                "passive cross-layer RTT fingerprinting.",
+        recommended_changes=[
+            "align application latency profile with network baseline",
+            "implement latency budget tracking across all layers",
+            "evaluate synthetic delay to match expected network profile",
+            "monitor three-layer consistency in scheduler",
+        ],
+        affected_layers=[
+            "scheduler",
+            "transport adapter",
+        ],
+        tradeoffs=[
+            "multi-layer latency alignment is complex",
+            "may require network-layer awareness in application scheduler",
+        ],
+        avoid=[
+            "large fixed synthetic delays",
+            "ignoring network-layer constraints",
+        ],
+    ),
+    "timing_stability_score": CountermeasureHint(
+        metric_name="timing_stability_score",
+        problem="High timing stability — consistent inter-packet or RTT timing "
+                "creates a detectable timing signature (cross-layer RTT analysis, "
+                "CalcuLatency timing fingerprint).",
+        recommended_changes=[
+            "add jitter to inter-packet timing",
+            "randomize scheduler intervals within safe bounds",
+            "avoid deterministic intervals in all layers",
+            "use non-uniform pacing with configurable jitter range",
+        ],
+        affected_layers=[
+            "scheduler",
+        ],
+        tradeoffs=[
+            "jitter increases latency variance",
+            "may affect throughput for interactive traffic",
+        ],
+        avoid=[
+            "deterministic timer intervals",
+            "constant delay that creates new patterns",
+        ],
+    ),
+    "rtt_risk_score": CountermeasureHint(
+        metric_name="rtt_risk_score",
+        problem="Overall cross-layer RTT risk score exceeds threshold — "
+                "multiple RTT metrics indicate a detectable timing fingerprint "
+                "(CalcuLatency + cross-layer RTT combined).",
+        recommended_changes=[
+            "apply multi-layer timing countermeasures: pacing + jitter + scheduler",
+            "prioritize reducing app-transport diff first",
+            "re-evaluate after each countermeasure to avoid over-correction",
+            "run before/after RTT comparison to validate improvement",
+        ],
+        affected_layers=[
+            "scheduler",
+            "transport adapter",
+            "evaluation",
+        ],
+        tradeoffs=[
+            "cumulative latency and throughput cost",
+            "increased implementation complexity",
+        ],
+        avoid=[
+            "applying all countermeasures at once without measurement",
+            "over-engineering timing that creates new patterns",
+        ],
+    ),
     "fingerprint_risk_score": CountermeasureHint(
         metric_name="fingerprint_risk_score",
         problem="Overall fingerprint risk score exceeds threshold — the "

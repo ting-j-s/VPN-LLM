@@ -37,6 +37,9 @@ class DetectionThresholds:
     fail_on_insufficient_data: bool = False
     max_avg_inter_arrival_ms_deviation: float | None = None
     max_rtt_diff_ms: float | None = None
+    max_app_transport_diff_ms: float | None = 50.0
+    max_app_network_diff_ms: float | None = None
+    max_timing_stability_score: float | None = None
     max_probe_response_variance: float | None = None
     max_malformed_close_time_variance: float | None = None
 
@@ -53,6 +56,9 @@ class DetectionThresholds:
             "fail_on_insufficient_data": self.fail_on_insufficient_data,
             "max_avg_inter_arrival_ms_deviation": self.max_avg_inter_arrival_ms_deviation,
             "max_rtt_diff_ms": self.max_rtt_diff_ms,
+            "max_app_transport_diff_ms": self.max_app_transport_diff_ms,
+            "max_app_network_diff_ms": self.max_app_network_diff_ms,
+            "max_timing_stability_score": self.max_timing_stability_score,
             "max_probe_response_variance": self.max_probe_response_variance,
             "max_malformed_close_time_variance": self.max_malformed_close_time_variance,
         }
@@ -238,7 +244,7 @@ def evaluate_detection_report(
                     thresholds.max_avg_inter_arrival_ms_deviation)
                 overall_passed = False
 
-    # --- RTT diff ---
+    # --- RTT diff (legacy, may coexist with app_transport_diff_ms) ---
     if thresholds.max_rtt_diff_ms is not None:
         m = _find_metric(report.metrics, "rtt_diff_ms")
         if m and isinstance(m.value, (int, float)):
@@ -247,6 +253,50 @@ def evaluate_detection_report(
                     f"rtt_diff_ms={m.value} > max={thresholds.max_rtt_diff_ms}",
                     thresholds.max_rtt_diff_ms)
                 overall_passed = False
+
+    # --- app_transport_diff_ms ---
+    if thresholds.max_app_transport_diff_ms is not None:
+        m = _find_metric(report.metrics, "app_transport_diff_ms")
+        if m and isinstance(m.value, (int, float)):
+            if m.value > thresholds.max_app_transport_diff_ms:
+                _fail_metric(m,
+                    f"app_transport_diff_ms={m.value} > max={thresholds.max_app_transport_diff_ms}",
+                    thresholds.max_app_transport_diff_ms)
+                overall_passed = False
+
+    # --- app_network_diff_ms ---
+    if thresholds.max_app_network_diff_ms is not None:
+        m = _find_metric(report.metrics, "app_network_diff_ms")
+        if m and isinstance(m.value, (int, float)):
+            if m.value > thresholds.max_app_network_diff_ms:
+                _fail_metric(m,
+                    f"app_network_diff_ms={m.value} > max={thresholds.max_app_network_diff_ms}",
+                    thresholds.max_app_network_diff_ms)
+                overall_passed = False
+
+    # --- timing_stability_score ---
+    if thresholds.max_timing_stability_score is not None:
+        m = _find_metric(report.metrics, "timing_stability_score")
+        if m and isinstance(m.value, (int, float)):
+            if m.value > thresholds.max_timing_stability_score:
+                _fail_metric(m,
+                    f"timing_stability_score={m.value} > max={thresholds.max_timing_stability_score}",
+                    thresholds.max_timing_stability_score)
+                overall_passed = False
+
+    # --- rtt_risk_score ---
+    m = _find_metric(report.metrics, "rtt_risk_score")
+    if m and isinstance(m.value, (int, float)):
+        if m.value >= 0.6:  # high
+            _fail_metric(m,
+                f"rtt_risk_score={m.value} >= 0.6 (high risk)",
+                0.6)
+            overall_passed = False
+        elif m.value >= 0.3:  # medium
+            _warn_metric(m,
+                f"rtt_risk_score={m.value} >= 0.3 (medium risk)",
+                0.3)
+            overall_passed = False
 
     # --- probe response variance ---
     if thresholds.max_probe_response_variance is not None:

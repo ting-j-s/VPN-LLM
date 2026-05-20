@@ -423,6 +423,63 @@ def from_probe_report(report: dict[str, Any],
     )
 
 
+def from_rtt_report(report: dict[str, Any],
+                    source_path: str | None = None) -> DetectionReport:
+    """Create a DetectionReport from a cross-layer RTT report dict.
+
+    Extracts RTT-specific metrics (app_transport_diff_ms, app_network_diff_ms,
+    timing_stability_score, rtt_risk_score) and preserves measurements in raw.
+    """
+    notes: list[str] = []
+    metrics: list[DetectionMetric] = []
+
+    detector_name = report.get("detector_name", "cross_layer_rtt")
+    risk_score = report.get("risk_score")
+    risk_level = report.get("risk_level")
+    raw = dict(report.get("raw", report))
+
+    # Extract RTT metrics from the metrics list
+    for m in report.get("metrics", []):
+        if not isinstance(m, dict):
+            continue
+        name = m.get("name", "")
+        value = m.get("value")
+        if name in ("app_transport_diff_ms", "app_network_diff_ms",
+                     "timing_stability_score", "rtt_risk_score",
+                     "application_rtt_ms", "transport_rtt_ms", "network_rtt_ms"):
+            metrics.append(DetectionMetric(
+                name=name,
+                value=value,
+                threshold=None,
+                passed=True,
+                severity="info",
+                explanation=m.get("explanation", f"{name}={value}"),
+            ))
+
+    # Report notes
+    report_notes = report.get("notes", [])
+    if isinstance(report_notes, list):
+        notes.extend(report_notes)
+    elif isinstance(report_notes, str) and report_notes:
+        notes.append(report_notes)
+
+    trace_type = report.get("trace_type", "synthetic")
+
+    return DetectionReport(
+        detector_name=detector_name,
+        source_path=source_path,
+        trace_type=trace_type,
+        transport=report.get("transport", "tcp"),
+        scenario=report.get("scenario", "rtt"),
+        passed=report.get("passed", True),
+        risk_score=float(risk_score) if risk_score is not None else None,
+        risk_level=risk_level,
+        metrics=metrics,
+        notes=notes,
+        raw=raw,
+    )
+
+
 def load_detection_report(path: str | Path) -> DetectionReport:
     """Load a fingerprint report JSON and convert to DetectionReport."""
     p = Path(path)
@@ -448,6 +505,8 @@ def load_detection_report(path: str | Path) -> DetectionReport:
     detector_name = raw.get("detector_name", "fingerprint")
     if detector_name in ("active_probe_resistance", "probe"):
         return from_probe_report(raw, source_path=str(p))
+    if detector_name == "cross_layer_rtt":
+        return from_rtt_report(raw, source_path=str(p))
     return from_fingerprint_report(raw, source_path=str(p))
 
 

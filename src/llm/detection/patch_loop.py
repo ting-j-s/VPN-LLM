@@ -293,6 +293,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum dominant burst direction ratio.",
     )
     parser.add_argument(
+        "--max-app-transport-diff-ms", type=float, default=None,
+        help="Maximum allowed app-transport RTT diff in ms.",
+    )
+    parser.add_argument(
+        "--max-app-network-diff-ms", type=float, default=None,
+        help="Maximum allowed app-network RTT diff in ms.",
+    )
+    parser.add_argument(
+        "--max-timing-stability-score", type=float, default=None,
+        help="Maximum allowed timing stability score (0-1).",
+    )
+    parser.add_argument(
         "--fail-on-insufficient-data", action="store_true",
         help="Fail (rather than warn) on insufficient_data.",
     )
@@ -329,6 +341,9 @@ def main(argv: list[str] | None = None) -> None:
         min_ngram_entropy=args.min_ngram_entropy,
         max_dominant_ngram_ratio=args.max_dominant_ngram_ratio,
         max_dominant_burst_direction_ratio=args.max_dominant_burst_dir_ratio,
+        max_app_transport_diff_ms=args.max_app_transport_diff_ms,
+        max_app_network_diff_ms=args.max_app_network_diff_ms,
+        max_timing_stability_score=args.max_timing_stability_score,
         fail_on_insufficient_data=args.fail_on_insufficient_data,
     )
 
