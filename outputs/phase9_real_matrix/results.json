@@ -1,0 +1,41 @@
+{
+  "generated_at": "2026-05-20T10:21:18.060132+00:00",
+  "execute": true,
+  "total": 2,
+  "ok": 2,
+  "failed": 0,
+  "skipped": 0,
+  "dry_run": 0,
+  "results": [
+    {
+      "transport": "tcp",
+      "scenario": "idle",
+      "phase": "before",
+      "trace_type": "real",
+      "pcap_path": "outputs/phase9_real_matrix/before/tcp/idle.pcap",
+      "csv_path": "outputs/phase9_real_matrix/before/tcp/idle.csv",
+      "report_path": "outputs/phase9_real_matrix/before/tcp/idle.report.json",
+      "scenario_command": "sleep 5",
+      "started_at": "2026-05-20T10:20:51.213639+00:00",
+      "ended_at": "2026-05-20T10:21:05.013921+00:00",
+      "duration_s": 13.8,
+      "status": "ok",
+      "error_reason": ""
+    },
+    {
+      "transport": "tcp",
+      "scenario": "idle",
+      "phase": "after",
+      "trace_type": "real",
+      "pcap_path": "outputs/phase9_real_matrix/after/tcp/idle.pcap",
+      "csv_path": "outputs/phase9_real_matrix/after/tcp/idle.csv",
+      "report_path": "outputs/phase9_real_matrix/after/tcp/idle.report.json",
+      "scenario_command": "sleep 5",
+      "started_at": "2026-05-20T10:21:05.014127+00:00",
+      "ended_at": "2026-05-20T10:21:18.059868+00:00",
+      "duration_s": 13.0,
+      "status": "ok",
+      "error_reason": ""
+    }
+  ]
+}

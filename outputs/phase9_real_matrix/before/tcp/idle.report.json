@@ -1,0 +1,76 @@
+{
+  "trace_path": "/data/xjr/VPN-LLM/outputs/phase9_real_matrix/before/tcp/idle.csv",
+  "packet_count": 4,
+  "first_n_lengths": [
+    144,
+    66,
+    144,
+    66
+  ],
+  "first_n_directions": [
+    "S2C",
+    "C2S",
+    "C2S",
+    "S2C"
+  ],
+  "small_packet_ratio": 0.5,
+  "repeated_length_ratio": 1.0,
+  "unique_length_count": 2,
+  "avg_inter_arrival_ms": 171.982,
+  "median_inter_arrival_ms": 0.033,
+  "stdev_inter_arrival_ms": 297.841,
+  "max_burst_packets_10ms": 2,
+  "direction_switch_count": 2,
+  "c2s_packet_count": 2,
+  "s2c_packet_count": 2,
+  "fingerprint_risk_score": 0.0,
+  "risk_level": "insufficient_data",
+  "notes": [
+    "packet_count < 5 — not enough data"
+  ],
+  "signed_sizes": [
+    -144,
+    66,
+    144,
+    -66
+  ],
+  "bucket_sequence": [
+    "-L1",
+    "+L1",
+    "+L1",
+    "-L1"
+  ],
+  "ngram_entropy": 1.0,
+  "unique_ngram_count": 2,
+  "dominant_ngram_ratio": 0.5,
+  "top_ngrams": [
+    {
+      "ngram": "-L1|+L1|+L1",
+      "count": 1,
+      "ratio": 0.5
+    },
+    {
+      "ngram": "+L1|+L1|-L1",
+      "count": 1,
+      "ratio": 0.5
+    }
+  ],
+  "burst_count": 4,
+  "burst_total_lengths": [
+    144,
+    66,
+    144,
+    66
+  ],
+  "burst_directions": [
+    "S2C",
+    "C2S",
+    "C2S",
+    "S2C"
+  ],
+  "avg_burst_size": 105,
+  "median_burst_size": 105.0,
+  "p95_burst_size": 144,
+  "max_burst_size": 144,
+  "dominant_burst_direction_ratio": 0.5
+}

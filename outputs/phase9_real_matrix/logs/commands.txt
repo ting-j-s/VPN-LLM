@@ -1,0 +1,13 @@
+# Phase 9 execute — 2026-05-20T10:21:18.063075+00:00
+
+# tcp/idle/before: ok
+  scenario_command: sleep 5
+  pcap:  outputs/phase9_real_matrix/before/tcp/idle.pcap
+  csv:   outputs/phase9_real_matrix/before/tcp/idle.csv
+  report: outputs/phase9_real_matrix/before/tcp/idle.report.json
+
+# tcp/idle/after: ok
+  scenario_command: sleep 5
+  pcap:  outputs/phase9_real_matrix/after/tcp/idle.pcap
+  csv:   outputs/phase9_real_matrix/after/tcp/idle.csv
+  report: outputs/phase9_real_matrix/after/tcp/idle.report.json

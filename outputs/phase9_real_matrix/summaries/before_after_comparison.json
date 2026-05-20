@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-05-20T10:21:18.077101+00:00",
+  "entries": [
+    {
+      "transport": "tcp",
+      "scenario": "idle",
+      "packet_count_before": 4,
+      "packet_count_after": 2,
+      "fingerprint_risk_score_before": 0.0,
+      "fingerprint_risk_score_after": 0.0,
+      "risk_level_before": "insufficient_data",
+      "risk_level_after": "insufficient_data",
+      "small_packet_ratio_before": 0.5,
+      "small_packet_ratio_after": 0.5,
+      "repeated_length_ratio_before": 1.0,
+      "repeated_length_ratio_after": 0.0,
+      "ngram_entropy_before": 1.0,
+      "ngram_entropy_after": 0.0,
+      "dominant_ngram_ratio_before": 0.5,
+      "dominant_ngram_ratio_after": 0.0,
+      "burst_count_before": 4,
+      "burst_count_after": 2,
+      "max_burst_size_before": 144,
+      "max_burst_size_after": 144,
+      "avg_inter_arrival_ms_before": 171.982,
+      "avg_inter_arrival_ms_after": 0.037,
+      "risk_score_delta": 0.0,
+      "verdict": "unchanged",
+      "trace_type_before": "real",
+      "trace_type_after": "real"
+    }
+  ]
+}
