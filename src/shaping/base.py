@@ -38,10 +38,16 @@ class TrafficShaper(ABC):
     All implementations must be reversible: for any sequence of frames,
     decode_chunk() on each shaped chunk emitted by encode_frame() + flush()
     must reconstruct the original frames in order.
+
+    Attributes:
+        timing_controller: Optional TimingController for RTT-aware delay/jitter.
+            When set, callers should invoke timing_controller.apply(chunk)
+            before sending each chunk. Default None → no timing applied.
     """
 
     def __init__(self, rng: random_module.Random | None = None):
         self._rng = rng or random_module.Random(42)
+        self.timing_controller: object | None = None  # TimingController, set by factory
 
     @abstractmethod
     def encode_frame(self, frame: bytes) -> list[ShapedChunk]:

@@ -226,22 +226,30 @@ class ServerCore:
         Control frames (HEARTBEAT, AUTH, CLOSE) trigger a pre-flush of
         buffered DATA, and are themselves flushed immediately so they
         are never delayed by aggregation.
-        Jitter delay_ms metadata is logged but not slept (scheduler not active).
+
+        Timing: if the TrafficShaper has a TimingController, it applies
+        per-chunk delay metadata and (in runtime_sleep mode) calls sleep_fn.
+        Non-DATA frames are never delayed.
         """
+        tc = getattr(self.traffic_shaper, "timing_controller", None)
+        frame_type_name = str(frame_type) if hasattr(frame_type, "name") else "DATA"
+
         if frame_type != FrameType.DATA:
-            # Flush buffered DATA before control/management frames
             for chunk in self.traffic_shaper.flush():
-                if chunk.delay_ms > 0:
+                if tc is not None:
+                    tc.apply_with_frame_type(chunk, frame_type_name)
+                elif chunk.delay_ms > 0:
                     logger.debug(f"Jitter delay {chunk.delay_ms:.1f}ms ignored (no scheduler)")
                 self.transport.send(chunk.data)
 
         chunks = self.traffic_shaper.encode_frame(encoded_frame)
         if not chunks and frame_type != FrameType.DATA:
-            # Control frame was buffered by aggregation — emit immediately
             chunks = self.traffic_shaper.flush()
 
         for chunk in chunks:
-            if chunk.delay_ms > 0:
+            if tc is not None:
+                tc.apply_with_frame_type(chunk, frame_type_name)
+            elif chunk.delay_ms > 0:
                 logger.debug(f"Jitter delay {chunk.delay_ms:.1f}ms ignored (no scheduler)")
             self.transport.send(chunk.data)
 

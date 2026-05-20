@@ -19,6 +19,8 @@ class ShapingConfig:
     - aggregation_max_bytes >= 0
     - jitter_max_ms >= jitter_min_ms
     - fragmentation_max_chunk_size >= fragmentation_min_size
+    - timing_max_delay_ms >= timing_min_delay_ms
+    - timing_mode in {"metadata_only", "runtime_sleep"}
     """
 
     enabled: bool = False
@@ -40,6 +42,16 @@ class ShapingConfig:
     jitter_max_ms: float = 0.0
 
     dummy_enabled: bool = False
+
+    # Phase 7B: RTT-aware timing countermeasures (default disabled)
+    timing_enabled: bool = False
+    timing_mode: str = "metadata_only"
+    timing_min_delay_ms: float = 0.0
+    timing_max_delay_ms: float = 0.0
+    timing_target_min_rtt_ms: float | None = None
+    timing_randomize_intervals: bool = False
+
+    _VALID_TIMING_MODES = frozenset({"metadata_only", "runtime_sleep"})
 
     def validate(self) -> None:
         """Validate configuration. Raises ValueError on invalid values."""
@@ -80,9 +92,25 @@ class ShapingConfig:
             # dummy_enabled reserves the field for future use; no validation needed
             pass
 
+        if self.timing_enabled:
+            if self.timing_mode not in self._VALID_TIMING_MODES:
+                raise ValueError(
+                    f"Invalid timing_mode {self.timing_mode!r}; "
+                    f"must be one of {sorted(self._VALID_TIMING_MODES)}"
+                )
+            if self.timing_min_delay_ms < 0:
+                raise ValueError("timing_min_delay_ms must be >= 0")
+            if self.timing_max_delay_ms < self.timing_min_delay_ms:
+                raise ValueError(
+                    f"timing_max_delay_ms ({self.timing_max_delay_ms}) must be >= "
+                    f"timing_min_delay_ms ({self.timing_min_delay_ms})"
+                )
+            if self.timing_target_min_rtt_ms is not None and self.timing_target_min_rtt_ms < 0:
+                raise ValueError("timing_target_min_rtt_ms must be >= 0")
+
     @classmethod
     def from_dict(cls, d: dict) -> ShapingConfig:
-        """Create ShapingConfig from a dictionary."""
+        """Create ShapingConfig from a dictionary. Backward-compatible with old configs."""
         return cls(
             enabled=d.get("enabled", False),
             padding_enabled=d.get("padding_enabled", False),
@@ -98,6 +126,13 @@ class ShapingConfig:
             jitter_min_ms=d.get("jitter_min_ms", 0.0),
             jitter_max_ms=d.get("jitter_max_ms", 0.0),
             dummy_enabled=d.get("dummy_enabled", False),
+            # Phase 7B timing fields
+            timing_enabled=d.get("timing_enabled", False),
+            timing_mode=d.get("timing_mode", "metadata_only"),
+            timing_min_delay_ms=d.get("timing_min_delay_ms", 0.0),
+            timing_max_delay_ms=d.get("timing_max_delay_ms", 0.0),
+            timing_target_min_rtt_ms=d.get("timing_target_min_rtt_ms", None),
+            timing_randomize_intervals=d.get("timing_randomize_intervals", False),
         )
 
     def to_dict(self) -> dict:
@@ -117,4 +152,11 @@ class ShapingConfig:
             "jitter_min_ms": self.jitter_min_ms,
             "jitter_max_ms": self.jitter_max_ms,
             "dummy_enabled": self.dummy_enabled,
+            # Phase 7B timing fields
+            "timing_enabled": self.timing_enabled,
+            "timing_mode": self.timing_mode,
+            "timing_min_delay_ms": self.timing_min_delay_ms,
+            "timing_max_delay_ms": self.timing_max_delay_ms,
+            "timing_target_min_rtt_ms": self.timing_target_min_rtt_ms,
+            "timing_randomize_intervals": self.timing_randomize_intervals,
         }

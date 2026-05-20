@@ -16,6 +16,7 @@ from .config import ShapingConfig
 from .padding import PaddingShaper
 from .aggregation import AggregationShaper
 from .jitter import JitterShaper
+from .timing import TimingPolicy, TimingController
 
 
 class PipelineTrafficShaper(TrafficShaper):
@@ -117,6 +118,26 @@ def create_traffic_shaper(config: ShapingConfig,
         ))
 
     if not stages:
-        return NoopTrafficShaper()
+        return _attach_timing(NoopTrafficShaper(), config)
 
-    return PipelineTrafficShaper(stages=stages, rng=rng)
+    return _attach_timing(PipelineTrafficShaper(stages=stages, rng=rng), config)
+
+
+def _attach_timing(shaper: TrafficShaper, config: ShapingConfig) -> TrafficShaper:
+    """Attach a TimingController to the shaper if timing_enabled.
+
+    Does NOT modify the constructor — just sets an attribute.
+    In metadata_only mode, chunk.delay_ms is set but no sleep occurs.
+    In runtime_sleep mode, delay is applied via time.sleep.
+    """
+    if config.timing_enabled:
+        policy = TimingPolicy(
+            enabled=True,
+            mode=config.timing_mode,
+            min_delay_ms=config.timing_min_delay_ms,
+            max_delay_ms=config.timing_max_delay_ms,
+            target_min_rtt_ms=config.timing_target_min_rtt_ms,
+            randomize_intervals=config.timing_randomize_intervals,
+        )
+        shaper.timing_controller = TimingController(policy)
+    return shaper
