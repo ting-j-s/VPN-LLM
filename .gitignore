@@ -98,3 +98,6 @@ api_key*
 
 # Phase 3.5 trace temporary files
 traces/*.tmp
+
+# Scratch trace output, never commit
+traces_after/
