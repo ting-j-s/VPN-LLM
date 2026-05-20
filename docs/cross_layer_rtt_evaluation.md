@@ -127,7 +127,94 @@ Coefficient of variation (std/mean) mapped to [0, 1]:
 - tcp_connect: ~7–9ms
 - Diff: ~34ms → risk_level: high
 
-## 7. CLI Usage
+## 7. WebSocket RTT Runner (Phase 7C)
+
+### 7.1 Purpose
+
+Phase 7C provides real local WebSocket echo RTT measurement for the application
+layer, replacing the synthetic "app_echo" from Phase 7 mock profiles with actual
+WebSocket round-trip timing.
+
+### 7.2 Architecture
+
+```
+measure_websocket_rtt(config)
+  └─ asyncio.run(_async_measure(config, url))
+       ├─ websockets.connect(url)
+       ├─ for sample_count iterations:
+       │    ├─ send(message with UUID nonce)
+       │    ├─ await recv()
+       │    ├─ verify nonce matches
+       │    └─ record elapsed_ms
+       └─ return WebSocketRTTResult
+```
+
+### 7.3 Nonce Echo Mechanism
+
+Each echo message carries a UUID nonce. The server must echo the exact nonce
+back. If the reply doesn't match, the sample is rejected. This prevents
+measuring unrelated server responses as RTT samples.
+
+Nonce checking can be disabled with `use_nonce=False` in WebSocketRTTConfig.
+
+### 7.4 Local-Only Restriction
+
+`WebSocketRTTConfig.validate()` rejects non-localhost targets when
+`local_only=True` (default). The `_is_local_host()` check accepts:
+- 127.0.0.1, localhost, ::1
+- Any 127.x.x.x address
+
+### 7.5 Data Types
+
+**WebSocketRTTConfig**:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| host | str | "127.0.0.1" | Target host |
+| port | int | 8765 | WebSocket server port |
+| path | str | "/rtt" | WebSocket endpoint path |
+| sample_count | int | 10 | Number of echo rounds |
+| timeout_s | float | 2.0 | Connection and recv timeout |
+| local_only | bool | True | Reject non-localhost targets |
+| use_nonce | bool | True | Include UUID nonce per message |
+
+**WebSocketRTTResult**:
+
+| Field | Type | Description |
+|---|---|---|
+| connected | bool | Whether the WebSocket connection succeeded |
+| samples_ms | list[float] | Collected RTT samples |
+| min_ms / median_ms / avg_ms / max_ms | float | Summary statistics |
+| sample_count | int | Number of valid samples |
+| error | str | Error message if measurement failed |
+| notes | list[str] | Per-measurement annotations |
+
+`to_rtt_measurement()` converts a result to an `RTTMeasurement` with
+`name="app_echo_ws"` and `layer="application"`.
+
+### 7.6 Graceful Websockets Absence
+
+If the `websockets` library is not installed, `measure_websocket_rtt()` returns
+a `WebSocketRTTResult` with `connected=False` and `.error` set. No exception is
+raised. Tests use `needs_websockets` skip marker.
+
+### 7.7 Test Echo Server
+
+`create_local_echo_server(host, port)` starts a local WebSocket echo server for
+testing. Pass `port=0` for OS-assigned port. The echo handler simply returns
+every text message it receives.
+
+### 7.8 Relationship to CalcuLatency
+
+CalcuLatency uses WebSocket echo to measure application-layer RTT and TCP
+connect for transport-layer RTT. Phase 7C implements this exact methodology:
+- Application RTT: WebSocket echo (replaces mock "app_echo")
+- Transport RTT: TCP connect via LocalTCPRTTRunner
+- Network RTT: Optional ICMP ping via OptionalPingRunner
+
+The cross-layer diff (app - transport) is the primary detection vector.
+
+## 8. CLI Usage
 
 ```bash
 # Mock direct profile (low risk)
@@ -144,9 +231,24 @@ python3 -m src.evaluation.rtt.report \
 python3 -m src.evaluation.rtt.report \
   --host 127.0.0.1 --port 9000 --mode tcp \
   --output-json traces/rtt/local.report.json
+
+# WebSocket RTT (application) + TCP (transport) full cross-layer report
+python3 -m src.evaluation.rtt.report \
+  --mode websocket \
+  --host 127.0.0.1 \
+  --ws-port 8765 \
+  --ws-sample-count 10 \
+  --output-json /tmp/ws_rtt.report.json
+
+# WebSocket RTT without TCP transport measurement
+python3 -m src.evaluation.rtt.report \
+  --mode websocket \
+  --ws-port 8765 \
+  --ws-no-tcp \
+  --output-json /tmp/ws_rtt_app_only.report.json
 ```
 
-## 8. Integration with LLM Patch Loop
+## 9. Integration with LLM Patch Loop
 
 ```
 RTT report JSON
@@ -173,7 +275,7 @@ python3 -m src.llm.detection.patch_loop \
   --output-json /tmp/rtt_patch_loop.json
 ```
 
-## 9. DetectionThresholds
+## 10. DetectionThresholds
 
 New RTT-specific thresholds:
 
@@ -183,7 +285,7 @@ New RTT-specific thresholds:
 | max_app_network_diff_ms | None | Max app-network diff before fail |
 | max_timing_stability_score | None | Max timing stability (0-1) before fail |
 
-## 10. Countermeasure Directions
+## 11. Countermeasure Directions
 
 ### app_transport_diff_ms (high)
 
@@ -205,22 +307,21 @@ New RTT-specific thresholds:
 - Prioritize reducing app-transport diff first
 - Re-evaluate after each countermeasure
 
-## 11. Current Limitations
+## 12. Current Limitations
 
-1. **Mock-only for full cross-layer reports** — Real TCP mode only measures transport RTT; application RTT requires a running echo server or WebSocket endpoint
-2. **No WebSocket RTT** — The first version does not implement application-layer RTT via WebSocket echo
-3. **No passive RTT estimation** — Does not estimate RTT from existing traffic patterns
-4. **No 0trace** — Does not implement TTL-based RTT via raw sockets
-5. **ICMP ping is best-effort** — Requires ping binary and may fail without permissions
-6. **No real before/after shaping comparison** — RTT report is standalone; does not yet compare shaped vs unshaped traffic
-7. **Single-target measurement** — Does not test concurrent or multi-path RTT patterns
+1. **Real application RTT requires a running echo server** — The WebSocket runner needs a local WebSocket echo endpoint; Phase 7C provides the client and a test echo server, but not a production server
+2. **No passive RTT estimation** — Does not estimate RTT from existing traffic patterns
+3. **No 0trace** — Does not implement TTL-based RTT via raw sockets
+4. **ICMP ping is best-effort** — Requires ping binary and may fail without permissions
+5. **No real before/after shaping comparison** — RTT report is standalone; does not yet compare shaped vs unshaped traffic
+6. **Single-target measurement** — Does not test concurrent or multi-path RTT patterns
 
-## 12. Future Plans
+## 13. Future Plans
 
-1. **WebSocket echo RTT** — Measure application RTT against running VPN-LLM server
+1. **Production WebSocket echo endpoint in VPN-LLM server** — Embed echo endpoint for real before/after RTT measurement
 2. **Passive request-response RTT estimation** — Estimate RTT from existing traffic
 3. **Synthetic network delay** — Configurable artificial delay for testing
 4. **RTT-aware scheduler** — Integrate RTT metrics into traffic shaping scheduler
 5. **Before/after shaping RTT comparison** — Compare RTT metrics with traffic shaping on/off
 6. **Phase 5D** — Dummy traffic + real jitter scheduler
-7. **Phase 7B** — Apply RTT countermeasures and measure before/after improvement
+7. **Phase 7B** — Apply RTT countermeasures and measure before/after improvement (completed)

@@ -31,6 +31,14 @@ from .rtt_runner import (
     create_rtt_runner,
 )
 
+from .websocket_rtt import (
+    WebSocketRTTConfig,
+    WebSocketRTTResult,
+    measure_websocket_rtt,
+    async_measure_websocket_rtt,
+    create_local_echo_server,
+)
+
 __all__ = [
     "RTTMeasurement",
     "CrossLayerRTTReport",
@@ -42,4 +50,9 @@ __all__ = [
     "LocalTCPRTTRunner",
     "OptionalPingRunner",
     "create_rtt_runner",
+    "WebSocketRTTConfig",
+    "WebSocketRTTResult",
+    "measure_websocket_rtt",
+    "async_measure_websocket_rtt",
+    "create_local_echo_server",
 ]
