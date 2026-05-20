@@ -1,11 +1,16 @@
-# VPN-LLM — LLM 驱动的可替换 VPN 隧道实验平台
+# VPN-LLM — LLM-Assisted Modular VPN Transport Research Platform
 
-本项目是一个用于研究和教学的模块化 VPN 隧道实验平台。它不仅支持 TCP、TLS、SSH、WebSocket
-等可替换外层协议 Transport，还引入受控 LLM Agent，用于根据自然语言需求辅助生成、应用和验证
-Transport / VPN Core 替换补丁。**项目重点是"LLM 驱动的协议与内核替换闭环"，而不是单一 VPN
-实现。**
+VPN-LLM is an LLM-assisted modular VPN transport framework supporting:
 
-> **⚠️ 安全边界说明**：本项目仅用于授权实验和教学研究。不得用于未授权网络访问、规避网络审计或隐藏流量。任何此类使用均不在本项目许可范围内。
+- **Pluggable transports** — mock / tcp / tls / websocket / ssh
+- **Local fingerprint evaluation** — packet size, timing, n-gram, burst analysis
+- **LLM-driven detection-adversarial patch loop** — DetectionReport → Gate → CountermeasurePolicy → LLM prompt
+- **Traffic shaping primitives** — padding, aggregation, jitter, fragmentation, scheduling
+- **Active probe resistance evaluation** — malformed-input silent-drop testing
+- **Cross-layer RTT evaluation** — CalcuLatency-style application/transport/network RTT comparison
+- **Before/after quantification** — synthetic shaping and RTT countermeasure comparison
+
+> **⚠️ Security boundary**: This project is for authorized experiment and education only. It does NOT claim real undetectability. It does NOT claim to bypass real censorship systems. All evaluation is local, controlled, and reproducible. No third-party network scanning. No traffic interception. No production use.
 
 ---
 
@@ -804,56 +809,79 @@ Report + Commit Advice (写入 .llm_tasks/<task_id>/)
 
 ---
 
-## 14. Current Status / 当前状态
+## 14. Current Status
 
-- **Test baseline**: 620+ passed
-- **Current stable branch**: `test-2`
-- **Current stable commit**: `76d1b47` (2026-05-15)
-- **当前阶段**: Phase 11.1 — LLM Agent workflow 二次加固
-- **下一阶段**: Phase 10.7 — 稳定性与性能 benchmark
+- **Test baseline**: 1324 passed, 6 skipped
+- **Current branch**: `test-2`
+- **Current commit**: `7f51223` (2026-05-20)
+- **Current phase**: Phase 8 — Integrated Evaluation & Documentation
+- **Completed phases**:
+  - Phase 1-3.5: Fingerprint evaluation, trace capture, summarization pipeline
+  - Phase 4: LLM detection-adversarial patch loop
+  - Phase 5/5B/5C: Traffic shaping primitives, core integration, YAML config, synthetic before/after
+  - Phase 6/6B: Active probe resistance gate, malformed behavior unification
+  - Phase 7/7B/7C: Cross-layer RTT gate, timing countermeasure hooks, local WebSocket RTT runner
 
-### Phase 11.1 加固要点
+### Key Modules
 
-LLM Agent workflow has been upgraded from planner-guessed candidate files to a local-index-driven file selection pipeline.
+| Module | Path | Purpose |
+|---|---|---|
+| Fingerprint evaluation | `src/evaluation/fingerprint/` | Packet size, n-gram, burst, timing feature extraction |
+| Active probe gate | `src/evaluation/probe/` | Malformed-input resistance testing (mock/local) |
+| Cross-layer RTT gate | `src/evaluation/rtt/` | Application/transport/network RTT comparison (mock/tcp/websocket) |
+| Traffic shaping | `src/shaping/` | Padding, aggregation, jitter, fragmentation, scheduling, timing |
+| Detection workflow | `src/llm/detection/` | DetectionReport, DetectionGate, CountermeasurePolicy, PromptBuilder, PatchLoop |
 
-The new pipeline uses:
-- RepoIndexer for local repository facts
-- FileRetriever for multi-source candidate recall
-- ImpactExpander for cross-layer impact analysis
-- ContextBuilder for bounded LLM context construction
-- PatchGenerator allowlists for edit/create enforcement
+### Quick Commands
 
-The LLM no longer has authority to freely decide which files may be edited. Planner candidate_files are treated only as hints. Final file selection is derived from local repository analysis and recorded in file_retrieval.json, impact_analysis.json, and file_selection.json for auditability.
+```bash
+# Run all tests
+python3 -m pytest tests/ -v
 
-Key hardening in Phase 11.1:
-- **must_edit / must_review 严格分区** — must_edit 仅包含高置信度文件（规则结构性文件 + 评分 ≥0.9 候选），纯 planner hint 只能进入 must_review
-- **allowed_create_paths 收紧** — 加入 fnmatch glob 命名模式（如 *_transport.py, test_*.py），README.md 禁止 create，隐藏文件/路径穿越/危险后缀均拒绝
-- **FIND 唯一性校验增强** — 空 FIND、纯空白 FIND 均立即拒绝
-- **action_sources 可审计** — file_selection.json 记录每个文件的分类来源
+# Fingerprint report
+python3 scripts/summarize_fingerprint_reports.py --output-json traces/summary.json
 
-### 当前项目重点
+# Active probe mock report
+python3 -m src.evaluation.probe.report --mock --output-json /tmp/probe.report.json
 
-本项目核心是 **LLM 驱动的 Transport/Core 替换闭环**：
+# RTT mock report (proxy-like high-risk profile)
+python3 -m src.evaluation.rtt.report --mock-profile proxy_like --output-json /tmp/rtt.report.json
 
-- **Transport 外层可替换**: mock / tcp / tls / websocket / ssh
-- **VPN Core 内核可替换**: session / frame / forwarding / TUN loop
-- **Replacement smoke matrix 是 Gate 1** — 快速验证替换后最小可运行性
-- **netns + real TUN validation 是 Gate 2** — 真实环境端到端验证
-- **LLM Agent 不参与实时转发** — 只参与开发、补丁生成、验证和报告闭环
+# RTT WebSocket + TCP report (requires local echo server on port 8765)
+python3 -m src.evaluation.rtt.report --mode websocket --ws-port 8765 --output-json /tmp/ws_rtt.report.json
+
+# LLM Detection patch loop
+python3 -m src.llm.detection.patch_loop \
+  --user-request "reduce cross-layer RTT fingerprint risk" \
+  --report /tmp/rtt.report.json \
+  --output-prompt /tmp/fix_prompt.txt \
+  --output-json /tmp/patch_loop.json
+
+# Synthetic shaping before/after comparison
+python3 scripts/synthetic_shaping_comparison.py --output-json /tmp/shaping_comparison.json
+
+# Synthetic RTT countermeasure comparison
+python3 scripts/synthetic_rtt_countermeasure_comparison.py --output-dir /tmp/rtt_compare
+```
 
 ### Transport Status
 
 | Transport | Status |
 |---|---|
-| TCP | Implemented and tested |
+| TCP | Implemented, tested, netns e2e-ping verified |
 | TLS | Implemented, timeout semantics aligned with TCP |
-| WebSocket | Implemented with dedicated background asyncio event loop and localhost client/server tests |
-| SSH | Client-side implementation available, server-side integration still needs further work |
+| WebSocket | Implemented with dedicated background asyncio event loop, netns e2e-ping verified |
+| SSH | Client-side implementation available |
 
-### Documentation
+### Documentation Index
 
-- [docs/stage_status.md](docs/stage_status.md) — 阶段成果状态报告
-- [docs/test_report.md](docs/test_report.md) — 测试报告
+- [docs/phase8_integrated_evaluation.md](docs/phase8_integrated_evaluation.md) — Phase 8 system overview
+- [docs/detection_coverage_matrix.md](docs/detection_coverage_matrix.md) — Paper-to-gate coverage matrix
+- [docs/fingerprint_evaluation.md](docs/fingerprint_evaluation.md) — Fingerprint evaluation design
+- [docs/active_probe_resistance.md](docs/active_probe_resistance.md) — Active probe resistance design
+- [docs/cross_layer_rtt_evaluation.md](docs/cross_layer_rtt_evaluation.md) — Cross-layer RTT evaluation design
+- [docs/traffic_shaping.md](docs/traffic_shaping.md) — Traffic shaping design
+- [docs/llm_detection_adversarial_loop.md](docs/llm_detection_adversarial_loop.md) — LLM detection-adversarial patch loop
 
 ---
 

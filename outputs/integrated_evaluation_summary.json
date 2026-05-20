@@ -1,0 +1,98 @@
+{
+  "generated_at": "2026-05-20T08:59:26.290351+00:00",
+  "generated_by": "scripts/generate_integrated_evaluation_summary.py",
+  "test_baseline": "1324 passed, 6 skipped",
+  "gates": {
+    "fingerprint": {
+      "available": true,
+      "status": "ok"
+    },
+    "active_probe": {
+      "available": true,
+      "status": "ok"
+    },
+    "cross_layer_rtt": {
+      "available": true,
+      "status": "ok"
+    },
+    "traffic_shaping": {
+      "available": true,
+      "status": "ok"
+    }
+  },
+  "fingerprint": {
+    "status": "ok",
+    "path": "traces/summary.json",
+    "total_entries": 20,
+    "real_entries": 3,
+    "skipped_entries": 17,
+    "risk_levels": {
+      "medium": 3
+    },
+    "transport_scenario_pairs": [
+      {
+        "transport": "tcp",
+        "scenario": "idle",
+        "risk_level": "medium",
+        "risk_score": 0.6287,
+        "packet_count": 5
+      },
+      {
+        "transport": "tls",
+        "scenario": "idle",
+        "risk_level": "medium",
+        "risk_score": 0.6385,
+        "packet_count": 12
+      },
+      {
+        "transport": "websocket",
+        "scenario": "idle",
+        "risk_level": "medium",
+        "risk_score": 0.5843,
+        "packet_count": 9
+      }
+    ]
+  },
+  "active_probe": {
+    "status": "ok",
+    "path": "/tmp/probe.report.json",
+    "total_scenarios": 12,
+    "silent_drops": 0,
+    "risk_level": "low"
+  },
+  "cross_layer_rtt": {
+    "status": "ok",
+    "path": "/tmp/rtt.report.json",
+    "detector_name": "cross_layer_rtt",
+    "application_rtt_ms": 42.5,
+    "transport_rtt_ms": 8.2,
+    "network_rtt_ms": null,
+    "app_transport_diff_ms": 34.3,
+    "app_network_diff_ms": null,
+    "timing_stability_score": 0.8575,
+    "risk_score": 0.6,
+    "risk_level": "high"
+  },
+  "traffic_shaping": {
+    "status": "ok",
+    "path": "traces_after/synthetic_comparison.json",
+    "generated_by": "scripts/synthetic_shaping_comparison.py",
+    "seed": 42,
+    "before_risk": 0.3899,
+    "after_padding_risk": 0.3229,
+    "after_aggregation_risk": 0.3497,
+    "deltas": {
+      "padding_vs_noop": {
+        "repeated_length_ratio": 0.0,
+        "small_packet_ratio": -0.12,
+        "risk_score": -0.067
+      },
+      "aggregation_vs_noop": {
+        "repeated_length_ratio": 0.1029,
+        "small_packet_ratio": -0.6,
+        "risk_score": -0.0402,
+        "packet_count_reduction": "100 -> 7"
+      }
+    }
+  }
+}
