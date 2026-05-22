@@ -52,8 +52,8 @@ class CandidateFile:
 _TASK_TYPE_RULES: dict[str, dict[str, list[str]]] = {
     "transport": {
         "patterns": ["src/transport/"],
-        "keywords": ["transport", "tcp", "tls", "websocket", "ssh", "mock"],
-        "test_patterns": ["test_transport", "test_tcp", "test_tls", "test_websocket", "test_ssh"],
+        "keywords": ["transport", "tcp", "tls", "websocket", "ssh", "mock", "http2"],
+        "test_patterns": ["test_transport", "test_tcp", "test_tls", "test_websocket", "test_ssh", "test_http2"],
         "doc_patterns": ["docs/", "README.md"],
         "config_patterns": ["config/", "src/common/config.py"],
         "script_patterns": ["scripts/smoke_replacement_matrix.py"],
@@ -532,7 +532,7 @@ class FileRetriever:
         """Infer affected area keys from request text."""
         areas = []
         area_keywords = {
-            "transport": ["transport", "tcp", "tls", "websocket", "ssh", "mock"],
+            "transport": ["transport", "tcp", "tls", "websocket", "ssh", "mock", "http2"],
             "core": ["core", "内核", "session", "frame", "forwarding", "tun", "nat"],
             "config": ["config", "配置", "setting"],
             "test": ["test", "测试"],

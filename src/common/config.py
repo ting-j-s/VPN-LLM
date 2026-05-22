@@ -19,7 +19,7 @@ class ConfigError(VPNError):
 
 
 # Allowed transport types
-ALLOWED_TRANSPORT_TYPES = {"ssh", "tcp", "tls", "websocket", "mock"}
+ALLOWED_TRANSPORT_TYPES = {"ssh", "tcp", "tls", "websocket", "http2", "mock"}
 
 
 @dataclass
@@ -65,6 +65,9 @@ class TransportConfig:
     auto_add_host_key: bool = False
     # WebSocket-specific options
     path: str = "/"
+    # HTTP/2-specific options (experimental)
+    server_hostname: Optional[str] = None
+    experimental: bool = False
 
 
 @dataclass
@@ -210,6 +213,8 @@ def load_client_config(path: str) -> ClientConfig:
         insecure_skip_verify=transport_data.get("insecure_skip_verify", False),
         auto_add_host_key=transport_data.get("auto_add_host_key", False),
         path=transport_data.get("path", "/"),
+        server_hostname=transport_data.get("server_hostname"),
+        experimental=transport_data.get("experimental", False),
     )
 
     # SSH-specific validation (only when using SSH transport)
@@ -277,6 +282,8 @@ def load_server_config(path: str) -> ServerConfig:
         insecure_skip_verify=transport_data.get("insecure_skip_verify", False),
         auto_add_host_key=transport_data.get("auto_add_host_key", False),
         path=transport_data.get("path", "/"),
+        server_hostname=transport_data.get("server_hostname"),
+        experimental=transport_data.get("experimental", False),
     )
 
     # Build SessionConfig

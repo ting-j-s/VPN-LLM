@@ -13,12 +13,13 @@ from .ssh_transport import SSHTransport
 from .tcp_transport import TCPTransport
 from .tls_transport import TLSTransport
 from .websocket_transport import WebSocketTransport
+from .http2_transport import HTTP2Transport
 
 
 logger = get_logger(__name__)
 
 # Supported transport types
-SUPPORTED_TRANSPORTS = {"ssh", "tcp", "tls", "websocket", "mock"}
+SUPPORTED_TRANSPORTS = {"ssh", "tcp", "tls", "websocket", "http2", "mock"}
 
 
 def create_transport(config) -> Transport:
@@ -54,6 +55,8 @@ def create_transport(config) -> Transport:
         return _create_tls_transport(config)
     elif transport_type == "websocket":
         return _create_websocket_transport(config)
+    elif transport_type == "http2":
+        return _create_http2_transport(config)
     elif transport_type == "mock":
         logger.info("Using MockTransport for testing")
         return MockTransport()
@@ -261,6 +264,62 @@ def _create_websocket_transport(config) -> WebSocketTransport:
 
     else:
         raise ConfigError("Invalid configuration for WebSocket transport")
+
+
+def _create_http2_transport(config) -> HTTP2Transport:
+    """Create HTTP2Transport from configuration.
+
+    Args:
+        config: Configuration object.
+
+    Returns:
+        HTTP2Transport instance.
+
+    Notes:
+        Client config: mode="client", connects to server.host:server.port
+        Server config: mode="server", binds to server.tun_ip:2225
+
+        The ``h2`` library is an optional dependency.  When it is not
+        installed, the transport can be constructed and configured but
+        ``connect()`` will raise ``TransportError``.
+    """
+    path = getattr(config.transport, 'path', '/')
+    server_hostname = getattr(config.transport, 'server_hostname', None)
+
+    if hasattr(config, 'server') and hasattr(config.server, 'host'):
+        host = getattr(config.server, 'host', '127.0.0.1')
+        port = getattr(config.server, 'port', 2225)
+
+        logger.info("Creating HTTP2Transport (client): host=%s, port=%s, path=%s",
+                     host, port, path)
+        logger.info("HTTP/2 transport is experimental.")
+
+        return HTTP2Transport(
+            mode=HTTP2Transport.MODE_CLIENT,
+            host=host,
+            port=port,
+            path=path,
+            server_hostname=server_hostname,
+        )
+
+    elif hasattr(config, 'server') and hasattr(config.server, 'tun_ip'):
+        host = '0.0.0.0'
+        port = getattr(config.server, 'listen_port', 2225)
+
+        logger.info("Creating HTTP2Transport (server): host=%s, port=%s, path=%s",
+                     host, port, path)
+        logger.info("HTTP/2 transport is experimental.")
+
+        return HTTP2Transport(
+            mode=HTTP2Transport.MODE_SERVER,
+            host=host,
+            port=port,
+            path=path,
+            server_hostname=server_hostname,
+        )
+
+    else:
+        raise ConfigError("Invalid configuration for HTTP/2 transport")
 
 
 def register_transport(name: str) -> None:
