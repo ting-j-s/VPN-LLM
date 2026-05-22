@@ -93,6 +93,82 @@ Expanded the before/after matrix from a single TCP smoke test to tcp/websocket/t
 - With aggregation, HTTP request TCP SYN is buffered until HEARTBEAT flush; curl
   `--connect-timeout 10` is tight. Needs longer connect timeout or larger transfers.
 
+### 3.3 Phase 9E: Repeated Real Trace Matrix and Statistical Before/After Evaluation (2026-05-22)
+
+Phase 9E adds statistical repeatability to the real trace matrix without modifying
+detector logic. Each scenario runs multiple times; results are aggregated with
+mean/std/min/max for both packet counts and risk scores.
+
+**New CLI parameters:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--repeat-count` | 1 | Number of repetitions per scenario |
+| `--curl-connect-timeout` | 30 | curl `--connect-timeout` seconds |
+| `--curl-max-time` | 60 | curl `--max-time` seconds |
+| `--http-server-startup-timeout` | 10 | HTTP server startup verification timeout |
+| `--post-scenario-wait` | 2 | Post-scenario wait to capture residual packets |
+| `--bulk-read-timeout` | 60 | Bulk download read timeout |
+
+**Bulk scenario improvements:**
+- `bulk_bytes` default raised from 256KB to 1MB
+- HTTP server startup verified via `ss -tlnp` before curl runs
+- curl uses configurable `--connect-timeout` and `--max-time`
+
+**Repeated output structure:**
+
+```
+outputs/phase9_real_matrix_e/
+  before/tcp/ping/run_01.report.json
+  before/tcp/ping/run_02.report.json
+  before/tcp/ping/run_03.report.json
+  after/tcp/ping/run_01.report.json
+  ...
+  summaries/repeated_before_after_comparison.{csv,json,md}
+```
+
+**Statistical summary fields:**
+
+| Field | Description |
+|---|---|
+| `before_packet_count_mean` / `_std` / `_min` / `_max` | Per-phase packet count stats |
+| `after_packet_count_mean` / `_std` / `_min` / `_max` | Per-phase packet count stats |
+| `before_risk_score_mean` / `_std` | Per-phase risk score stats |
+| `after_risk_score_mean` / `_std` | Per-phase risk score stats |
+| `risk_score_delta_mean` / `_std` | Paired delta stats |
+| `improved_count` / `unchanged_count` / `regressed_count` | Per-run verdict counts |
+| `insufficient_count` / `skipped_count` | Data quality counts |
+| `data_quality` | ok / partial / insufficient / skipped |
+| `aggregate_verdict` | improved / unchanged / regressed / mixed / insufficient / skipped |
+
+**Aggregate verdict rules:**
+- `valid_repeat_count == 0`: insufficient or skipped
+- `improved_count >= 2` and `regressed_count == 0`: **improved**
+- `regressed_count >= 2`: **regressed**
+- `unchanged_count >= 2`: **unchanged**
+- otherwise: **mixed**
+
+**Recommended Phase 9E parameters:**
+```
+--repeat-count 3 --capture-duration 45 --ping-count 80 --ping-interval 0.05
+--bulk-bytes 1048576 --curl-connect-timeout 30 --curl-max-time 60
+--min-packet-count 30
+```
+
+**Recommended experiment matrix (4 scenarios x 2 phases x 3 repeats = 24 runs):**
+
+| Transport | Scenario | Purpose |
+|---|---|---|
+| tcp | ping | Stability baseline (already ok in 9D) |
+| websocket | ping | Effectiveness validation (already improved in 9D) |
+| tcp | bulk | Fix insufficient after packet_count |
+| tls | ping | Fix insufficient after packet_count |
+
+**Patch loop strategy (Phase 9E):**
+- `aggregate_verdict=regressed` or `after_risk_score_mean >= 0.70` → `next_patch_prompt.txt`
+- `data_quality=insufficient` or `partial` → `data_collection_prompt.txt`
+- `aggregate_verdict=improved` or `unchanged` → `no_patch_needed.txt`
+
 ## 4. Environment Requirements
 
 | Requirement | Purpose |
@@ -335,17 +411,15 @@ The LLM is never called automatically. Only the prompt is generated.
 ## 10. Current Limitations
 
 - SSH transport is skipped (requires paramiko SSH server).
-- TLS ping connects but after packet_count is low (19 < 30); needs higher ping volume.
-- tcp/bulk and websocket/bulk after traces are insufficient (22, 28 < 30); bulk
-  scenario needs larger file sizes or longer capture to overcome aggregation.
+- TLS ping connects but after packet_count is low (19 < 30); Phase 9E addresses this with higher ping counts.
+- tcp/bulk and websocket/bulk after traces are insufficient (22, 28 < 30); Phase 9E addresses with larger bulk bytes and longer curl timeouts.
 - curl/bulk scenarios require `curl` binary; scenario is skipped if curl is missing.
 - HTTP server for curl/bulk is a temporary Python http.server, adequate for local testing.
 - Reconnect scenario is not supported in current architecture (marks explicitly skipped).
 - WebSocket RTT is not measured during Phase 9 (separate Phase 7C runner exists).
-- Single capture per scenario (no statistical repetition).
-- No passive RTT estimation integrated.
 - Aggregation fundamentally reduces wire-level packet count; fingerprint analysis
   with fewer packets may be less statistically robust.
+- Phase 9E adds statistical repetition (3x) but only for the 4-scenario subset, not the full 40-entry matrix.
 
 ## 11. Relationship to Other Phases
 
@@ -360,15 +434,14 @@ The LLM is never called automatically. Only the prompt is generated.
 
 ## 12. Next Steps
 
-- Increase traffic volume for insufficient entries (tcp/bulk, tls/ping, websocket/bulk)
-  to reach packet_count >= 30
-- Run tcp/bulk with wired `--bulk-bytes` and longer curl timeout
-- Address TLS performance: TLS handshake overhead combined with aggregation produces
-  very low wire packet counts
-- Integrate probe gate and RTT gate into the same before/after pass
-- Add statistical repetition (3+ runs per scenario)
+- **Phase 9E execution**: Run the 4-scenario repeated matrix (tcp ping/bulk, websocket ping, tls ping) with 3 repeats
+- If TLS still insufficient after 9E, increase `--ping-count` further (100+) and consider
+  reducing aggregation `max_bytes` for TLS transport specifically
+- If bulk still insufficient, investigate TCP SYN buffering in client aggregation and
+  consider keep-alive HTTP connections
+- After Phase 9E achieves stable results: full matrix execution (all transports x all scenarios)
 - Consider `aggregation_max_bytes` tuning to balance packet-count reduction vs
   fingerprint obfuscation
 - HTTP/2 transport evaluation
 - Passive RTT estimation integration
-- Multi-iteration LLM patch loop with Phase 9 as the fitness function
+- Multi-iteration LLM patch loop with Phase 9E repeated results as the fitness function

@@ -54,14 +54,20 @@ def _parse_list(arg: str, valid: frozenset[str]) -> list[str]:
 
 @dataclass
 class RuntimeConfig:
-    """Phase 9B runtime parameters for scenario execution."""
+    """Phase 9E runtime parameters for scenario execution."""
     capture_duration: int = 30
     ping_count: int = 20
     ping_interval: float = 0.1
     curl_count: int = 10
-    bulk_bytes: int = 262144
+    bulk_bytes: int = 1048576
     min_packet_count: int = 30
     scenario_timeout: int = 60
+    repeat_count: int = 1
+    curl_connect_timeout: int = 30
+    curl_max_time: int = 60
+    http_server_startup_timeout: int = 10
+    post_scenario_wait: int = 2
+    bulk_read_timeout: int = 60
 
 
 # ---------------------------------------------------------------------------
@@ -284,13 +290,15 @@ def _scenario_command(scenario: str, config: Optional[RuntimeConfig] = None) -> 
         count = cfg.curl_count
         return (
             f"for i in $(seq 1 {count}); do "
-            f"curl -s -o /dev/null --connect-timeout 5 http://10.8.0.1:8080/test.bin; "
+            f"curl -s -o /dev/null --connect-timeout {cfg.curl_connect_timeout} "
+            f"--max-time {cfg.curl_max_time} http://10.8.0.1:8080/test.bin; "
             f"sleep 0.1; done"
         )
 
     if scenario == "bulk":
         return (
-            f"curl -s -o /dev/null --connect-timeout 10 "
+            f"curl -s -o /dev/null --connect-timeout {cfg.curl_connect_timeout} "
+            f"--max-time {cfg.curl_max_time} "
             f"http://10.8.0.1:8080/bulk.bin 2>/dev/null || echo 'no bulk server'"
         )
 
@@ -312,8 +320,11 @@ _HTTP_SERVER_PROC: Optional[subprocess.Popen] = None
 _HTTP_SERVER_DATA_DIR = "/tmp/vpn_phase9_http_data"
 
 
-def _start_http_server_in_srv_ns(bulk_bytes: int = 262144) -> bool:
-    """Start a Python HTTP server in the server namespace, bound to TUN IP."""
+def _start_http_server_in_srv_ns(bulk_bytes: int = 1048576, startup_timeout: int = 10) -> bool:
+    """Start a Python HTTP server in the server namespace, bound to TUN IP.
+
+    Verifies the server is actually listening before returning.
+    """
     global _HTTP_SERVER_PROC
     _stop_http_server_in_srv_ns()
 
@@ -337,8 +348,18 @@ def _start_http_server_in_srv_ns(bulk_bytes: int = 262144) -> bool:
             stdin=subprocess.DEVNULL,
         )
         _HTTP_SERVER_PROC = proc
-        time.sleep(0.5)
-        return True
+
+        # Verify server is actually listening
+        t0 = time.time()
+        while time.time() - t0 < startup_timeout:
+            time.sleep(0.5)
+            r = _sudo(
+                ["ip", "netns", "exec", _NS_SRV, "ss", "-tlnp"],
+                timeout=5,
+            )
+            if "8080" in r.stdout and "10.8.0.1" in r.stdout:
+                return True
+        return False
     except Exception as exc:
         print(f"  Error starting HTTP server: {exc}", file=sys.stderr)
         return False
@@ -369,36 +390,64 @@ def build_matrix(
     phases: Optional[list[str]] = None,
     runtime_config: Optional[RuntimeConfig] = None,
 ) -> list[dict[str, Any]]:
-    """Build the before/after experiment matrix."""
+    """Build the before/after experiment matrix with optional repeat_count.
+
+    When repeat_count > 1, each entry gets a run_id and paths use subdirectories:
+      outputs/phase9/before/tcp/ping/run_01.report.json
+    When repeat_count == 1, paths use the flat format:
+      outputs/phase9/before/tcp/ping.report.json
+    """
     if phases is None:
         phases = ["before", "after"]
     cfg = runtime_config or RuntimeConfig()
+    repeat = max(1, cfg.repeat_count)
 
     entries: list[dict[str, Any]] = []
     for transport in transports:
         for scenario in scenarios:
             for phase in phases:
                 dir_name = "before" if phase == "before" else "after"
-                pcap_path = f"{output_dir}/{dir_name}/{transport}/{scenario}.pcap"
-                csv_path = f"{output_dir}/{dir_name}/{transport}/{scenario}.csv"
-                report_path = f"{output_dir}/{dir_name}/{transport}/{scenario}.report.json"
 
-                entries.append({
-                    "transport": transport,
-                    "scenario": scenario,
-                    "phase": phase,
-                    "pcap_path": pcap_path,
-                    "csv_path": csv_path,
-                    "report_path": report_path,
-                    "scenario_command": _scenario_command(scenario, cfg),
-                    "capture_interface": "veth_srv",
-                    "capture_host": "192.168.200.1",
-                    "needs_http_server": _scenario_needs_http_server(scenario),
-                    "capture_duration": cfg.capture_duration,
-                    "min_packet_count": cfg.min_packet_count,
-                })
+                if repeat > 1:
+                    for run_idx in range(1, repeat + 1):
+                        run_id = f"run_{run_idx:02d}"
+                        base = f"{output_dir}/{dir_name}/{transport}/{scenario}/{run_id}"
+                        entries.append(_make_entry(
+                            transport, scenario, phase, base, cfg, run_id=run_id,
+                        ))
+                else:
+                    base = f"{output_dir}/{dir_name}/{transport}/{scenario}"
+                    entries.append(_make_entry(transport, scenario, phase, base, cfg))
 
     return entries
+
+
+def _make_entry(
+    transport: str,
+    scenario: str,
+    phase: str,
+    base_path: str,
+    cfg: RuntimeConfig,
+    run_id: Optional[str] = None,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "transport": transport,
+        "scenario": scenario,
+        "phase": phase,
+        "pcap_path": f"{base_path}.pcap",
+        "csv_path": f"{base_path}.csv",
+        "report_path": f"{base_path}.report.json",
+        "scenario_command": _scenario_command(scenario, cfg),
+        "capture_interface": "veth_srv",
+        "capture_host": "192.168.200.1",
+        "needs_http_server": _scenario_needs_http_server(scenario),
+        "capture_duration": cfg.capture_duration,
+        "min_packet_count": cfg.min_packet_count,
+        "repeat_count": cfg.repeat_count,
+    }
+    if run_id:
+        entry["run_id"] = run_id
+    return entry
 
 
 def _run_plan(args: argparse.Namespace) -> None:
@@ -429,6 +478,12 @@ def _run_plan(args: argparse.Namespace) -> None:
             "bulk_bytes": cfg.bulk_bytes,
             "min_packet_count": cfg.min_packet_count,
             "scenario_timeout": cfg.scenario_timeout,
+            "repeat_count": cfg.repeat_count,
+            "curl_connect_timeout": cfg.curl_connect_timeout,
+            "curl_max_time": cfg.curl_max_time,
+            "http_server_startup_timeout": cfg.http_server_startup_timeout,
+            "post_scenario_wait": cfg.post_scenario_wait,
+            "bulk_read_timeout": cfg.bulk_read_timeout,
         },
         "entries": entries,
     }
@@ -722,8 +777,11 @@ def _run_one_entry(
 
         # Start HTTP server if scenario needs it
         if entry.get("needs_http_server", False):
-            if not _start_http_server_in_srv_ns(bulk_bytes=cfg.bulk_bytes):
-                result["error_reason"] = "http server start failed"
+            if not _start_http_server_in_srv_ns(
+                bulk_bytes=cfg.bulk_bytes,
+                startup_timeout=cfg.http_server_startup_timeout,
+            ):
+                result["error_reason"] = "http server start failed (not listening within timeout)"
                 _kill_server_client()
                 _netns_cleanup()
                 result["ended_at"] = _now_iso()
@@ -746,6 +804,10 @@ def _run_one_entry(
 
         # Run scenario
         _run_scenario_in_client(scenario, transport, config=cfg)
+
+        # Post-scenario wait to let residual packets be captured
+        if cfg.post_scenario_wait > 0:
+            time.sleep(cfg.post_scenario_wait)
 
         # Wait for capture to finish
         try:
@@ -798,6 +860,8 @@ def _run_batch(
     total = len(entries)
     for i, entry in enumerate(entries):
         label = f"{entry['transport']}/{entry['scenario']}/{entry['phase']}"
+        if entry.get("run_id"):
+            label += f"/{entry['run_id']}"
         if execute:
             print(f"[{i+1}/{total}] Running: {label} ...", flush=True)
         else:
@@ -843,9 +907,15 @@ def _runtime_config_from_args(args: argparse.Namespace) -> RuntimeConfig:
         ping_count=getattr(args, "ping_count", 20),
         ping_interval=getattr(args, "ping_interval", 0.1),
         curl_count=getattr(args, "curl_count", 10),
-        bulk_bytes=getattr(args, "bulk_bytes", 262144),
+        bulk_bytes=getattr(args, "bulk_bytes", 1048576),
         min_packet_count=getattr(args, "min_packet_count", 30),
         scenario_timeout=getattr(args, "scenario_timeout", 60),
+        repeat_count=getattr(args, "repeat_count", 1),
+        curl_connect_timeout=getattr(args, "curl_connect_timeout", 30),
+        curl_max_time=getattr(args, "curl_max_time", 60),
+        http_server_startup_timeout=getattr(args, "http_server_startup_timeout", 10),
+        post_scenario_wait=getattr(args, "post_scenario_wait", 2),
+        bulk_read_timeout=getattr(args, "bulk_read_timeout", 60),
     )
 
 
@@ -887,8 +957,13 @@ def _run_run(args: argparse.Namespace) -> None:
         print(f"=== Execute: {len(entries)} entries ===")
         _run_batch(entries, env, execute=True, output_dir=args.output_dir, runtime_config=cfg)
 
-        # After execution, run comparison if both before and after have data
-        _run_comparison(args.output_dir, min_packet_count=cfg.min_packet_count)
+        # After execution, run comparison (repeated if repeat_count > 1)
+        if cfg.repeat_count > 1:
+            _run_repeated_comparison(args.output_dir, transports, scenarios,
+                                     min_packet_count=cfg.min_packet_count,
+                                     repeat_count=cfg.repeat_count)
+        else:
+            _run_comparison(args.output_dir, min_packet_count=cfg.min_packet_count)
 
 
 # ---------------------------------------------------------------------------
@@ -1107,31 +1182,373 @@ def _write_comparison_md(entries: list[dict[str, Any]], md_path: Path) -> None:
     md_path.write_text("\n".join(lines))
 
 
-def _generate_patch_prompts(entries: list[dict[str, Any]], output_dir: str) -> None:
-    """Generate appropriate prompts based on data quality.
+def _run_repeated_comparison(
+    output_dir: str,
+    transports: list[str],
+    scenarios: list[str],
+    min_packet_count: int = 30,
+    repeat_count: int = 3,
+) -> None:
+    """Phase 9E: Statistical before/after comparison with repeated runs.
 
-    - data_quality=ok + regressed → countermeasure patch prompt
-    - data_quality=insufficient → data collection prompt (need more traffic)
+    Groups run_XX.report.json files by (transport, scenario, phase),
+    computes mean/std/min/max, and produces aggregate verdicts.
     """
-    regressed = [e for e in entries if e["verdict"] == "regressed" and e.get("data_quality") == "ok"]
-    insufficient = [e for e in entries if e.get("data_quality") == "insufficient"]
+    summaries_dir = Path(output_dir) / "summaries"
+    summaries_dir.mkdir(parents=True, exist_ok=True)
 
-    # Countermeasure patch prompt for regressed entries
-    if regressed:
+    aggregated: list[dict[str, Any]] = []
+
+    for transport in transports:
+        for scenario in scenarios:
+            agg = _aggregate_repeated_runs(
+                output_dir, transport, scenario,
+                min_packet_count=min_packet_count, repeat_count=repeat_count,
+            )
+            if agg is not None:
+                aggregated.append(agg)
+
+    if not aggregated:
+        print("\nNo repeated comparison data available.")
+        return
+
+    # Write repeated comparison CSV
+    _write_repeated_comparison_csv(aggregated, summaries_dir)
+
+    # Write repeated comparison JSON
+    json_path = summaries_dir / "repeated_before_after_comparison.json"
+    json_path.write_text(json.dumps({
+        "generated_at": _now_iso(),
+        "min_packet_count": min_packet_count,
+        "repeat_count": repeat_count,
+        "entries": aggregated,
+    }, indent=2))
+
+    # Write Markdown
+    _write_repeated_comparison_md(aggregated, summaries_dir)
+
+    # Statistics
+    improved = sum(1 for e in aggregated if e.get("aggregate_verdict") == "improved")
+    regressed = sum(1 for e in aggregated if e.get("aggregate_verdict") == "regressed")
+    unchanged = sum(1 for e in aggregated if e.get("aggregate_verdict") == "unchanged")
+    mixed = sum(1 for e in aggregated if e.get("aggregate_verdict") == "mixed")
+    insufficient = sum(1 for e in aggregated if e.get("aggregate_verdict") == "insufficient")
+    partial = sum(1 for e in aggregated if e.get("data_quality") == "partial")
+    ok = sum(1 for e in aggregated if e.get("data_quality") == "ok")
+
+    print(f"\nRepeated comparison written to {summaries_dir}/")
+    print(f"  data_quality: ok={ok}, partial={partial}, insufficient={insufficient}")
+    print(f"  aggregate_verdicts: improved={improved}, regressed={regressed}, "
+          f"unchanged={unchanged}, mixed={mixed}, insufficient={insufficient}")
+
+    # Generate prompts based on aggregate results
+    _generate_patch_prompts(aggregated, output_dir, repeated=True)
+
+
+def _aggregate_repeated_runs(
+    output_dir: str,
+    transport: str,
+    scenario: str,
+    min_packet_count: int = 30,
+    repeat_count: int = 3,
+) -> Optional[dict[str, Any]]:
+    """Aggregate repeated run reports for one transport/scenario.
+
+    Returns a dict with per-phase statistics and aggregate verdict.
+    """
+    before_runs = _load_repeated_reports(output_dir, transport, scenario, "before", repeat_count)
+    after_runs = _load_repeated_reports(output_dir, transport, scenario, "after", repeat_count)
+
+    if not before_runs and not after_runs:
+        return None
+
+    valid_before = len(before_runs)
+    valid_after = len(after_runs)
+
+    # Extract per-run packet counts and risk scores
+    before_pcs = [_safe_float(r, "packet_count") for r in before_runs]
+    after_pcs = [_safe_float(r, "packet_count") for r in after_runs]
+    before_scores = [_safe_float(r, "fingerprint_risk_score") for r in before_runs]
+    after_scores = [_safe_float(r, "fingerprint_risk_score") for r in after_runs]
+
+    # Filter out None values
+    before_pcs_valid = [v for v in before_pcs if v is not None]
+    after_pcs_valid = [v for v in after_pcs if v is not None]
+    before_scores_valid = [v for v in before_scores if v is not None]
+    after_scores_valid = [v for v in after_scores if v is not None]
+
+    entry: dict[str, Any] = {
+        "transport": transport,
+        "scenario": scenario,
+        "repeat_count": repeat_count,
+        "valid_repeat_before": valid_before,
+        "valid_repeat_after": valid_after,
+    }
+
+    # Packet count stats
+    if before_pcs_valid:
+        entry["before_packet_count_mean"] = round(_mean(before_pcs_valid), 1)
+        entry["before_packet_count_std"] = round(_std(before_pcs_valid), 1)
+        entry["before_packet_count_min"] = round(min(before_pcs_valid), 1)
+        entry["before_packet_count_max"] = round(max(before_pcs_valid), 1)
+    if after_pcs_valid:
+        entry["after_packet_count_mean"] = round(_mean(after_pcs_valid), 1)
+        entry["after_packet_count_std"] = round(_std(after_pcs_valid), 1)
+        entry["after_packet_count_min"] = round(min(after_pcs_valid), 1)
+        entry["after_packet_count_max"] = round(max(after_pcs_valid), 1)
+
+    # Risk score stats
+    if before_scores_valid:
+        entry["before_risk_score_mean"] = round(_mean(before_scores_valid), 4)
+        entry["before_risk_score_std"] = round(_std(before_scores_valid), 4)
+    if after_scores_valid:
+        entry["after_risk_score_mean"] = round(_mean(after_scores_valid), 4)
+        entry["after_risk_score_std"] = round(_std(after_scores_valid), 4)
+
+    # Per-run verdict counts
+    verdicts = _per_run_verdicts(before_runs, after_runs, min_packet_count)
+    entry["improved_count"] = verdicts.count("improved")
+    entry["unchanged_count"] = verdicts.count("unchanged")
+    entry["regressed_count"] = verdicts.count("regressed")
+    entry["insufficient_count"] = verdicts.count("insufficient")
+    entry["skipped_count"] = verdicts.count("skipped")
+
+    # Compute risk_score_delta_mean from paired valid runs
+    deltas = _paired_deltas(before_runs, after_runs, min_packet_count)
+    if deltas:
+        entry["risk_score_delta_mean"] = round(_mean(deltas), 4)
+        entry["risk_score_delta_std"] = round(_std(deltas), 4)
+
+    # Data quality
+    valid_pair_count = len(deltas)
+    if valid_before == 0 and valid_after == 0:
+        entry["data_quality"] = "skipped"
+        entry["aggregate_verdict"] = "skipped"
+    elif valid_pair_count == 0:
+        entry["data_quality"] = "insufficient"
+        entry["aggregate_verdict"] = "insufficient"
+    elif valid_pair_count < repeat_count:
+        entry["data_quality"] = "partial"
+    else:
+        entry["data_quality"] = "ok"
+
+    # Aggregate verdict (only when data_quality is ok or partial)
+    if entry.get("data_quality") in ("ok", "partial"):
+        imp = entry["improved_count"]
+        reg = entry["regressed_count"]
+        unc = entry["unchanged_count"]
+
+        if imp >= 2 and reg == 0:
+            entry["aggregate_verdict"] = "improved"
+        elif reg >= 2:
+            entry["aggregate_verdict"] = "regressed"
+        elif unc >= 2:
+            entry["aggregate_verdict"] = "unchanged"
+        else:
+            entry["aggregate_verdict"] = "mixed"
+
+    return entry
+
+
+def _load_repeated_reports(
+    output_dir: str, transport: str, scenario: str, phase: str, repeat_count: int,
+) -> list[dict[str, Any]]:
+    """Load all run reports for a given transport/scenario/phase."""
+    reports = []
+    for run_idx in range(1, repeat_count + 1):
+        run_id = f"run_{run_idx:02d}"
+        report_path = f"{output_dir}/{phase}/{transport}/{scenario}/{run_id}.report.json"
+        r = _load_report_safe(report_path)
+        if r is not None:
+            reports.append(r)
+    return reports
+
+
+def _safe_float(report: dict[str, Any], key: str) -> Optional[float]:
+    """Safely extract a float value from a report dict."""
+    val = report.get(key)
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _std(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    m = _mean(values)
+    return (sum((v - m) ** 2 for v in values) / (len(values) - 1)) ** 0.5
+
+
+def _per_run_verdicts(
+    before_runs: list[dict[str, Any]],
+    after_runs: list[dict[str, Any]],
+    min_packet_count: int,
+) -> list[str]:
+    """Compute per-run verdicts by pairing reports by index."""
+    verdicts = []
+    max_runs = max(len(before_runs), len(after_runs))
+    for i in range(max_runs):
+        b = before_runs[i] if i < len(before_runs) else None
+        a = after_runs[i] if i < len(after_runs) else None
+
+        if b is None and a is None:
+            verdicts.append("skipped")
+            continue
+
+        pc_b = (b or {}).get("packet_count", 0) or 0
+        pc_a = (a or {}).get("packet_count", 0) or 0
+
+        if (b is None or a is None or pc_b < min_packet_count or pc_a < min_packet_count):
+            verdicts.append("insufficient")
+            continue
+
+        b_score = b.get("fingerprint_risk_score")
+        a_score = a.get("fingerprint_risk_score")
+        if b_score is None or a_score is None:
+            verdicts.append("insufficient")
+            continue
+
+        delta = a_score - b_score
+        if delta < -0.05:
+            verdicts.append("improved")
+        elif delta > 0.05:
+            verdicts.append("regressed")
+        else:
+            verdicts.append("unchanged")
+
+    return verdicts
+
+
+def _paired_deltas(
+    before_runs: list[dict[str, Any]],
+    after_runs: list[dict[str, Any]],
+    min_packet_count: int,
+) -> list[float]:
+    """Compute risk_score_delta for valid paired runs."""
+    deltas = []
+    for i in range(min(len(before_runs), len(after_runs))):
+        b = before_runs[i]
+        a = after_runs[i]
+        pc_b = b.get("packet_count", 0) or 0
+        pc_a = a.get("packet_count", 0) or 0
+        if pc_b < min_packet_count or pc_a < min_packet_count:
+            continue
+        b_score = b.get("fingerprint_risk_score")
+        a_score = a.get("fingerprint_risk_score")
+        if b_score is not None and a_score is not None:
+            deltas.append(round(a_score - b_score, 4))
+    return deltas
+
+
+def _write_repeated_comparison_csv(entries: list[dict[str, Any]], summaries_dir: Path) -> None:
+    fieldnames = [
+        "transport", "scenario", "repeat_count",
+        "valid_repeat_before", "valid_repeat_after",
+        "before_packet_count_mean", "before_packet_count_std",
+        "before_packet_count_min", "before_packet_count_max",
+        "after_packet_count_mean", "after_packet_count_std",
+        "after_packet_count_min", "after_packet_count_max",
+        "before_risk_score_mean", "before_risk_score_std",
+        "after_risk_score_mean", "after_risk_score_std",
+        "risk_score_delta_mean", "risk_score_delta_std",
+        "improved_count", "unchanged_count", "regressed_count",
+        "insufficient_count", "skipped_count",
+        "data_quality", "aggregate_verdict",
+    ]
+    csv_path = summaries_dir / "repeated_before_after_comparison.csv"
+    with csv_path.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        for e in entries:
+            w.writerow(e)
+
+
+def _write_repeated_comparison_md(entries: list[dict[str, Any]], summaries_dir: Path) -> None:
+    lines = [
+        "# Phase 9E: Repeated Before/After Trace Comparison",
+        "",
+        f"Generated: {_now_iso()}",
+        "",
+        "| Transport | Scenario | Valid Runs | Before Pkts (mean±std) | After Pkts (mean±std) | "
+        "Before Risk (mean±std) | After Risk (mean±std) | Delta (mean±std) | "
+        "I/U/R | Quality | Verdict |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for e in entries:
+        before_pkts = f"{e.get('before_packet_count_mean','N/A')}±{e.get('before_packet_count_std','N/A')}"
+        after_pkts = f"{e.get('after_packet_count_mean','N/A')}±{e.get('after_packet_count_std','N/A')}"
+        before_risk = f"{e.get('before_risk_score_mean','N/A')}±{e.get('before_risk_score_std','N/A')}"
+        after_risk = f"{e.get('after_risk_score_mean','N/A')}±{e.get('after_risk_score_std','N/A')}"
+        delta_s = f"{e.get('risk_score_delta_mean','N/A')}±{e.get('risk_score_delta_std','N/A')}"
+        iur = f"{e.get('improved_count',0)}/{e.get('unchanged_count',0)}/{e.get('regressed_count',0)}"
+        lines.append(
+            f"| {e['transport']} | {e['scenario']} | "
+            f"{e.get('valid_repeat_before','?')}/{e.get('valid_repeat_after','?')} | "
+            f"{before_pkts} | {after_pkts} | "
+            f"{before_risk} | {after_risk} | "
+            f"{delta_s} | {iur} | "
+            f"{e.get('data_quality','N/A')} | "
+            f"**{e.get('aggregate_verdict','N/A')}** |"
+        )
+    md_path = summaries_dir / "repeated_before_after_comparison.md"
+    md_path.write_text("\n".join(lines))
+
+
+def _generate_patch_prompts(
+    entries: list[dict[str, Any]], output_dir: str, repeated: bool = False,
+) -> None:
+    """Phase 9E: Generate prompts based on aggregate or single-run data quality.
+
+    - aggregate_verdict=regressed or after_risk_score_mean >= 0.70 → countermeasure patch
+    - data_quality=insufficient or partial → data collection prompt
+    - aggregate_verdict=improved or unchanged → no_patch_needed
+    """
+    verdict_key = "aggregate_verdict" if repeated else "verdict"
+
+    # Regressed or high risk → countermeasure patch
+    regressed = [
+        e for e in entries
+        if e.get(verdict_key) == "regressed"
+        and e.get("data_quality") in ("ok", "partial")
+    ]
+    high_risk = [
+        e for e in entries
+        if e.get("data_quality") in ("ok", "partial")
+        and e.get("after_risk_score_mean", e.get("fingerprint_risk_score_after", 0) or 0) >= 0.70
+    ]
+    patch_targets = regressed + [e for e in high_risk if e not in regressed]
+
+    if patch_targets:
         prompt_lines = [
-            "Improve VPN-LLM traffic shaping based on Phase 9 real trace matrix regressions.",
+            "Improve VPN-LLM traffic shaping based on Phase 9E repeated trace matrix regressions.",
             "",
             "The following transport/scenario combinations showed regressed",
-            "fingerprint risk scores after enabling shaping (padding + aggregation + jitter):",
+            "fingerprint risk scores or persistently high risk after enabling shaping:",
             "",
         ]
-        for e in regressed:
-            prompt_lines.append(
-                f"- {e['transport']}/{e['scenario']}: "
-                f"before={e.get('fingerprint_risk_score_before', 'N/A')}, "
-                f"after={e.get('fingerprint_risk_score_after', 'N/A')}, "
-                f"delta={e.get('risk_score_delta', 'N/A')}"
-            )
+        for e in patch_targets:
+            if repeated:
+                prompt_lines.append(
+                    f"- {e['transport']}/{e['scenario']}: "
+                    f"before_risk_mean={e.get('before_risk_score_mean', 'N/A')}, "
+                    f"after_risk_mean={e.get('after_risk_score_mean', 'N/A')}, "
+                    f"delta_mean={e.get('risk_score_delta_mean', 'N/A')}, "
+                    f"aggregate_verdict={e.get('aggregate_verdict', 'N/A')}"
+                )
+            else:
+                prompt_lines.append(
+                    f"- {e['transport']}/{e['scenario']}: "
+                    f"before={e.get('fingerprint_risk_score_before', 'N/A')}, "
+                    f"after={e.get('fingerprint_risk_score_after', 'N/A')}, "
+                    f"delta={e.get('risk_score_delta', 'N/A')}"
+                )
 
         prompt_lines += [
             "",
@@ -1158,34 +1575,48 @@ def _generate_patch_prompts(entries: list[dict[str, Any]], output_dir: str) -> N
         result_path = Path(output_dir) / "patch_loop_result.json"
         result_path.write_text(json.dumps({
             "generated_at": _now_iso(),
-            "regressed_count": len(regressed),
-            "regressed_entries": regressed,
+            "patch_target_count": len(patch_targets),
+            "patch_targets": patch_targets,
             "prompt_path": str(prompt_path),
         }, indent=2))
 
-    # Data collection prompt for insufficient entries
-    if insufficient:
+    # Insufficient or partial data → data collection prompt
+    insufficient = [e for e in entries if e.get("data_quality") == "insufficient"]
+    partial = [e for e in entries if e.get("data_quality") == "partial"]
+    dc_targets = insufficient + partial
+
+    if dc_targets:
         dc_lines = [
-            "Phase 9 trace data is insufficient for reliable fingerprint comparison.",
+            "Phase 9 trace data is insufficient or partial for reliable fingerprint comparison.",
             "",
             "The following entries need more traffic or longer capture:",
             "",
         ]
-        for e in insufficient:
-            dc_lines.append(
-                f"- {e['transport']}/{e['scenario']}: "
-                f"before packets={e.get('packet_count_before', 'N/A')}, "
-                f"after packets={e.get('packet_count_after', 'N/A')}, "
-                f"min_packet_count={e.get('min_packet_count', 'N/A')}"
-            )
+        for e in dc_targets:
+            if repeated:
+                dc_lines.append(
+                    f"- {e['transport']}/{e['scenario']}: "
+                    f"valid_repeat_before={e.get('valid_repeat_before','?')}, "
+                    f"valid_repeat_after={e.get('valid_repeat_after','?')}, "
+                    f"before_pkt_mean={e.get('before_packet_count_mean','N/A')}, "
+                    f"after_pkt_mean={e.get('after_packet_count_mean','N/A')}, "
+                    f"min_packet_count={e.get('min_packet_count',30)}, "
+                    f"data_quality={e.get('data_quality','N/A')}"
+                )
+            else:
+                dc_lines.append(
+                    f"- {e['transport']}/{e['scenario']}: "
+                    f"before packets={e.get('packet_count_before', 'N/A')}, "
+                    f"after packets={e.get('packet_count_after', 'N/A')}, "
+                    f"min_packet_count={e.get('min_packet_count', 'N/A')}"
+                )
 
         dc_lines += [
             "",
             "Recommendations:",
             "- Increase --capture-duration (try 45 or 60)",
-            "- Use --ping-count 30 or higher",
-            "- For idle, increase heartbeat frequency or capture longer",
-            "- For curl/bulk, increase --curl-count or --bulk-bytes",
+            "- Use --ping-count 80 or higher with --ping-interval 0.05",
+            "- For bulk, increase --bulk-bytes and --curl-connect-timeout",
             "- Ensure VPN tunnel is established before running scenario",
             "",
             "Do NOT modify countermeasure code based on insufficient data.",
@@ -1194,6 +1625,17 @@ def _generate_patch_prompts(entries: list[dict[str, Any]], output_dir: str) -> N
         dc_path = Path(output_dir) / "data_collection_prompt.txt"
         dc_path.write_text("\n".join(dc_lines))
         print(f"Data collection prompt written to {dc_path}")
+
+    # No patch needed
+    if not patch_targets and not dc_targets:
+        no_patch_path = Path(output_dir) / "no_patch_needed.txt"
+        no_patch_path.write_text(
+            f"# No patch needed\n\n"
+            f"Generated: {_now_iso()}\n\n"
+            f"All scenarios with sufficient data showed improved or unchanged verdicts.\n"
+            f"No regressions or high-risk entries detected.\n"
+        )
+        print(f"No patch needed — all sufficient entries improved or unchanged.")
 
 
 # ---------------------------------------------------------------------------
@@ -1235,7 +1677,7 @@ def _write_skipped_report(output_dir: str, env: dict[str, Any]) -> None:
 
 
 def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
-    """Add Phase 9B runtime parameters to a subparser."""
+    """Add Phase 9E runtime parameters to a subparser."""
     parser.add_argument("--capture-duration", type=int, default=30,
                         help="Capture duration in seconds (default: 30)")
     parser.add_argument("--ping-count", type=int, default=20,
@@ -1244,12 +1686,24 @@ def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
                         help="Interval between pings in seconds (default: 0.1)")
     parser.add_argument("--curl-count", type=int, default=10,
                         help="Number of curl requests (default: 10)")
-    parser.add_argument("--bulk-bytes", type=int, default=262144,
-                        help="Bulk transfer size in bytes (default: 262144)")
+    parser.add_argument("--bulk-bytes", type=int, default=1048576,
+                        help="Bulk transfer size in bytes (default: 1048576)")
     parser.add_argument("--min-packet-count", type=int, default=30,
                         help="Minimum packet count for valid data (default: 30)")
     parser.add_argument("--scenario-timeout", type=int, default=60,
                         help="Scenario execution timeout in seconds (default: 60)")
+    parser.add_argument("--repeat-count", type=int, default=1,
+                        help="Number of run repetitions per scenario (default: 1)")
+    parser.add_argument("--curl-connect-timeout", type=int, default=30,
+                        help="curl --connect-timeout seconds (default: 30)")
+    parser.add_argument("--curl-max-time", type=int, default=60,
+                        help="curl --max-time seconds (default: 60)")
+    parser.add_argument("--http-server-startup-timeout", type=int, default=10,
+                        help="HTTP server startup timeout seconds (default: 10)")
+    parser.add_argument("--post-scenario-wait", type=int, default=2,
+                        help="Post-scenario wait seconds (default: 2)")
+    parser.add_argument("--bulk-read-timeout", type=int, default=60,
+                        help="Bulk download read timeout seconds (default: 60)")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
