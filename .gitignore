@@ -101,3 +101,9 @@ traces/*.tmp
 
 # Scratch trace output, never commit
 traces_after/
+
+# Phase 9 experiment outputs
+outputs/
+
+# Debug/temporary shaping configs (not for mainline)
+config/*_noagg.yaml
