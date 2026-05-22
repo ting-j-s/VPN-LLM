@@ -20,6 +20,7 @@ from scripts.run_phase9_real_trace_matrix import (
     run_env_check,
     _load_report_safe,
     _generate_patch_prompts,
+    _discover_transport_scenarios,
     RuntimeConfig,
     _runtime_config_from_args,
     _mean,
@@ -1064,3 +1065,52 @@ class TestNowIso:
         assert isinstance(ts, str)
         assert len(ts) > 0
         assert "T" in ts
+
+
+# ---------------------------------------------------------------------------
+# _discover_transport_scenarios
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverTransportScenarios:
+    def test_empty_dir_returns_empty_list(self, tmp_path):
+        result = _discover_transport_scenarios(str(tmp_path))
+        assert result == []
+
+    def test_discovers_single_pair(self, tmp_path):
+        before_dir = tmp_path / "before" / "tcp" / "ping"
+        before_dir.mkdir(parents=True)
+        (before_dir / "run_01.report.json").write_text("{}")
+        result = _discover_transport_scenarios(str(tmp_path))
+        assert result == [("tcp", "ping")]
+
+    def test_discovers_multiple_pairs_sorted(self, tmp_path):
+        for t, s in [("websocket", "bulk"), ("tcp", "ping"), ("tls", "ping")]:
+            d = tmp_path / "before" / t / s
+            d.mkdir(parents=True)
+            (d / "run_01.report.json").write_text("{}")
+        result = _discover_transport_scenarios(str(tmp_path))
+        assert result == [("tcp", "ping"), ("tls", "ping"), ("websocket", "bulk")]
+
+    def test_ignores_dirs_without_reports(self, tmp_path):
+        (tmp_path / "before" / "tcp" / "empty_scenario").mkdir(parents=True)
+        d = tmp_path / "before" / "tcp" / "ping"
+        d.mkdir(parents=True)
+        (d / "run_01.report.json").write_text("{}")
+        result = _discover_transport_scenarios(str(tmp_path))
+        assert result == [("tcp", "ping")]
+
+    def test_no_before_dir_returns_empty(self, tmp_path):
+        (tmp_path / "after" / "tcp" / "ping").mkdir(parents=True)
+        result = _discover_transport_scenarios(str(tmp_path))
+        assert result == []
+
+    def test_handles_multiple_transports(self, tmp_path):
+        for t in ["tcp", "tls", "websocket"]:
+            d = tmp_path / "before" / t / "ping"
+            d.mkdir(parents=True)
+            (d / "run_01.report.json").write_text("{}")
+        result = _discover_transport_scenarios(str(tmp_path))
+        assert len(result) == 3
+        transports = [t for t, s in result]
+        assert transports == ["tcp", "tls", "websocket"]

@@ -1182,6 +1182,29 @@ def _write_comparison_md(entries: list[dict[str, Any]], md_path: Path) -> None:
     md_path.write_text("\n".join(lines))
 
 
+def _discover_transport_scenarios(output_dir: str) -> list[tuple[str, str]]:
+    """Discover all (transport, scenario) pairs with report data in output_dir.
+
+    Scans before/*/*/ for run_*.report.json files so incremental batches
+    (e.g. tcp+ws then tls) produce a combined summary instead of overwriting.
+    """
+    pairs: set[tuple[str, str]] = set()
+    before_dir = Path(output_dir) / "before"
+    if before_dir.is_dir():
+        for transport_dir in before_dir.iterdir():
+            if not transport_dir.is_dir():
+                continue
+            transport = transport_dir.name
+            for scenario_dir in transport_dir.iterdir():
+                if not scenario_dir.is_dir():
+                    continue
+                scenario = scenario_dir.name
+                # Check for at least one report file
+                if list(scenario_dir.glob("run_*.report.json")):
+                    pairs.add((transport, scenario))
+    return sorted(pairs)
+
+
 def _run_repeated_comparison(
     output_dir: str,
     transports: list[str],
@@ -1193,20 +1216,28 @@ def _run_repeated_comparison(
 
     Groups run_XX.report.json files by (transport, scenario, phase),
     computes mean/std/min/max, and produces aggregate verdicts.
+
+    Auto-discovers all transport/scenario pairs with data in output_dir
+    so that incremental batches produce a combined summary.
     """
     summaries_dir = Path(output_dir) / "summaries"
     summaries_dir.mkdir(parents=True, exist_ok=True)
 
     aggregated: list[dict[str, Any]] = []
 
-    for transport in transports:
-        for scenario in scenarios:
-            agg = _aggregate_repeated_runs(
-                output_dir, transport, scenario,
-                min_packet_count=min_packet_count, repeat_count=repeat_count,
-            )
-            if agg is not None:
-                aggregated.append(agg)
+    discovered = _discover_transport_scenarios(output_dir)
+    if discovered:
+        pairs = discovered
+    else:
+        pairs = [(t, s) for t in transports for s in scenarios]
+
+    for transport, scenario in pairs:
+        agg = _aggregate_repeated_runs(
+            output_dir, transport, scenario,
+            min_packet_count=min_packet_count, repeat_count=repeat_count,
+        )
+        if agg is not None:
+            aggregated.append(agg)
 
     if not aggregated:
         print("\nNo repeated comparison data available.")
