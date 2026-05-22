@@ -169,6 +169,59 @@ outputs/phase9_real_matrix_e/
 - `data_quality=insufficient` or `partial` → `data_collection_prompt.txt`
 - `aggregate_verdict=improved` or `unchanged` → `no_patch_needed.txt`
 
+**Phase 9E repeated results (5 scenarios x 3 repeats = 30 runs):**
+
+| Transport | Scenario | After Pkts | Delta | I/U/R | Quality | Verdict |
+|---|---|---|---|---|---|---|
+| tcp | bulk | 33.3±1.5 | -0.0683 | 2/1/0 | ok | **improved** |
+| websocket | ping | 32.7±1.2 | -0.0621 | 3/0/0 | ok | **improved** |
+| websocket | bulk | 40.7±0.6 | -0.0555 | 1/2/0 | ok | unchanged |
+| tcp | ping | 20.0±1.0 | N/A | 0/0/0 | insufficient | insufficient |
+| tls | ping | 15.0±0.0 | N/A | 0/0/0 | insufficient | insufficient |
+
+**Phase 9E key conclusion:**
+- Shaping data path is confirmed stable (0 TUN write errors across 30 runs).
+- tcp/bulk and websocket/ping show repeated improved verdicts with valid data quality.
+- tcp/ping and tls/ping after packet counts are heartbeat-flush limited
+  (after ≈ capture_duration / heartbeat_interval × pkts_per_flush, independent of ping_count).
+  This is expected aggregation behavior, not a data-path failure.
+
+### 3.4 Phase 9F: Long-Capture Ping Supplement (2026-05-22)
+
+Phase 9F tests whether extending `--capture-duration` from 45s to 90s resolves
+the ping packet-count insufficiency without changing shaping behavior.
+
+**Parameters:**
+```
+--transports tcp,tls --scenarios ping --repeat-count 3
+--capture-duration 90 --ping-count 120 --ping-interval 0.05
+--min-packet-count 30
+```
+
+**Results (2 scenarios x 3 repeats = 12 runs):**
+
+| Transport | Scenario | Before Pkts | After Pkts | Delta | I/U/R | Quality | Verdict |
+|---|---|---|---|---|---|---|---|
+| tcp | ping | 384.7±1.2 | **41.0±1.0** | +0.0415 | 0/3/0 | ok | unchanged |
+| tls | ping | 384.0±0.0 | 25.0±13.0 | N/A | 0/1/0 (2 insuf) | partial | mixed |
+
+**Key findings:**
+- tcp/ping reaches `data_quality=ok` under 90s capture; packet count scales
+  approximately linearly with capture duration (20 → 41, against 45s → 90s).
+- tls/ping remains partial: high variance (17/18/40), only 1/3 runs ≥30.
+  TLS handshake overhead further compresses the effective flush window.
+- 0 TUN write errors across all 12 runs.
+
+**Phase 9F conclusion:**
+- Ping under aggregation is **heartbeat-flush limited**. Packet count is bounded by
+  `capture_duration / heartbeat_interval`, not by `ping_count`. Extending capture
+  duration resolves tcp/ping but not tls/ping.
+- tls/ping is formally marked **aggregation_flush_limited** and should not be used
+  as a primary before/after shaping metric unless the flush policy or capture
+  duration changes.
+- Primary before/after evidence should rely on `data_quality=ok` scenarios:
+  tcp/bulk, websocket/ping, websocket/bulk, and (with 90s capture) tcp/ping.
+
 ## 4. Environment Requirements
 
 | Requirement | Purpose |
