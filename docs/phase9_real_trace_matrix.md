@@ -9,6 +9,9 @@ fingerprintability in a controlled local setting.
 
 Phase 8 produced documentation and integration. Phase 9 produces data.
 
+Phase 9B extends the runner to produce **statistically meaningful packet counts**
+(packet_count >= 30) via enhanced ping, curl, and bulk scenarios.
+
 ## 2. Experiment Matrix
 
 | Transport | idle | ping | curl | bulk | reconnect |
@@ -27,8 +30,68 @@ be enabled by fixing the SSH transport implementation.
 
 - **Before**: shaping disabled, using default config (`config/server_netns.yaml`
   + `config/client_netns.yaml`).
-- **After**: shaping enabled, using `config/examples/shaping_padding_aggregation.yaml`
-  (padding + aggregation + jitter enabled).
+- **After**: shaping enabled, using symmetric shaping configs (server + client both enable
+  padding + aggregation + jitter). Server uses `config/server_netns_shaping.yaml`,
+  client uses `config/examples/shaping_padding_aggregation_netns.yaml`.
+
+### 3.1 Phase 9C: Shaping Data-Path Fix (2026-05-22)
+
+**Root cause:** `_last_sent_time` in both `client_core.py` and `server_core.py` was
+updated on every TUN read in `_tun_to_transport_loop`, even when aggregation buffered
+the data without calling `transport.send()`. This continuously reset the HEARTBEAT
+timer, preventing HEARTBEAT-triggered aggregation flushes during active TUN traffic.
+
+**Fix:** Moved `_last_sent_time` update into `_send_shaped`, co-located with
+`transport.send()` calls. Now `_last_sent_time` only advances when data actually hits
+the wire. HEARTBEAT fires reliably every 10 seconds regardless of TUN activity.
+
+**Changes:**
+- `src/core/client_core.py`: `_send_shaped` updates `_last_sent_time` after each `transport.send()`
+- `src/core/server_core.py`: same fix
+- `scripts/run_phase9_real_trace_matrix.py`: IPv6 disable on TUN interfaces, symmetric shaping config selection
+
+**Verification (full aggregation pipeline, tcp/ping, 300 pings):**
+- before: 912 packets, after: 46 packets
+- data_quality=ok, no TUN write errors
+- HEARTBEAT interval: consistent 10s both sides
+- risk delta: +0.0289 (unchanged)
+
+### 3.2 Phase 9D: Real Matrix Expansion (2026-05-22)
+
+Expanded the before/after matrix from a single TCP smoke test to tcp/websocket/tls.
+
+**Results:**
+
+| Transport | Scenario | Before Pkts | After Pkts | Quality | Before Risk | After Risk | Delta | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| tcp | ping | 609 | 32 | ok | 0.5145 | 0.5171 | +0.0026 | unchanged |
+| tcp | bulk | 51 | 22 | insufficient | 0.6073 | 0.5910 | N/A | insufficient |
+| websocket | ping | 624 | 44 | ok | 0.6399 | 0.5619 | **-0.078** | **improved** |
+| websocket | bulk | 69 | 28 | insufficient | 0.6197 | 0.6128 | N/A | insufficient |
+| tls | ping | 418 | 19 | insufficient | 0.5545 | 0.5025 | N/A | insufficient |
+
+**Key findings:**
+- websocket/ping is the first scenario showing measurable risk reduction (delta -0.078)
+- tcp/ping risk is essentially unchanged (delta +0.0026)
+- Aggregation reduces wire-level packet count by 10-20x; insufficient entries need
+  more traffic volume (higher ping count / larger bulk files)
+- TLS config path fixed: `_get_config_for_phase` now returns TLS-specific configs with
+  certfile/keyfile for TLS transport
+
+**TLS diagnosis:**
+- Root cause: `_get_config_for_phase` always returned TCP configs, which lack
+  `certfile`/`keyfile` settings. Server failed with "Server mode requires certfile
+  and keyfile."
+- Fix: Created `config/server_netns_tls.yaml`, `config/client_netns_tls.yaml`,
+  `config/server_netns_tls_shaping.yaml`, `config/client_netns_tls_shaping.yaml`
+- After fix: TLS connection succeeds. Data insufficient (19 after < 30) due to
+  aggregation, needs more ping volume.
+
+**Bulk scenario limitation:**
+- `--bulk-bytes` was not wired to the HTTP server file generation (hardcoded 256KB).
+  Fixed in Phase 9D.
+- With aggregation, HTTP request TCP SYN is buffered until HEARTBEAT flush; curl
+  `--connect-timeout 10` is tight. Needs longer connect timeout or larger transfers.
 
 ## 4. Environment Requirements
 
@@ -38,6 +101,7 @@ be enabled by fixing the SSH transport implementation.
 | root or `CAP_NET_ADMIN` | Create netns, TUN devices, veth pairs |
 | `tcpdump` | Capture tunnel traffic on veth |
 | `tshark` | Convert pcap to CSV |
+| `curl` | Needed for curl and bulk scenarios |
 | Python `websockets` | WebSocket transport |
 | Python `paramiko` | SSH transport (optional) |
 | Python `yaml` | Config parsing |
@@ -59,10 +123,11 @@ python3 scripts/run_phase9_real_trace_matrix.py env-check --json
 python3 scripts/run_phase9_real_trace_matrix.py plan \
   --output-dir outputs/phase9_real_matrix \
   --transports tcp,tls,websocket \
-  --scenarios idle,ping,curl,bulk,reconnect
+  --scenarios idle,ping,curl,bulk,reconnect \
+  --capture-duration 30 --ping-count 20 --min-packet-count 30
 ```
 
-Output: `outputs/phase9_real_matrix/manifest.json`
+Output: `outputs/phase9_real_matrix/manifest.json` (includes `runtime_params`).
 
 ### 5.3 Dry-run
 
@@ -83,26 +148,68 @@ Dry-run is the **default**. It prints what would happen but does not:
 ### 5.4 Real execution
 
 ```bash
+# Recommended first run: tcp ping + bulk for meaningful packet counts
 python3 scripts/run_phase9_real_trace_matrix.py run \
-  --output-dir outputs/phase9_real_matrix \
+  --output-dir outputs/phase9_real_matrix_b \
   --transports tcp \
-  --scenarios idle \
+  --scenarios ping,bulk \
+  --capture-duration 30 \
+  --ping-count 20 --ping-interval 0.1 \
+  --bulk-bytes 262144 \
+  --min-packet-count 30 \
+  --execute
+
+# Then extend to tls and websocket
+python3 scripts/run_phase9_real_trace_matrix.py run \
+  --output-dir outputs/phase9_real_matrix_b \
+  --transports tls,websocket \
+  --scenarios ping \
+  --capture-duration 30 \
+  --ping-count 20 --ping-interval 0.1 \
+  --min-packet-count 30 \
   --execute
 ```
 
 `--execute` is **required** for real execution. Without it, the script stays in
 dry-run mode even if you omit `--dry-run`.
 
+## 5.5 Phase 9B Runtime Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--capture-duration` | 30 | Capture duration in seconds |
+| `--ping-count` | 20 | Number of ping packets sent through TUN |
+| `--ping-interval` | 0.1 | Interval between pings in seconds |
+| `--curl-count` | 10 | Number of curl requests for curl scenario |
+| `--bulk-bytes` | 262144 | Bulk transfer size in bytes (256 KiB) |
+| `--min-packet-count` | 30 | Minimum packet count for valid data |
+| `--scenario-timeout` | 60 | Scenario execution timeout in seconds |
+
+## 5.6 Recommended Experiment Matrix
+
+For a quick, meaningful result:
+
+| Transport | Scenario | Capture Duration | Notes |
+|---|---|---|---|
+| tcp | ping | 30s | Most reliable, always produces >= 30 pkts with ping_count=20 |
+| tcp | bulk | 30s | Requires HTTP server in server netns |
+| tls | ping | 30s | May be skipped if TLS config incomplete |
+| websocket | ping | 30s | Most likely to work alongside tcp |
+
+For idle: increase `--capture-duration` to 45-60s or increase heartbeat
+frequency. With the default 10s heartbeat and 30s capture, idle may still
+produce < 30 packets.
+
 ## 6. Output Directory Structure
 
 ```
-outputs/phase9_real_matrix/
+outputs/phase9_real_matrix_b/
   manifest.json
   environment.json
   results.json
   before/
     tcp/
-      idle.pcap          (NOT committed)
+      idle.pcap          (NOT committed — see 7.8)
       idle.csv
       idle.report.json
       ping.pcap
@@ -126,9 +233,9 @@ outputs/phase9_real_matrix/
     skipped.json
   logs/
     commands.txt
-  next_patch_prompt.txt       (if regressions found)
+  next_patch_prompt.txt       (if regressions with ok data found)
+  data_collection_prompt.txt  (if insufficient data found)
   patch_loop_result.json      (if regressions found)
-  pcap/                       (NOT committed — .gitignore)
 ```
 
 **.pcap files must NOT be committed** — they are binary capture artifacts.
@@ -139,6 +246,10 @@ outputs/phase9_real_matrix/
 | Field | Description |
 |---|---|
 | `packet_count` | Total packets captured |
+| `packet_count_ok_before` | Whether before packet count >= min_packet_count |
+| `packet_count_ok_after` | Whether after packet count >= min_packet_count |
+| `min_packet_count` | Threshold for valid data |
+| `data_quality` | ok / insufficient / skipped |
 | `fingerprint_risk_score` | Composite risk score (0-1) |
 | `risk_level` | low / medium / high |
 | `small_packet_ratio` | Fraction of packets < 100 bytes |
@@ -149,21 +260,43 @@ outputs/phase9_real_matrix/
 | `max_burst_size` | Largest burst size |
 | `avg_inter_arrival_ms` | Average inter-arrival time |
 
-### Verdict rules
+### 7.1 data_quality
 
+- **ok**: Both before and after reports exist, and both have packet_count >= min_packet_count.
+- **insufficient**: One or both reports missing, or packet_count < min_packet_count. Results are not reliable for before/after comparison.
+- **skipped**: Both reports missing (scenario was never executed).
+
+### 7.2 Verdict rules
+
+When data_quality == "ok":
 - `risk_score_delta < -0.05`: **improved** (shaping reduced risk)
 - `risk_score_delta > 0.05`: **regressed** (shaping increased risk — needs investigation)
 - otherwise: **unchanged**
-- missing before or after report: **insufficient**
-- both missing: **skipped**
+
+When data_quality != "ok":
+- **insufficient**: not enough data for comparison
+- **skipped**: both phases skipped
+
+### 7.3 Why idle may be insufficient
+
+With default configuration (10s heartbeat interval, 30s capture), the idle
+scenario captures very few packets — often just the initial connection handshake
+(2-4 packets). The VPN tunnel is quiescent between heartbeat intervals. To get
+meaningful idle data:
+
+- Increase `--capture-duration` to 45-60 seconds to catch multiple heartbeat cycles
+- Or decrease the heartbeat interval in the YAML config to 2-3 seconds
+- Or accept that idle data is limited and focus on ping/bulk scenarios
 
 ## 8. LLM Patch Loop Integration
 
-If the comparison finds regressed entries, the script generates:
+Phase 9B generates two types of prompts based on data quality:
+
+### 8.1 Countermeasure patch prompt (data_quality=ok, verdict=regressed)
 
 ```
-outputs/phase9_real_matrix/next_patch_prompt.txt
-outputs/phase9_real_matrix/patch_loop_result.json
+outputs/phase9_real_matrix_b/next_patch_prompt.txt
+outputs/phase9_real_matrix_b/patch_loop_result.json
 ```
 
 These can be fed to the LLM patch loop:
@@ -172,30 +305,47 @@ These can be fed to the LLM patch loop:
 python3 -m src.llm.detection.patch_loop \
   --user-request "Improve VPN-LLM traffic shaping based on Phase 9 real trace regressions" \
   --functional-test-summary "Phase 9 real trace matrix completed" \
-  --report outputs/phase9_real_matrix/summaries/before_after_comparison.json \
-  --output-prompt outputs/phase9_real_matrix/next_patch_prompt.txt
+  --report outputs/phase9_real_matrix_b/summaries/before_after_comparison.json \
+  --output-prompt outputs/phase9_real_matrix_b/next_patch_prompt.txt
 ```
+
+### 8.2 Data collection prompt (data_quality=insufficient)
+
+```
+outputs/phase9_real_matrix_b/data_collection_prompt.txt
+```
+
+This prompt suggests increasing traffic or capture duration. It does NOT
+recommend modifying countermeasure code. Insufficient data should never drive
+shaping module changes.
 
 The LLM is never called automatically. Only the prompt is generated.
 
 ## 9. Safety Boundaries
 
 1. All traffic is local to the machine (netns isolation).
-2. No third-party servers are contacted.
-3. No third-party traffic is captured.
-4. No claims of real undetectability.
-5. `.pcap` files are never committed.
-6. `--execute` must be explicit — no accidental execution.
-7. Failed entries do not crash the batch — they are marked and the next entry runs.
+2. **No third-party servers are contacted.** All scenario commands target `10.8.0.1` (TUN peer) or `192.168.200.1` (veth pair).
+3. **No public internet access.** Ping, curl, and bulk only use local netns/TUN addresses.
+4. No third-party traffic is captured.
+5. No claims of real undetectability.
+6. `.pcap` files are never committed (see section 7.8).
+7. `--execute` must be explicit — no accidental execution.
+8. Failed entries do not crash the batch — they are marked and the next entry runs.
 
 ## 10. Current Limitations
 
 - SSH transport is skipped (requires paramiko SSH server).
-- TLS transport may fail if TLS config is incomplete.
-- curl/bulk scenarios require an HTTP/TCP server inside the VPN tunnel (not yet automated).
+- TLS ping connects but after packet_count is low (19 < 30); needs higher ping volume.
+- tcp/bulk and websocket/bulk after traces are insufficient (22, 28 < 30); bulk
+  scenario needs larger file sizes or longer capture to overcome aggregation.
+- curl/bulk scenarios require `curl` binary; scenario is skipped if curl is missing.
+- HTTP server for curl/bulk is a temporary Python http.server, adequate for local testing.
+- Reconnect scenario is not supported in current architecture (marks explicitly skipped).
 - WebSocket RTT is not measured during Phase 9 (separate Phase 7C runner exists).
 - Single capture per scenario (no statistical repetition).
 - No passive RTT estimation integrated.
+- Aggregation fundamentally reduces wire-level packet count; fingerprint analysis
+  with fewer packets may be less statistically robust.
 
 ## 11. Relationship to Other Phases
 
@@ -210,9 +360,15 @@ The LLM is never called automatically. Only the prompt is generated.
 
 ## 12. Next Steps
 
-- Execute the full matrix and collect real before/after data
+- Increase traffic volume for insufficient entries (tcp/bulk, tls/ping, websocket/bulk)
+  to reach packet_count >= 30
+- Run tcp/bulk with wired `--bulk-bytes` and longer curl timeout
+- Address TLS performance: TLS handshake overhead combined with aggregation produces
+  very low wire packet counts
 - Integrate probe gate and RTT gate into the same before/after pass
 - Add statistical repetition (3+ runs per scenario)
+- Consider `aggregation_max_bytes` tuning to balance packet-count reduction vs
+  fingerprint obfuscation
 - HTTP/2 transport evaluation
 - Passive RTT estimation integration
 - Multi-iteration LLM patch loop with Phase 9 as the fitness function

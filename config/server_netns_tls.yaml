@@ -1,0 +1,21 @@
+# TLS server config for Phase 9 netns experiments.
+# Based on server_netns.yaml + server_tls.yaml TLS settings.
+
+server:
+  tun_name: tun0
+  tun_ip: 10.8.0.1
+  tun_peer: 10.8.0.2
+  mtu: 1400
+  listen_port: 2222
+
+forwarding:
+  enable_nat: false
+  enable_route: true
+
+transport:
+  type: tls
+  certfile: cert.pem
+  keyfile: key.pem
+
+session:
+  heartbeat_timeout: 30

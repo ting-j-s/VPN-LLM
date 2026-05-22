@@ -54,12 +54,9 @@ class PipelineTrafficShaper(TrafficShaper):
     def flush(self) -> list[ShapedChunk]:
         chunks: list[ShapedChunk] = []
         for stage in self._stages:
-            for ch in chunks:
-                chunks.extend(stage.encode_frame(ch.data))
-        for stage in self._stages:
             flushed = stage.flush()
             if flushed:
-                # Apply remaining stages to flushed chunks
+                # Apply remaining (downstream) stages to flushed chunks
                 for ch in flushed:
                     partial = [ch]
                     for downstream in self._stages[self._stages.index(stage) + 1:]:

@@ -241,6 +241,7 @@ class ClientCore:
                 elif chunk.delay_ms > 0:
                     logger.debug(f"Jitter delay {chunk.delay_ms:.1f}ms ignored (no scheduler)")
                 self.transport.send(chunk.data)
+                self._last_sent_time = time.time()
 
         chunks = self.traffic_shaper.encode_frame(encoded_frame)
         if not chunks and frame_type != FrameType.DATA:
@@ -252,6 +253,7 @@ class ClientCore:
             elif chunk.delay_ms > 0:
                 logger.debug(f"Jitter delay {chunk.delay_ms:.1f}ms ignored (no scheduler)")
             self.transport.send(chunk.data)
+            self._last_sent_time = time.time()
 
     def _heartbeat_loop(self) -> None:
         """Dedicated heartbeat thread.
@@ -403,7 +405,6 @@ class ClientCore:
                     frame = create_frame(FrameType.DATA, self.session_id, packet)
                     self._send_shaped(encode_frame(frame))
                     self._tun_to_transport_bytes += len(packet)
-                    self._last_sent_time = time.time()
                     logger.debug(
                         f"TUN->Transport READ packet: len={len(packet)} bytes, "
                         f"total sent: {self._tun_to_transport_bytes} bytes, "
