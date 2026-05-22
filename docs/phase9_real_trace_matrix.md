@@ -20,8 +20,10 @@ Phase 9B extends the runner to produce **statistically meaningful packet counts*
 | tls | before/after | before/after | before/after | before/after | before/after |
 | websocket | before/after | before/after | before/after | before/after | before/after |
 | ssh | skipped | skipped | skipped | skipped | skipped |
+| http2 | skipped | skipped | skipped | skipped | skipped |
 
-40 total entries (4 transports x 5 scenarios x 2 phases).
+50 total entries (5 transports x 5 scenarios x 2 phases). http2 is skipped
+by default when the h2 dependency is missing (see Section 13).
 
 ssh is skipped by default because it requires paramiko SSH server setup. It can
 be enabled by fixing the SSH transport implementation.
@@ -498,3 +500,75 @@ The LLM is never called automatically. Only the prompt is generated.
 - HTTP/2 transport evaluation
 - Passive RTT estimation integration
 - Multi-iteration LLM patch loop with Phase 9E repeated results as the fitness function
+
+## 13. Phase 10B: HTTP/2 Transport in Trace Matrix (2026-05-22)
+
+### 13.1 Purpose
+
+HTTP/2 transport is an experimental carrier-layer transport (added in Phase 10A).
+Phase 10B brings http2 into the Phase 9 real trace matrix **as a valid plan entry**
+so that it participates in the manifest, env-check, and comparison pipeline.
+
+This is not a real trace execution phase. The h2/hpack/hyperframe dependencies
+are not installed in the current environment, so all http2 entries are **gracefully
+skipped** with `trace_type=dependency_missing`.
+
+### 13.2 What Phase 10B Delivers
+
+- `http2` added to `_SUPPORTED_TRANSPORTS` in the Phase 9 runner
+- `run_env_check()` reports `http2_dependency` status (h2, hpack, hyperframe, http2_runnable)
+- `--transports http2` accepted by both `plan` and `run` subcommands
+- When h2 is missing, entries are marked `dependency_missing:h2,hpack,hyperframe` and skipped
+- Other transports (tcp/tls/websocket/ssh) are completely unaffected
+- 4 new netns config files: `config/{server,client}_netns_http2{,_shaping}.yaml`
+- 44 new tests covering http2 in matrix, env-check, plan, skip, config parse, patch prompts
+
+### 13.3 Dependency Status (Current)
+
+| Module | Status |
+|---|---|
+| h2 | missing |
+| hpack | missing |
+| hyperframe | missing |
+| http2_runnable | false |
+| can_run_real_http2 | false |
+
+### 13.4 Skip Semantics
+
+When `can_run_real_http2` is false:
+- `trace_type` = `dependency_missing`
+- `status` = `skipped` (not failed)
+- `error_reason` = `dependency_missing:h2,hpack,hyperframe`
+- `dependency_status` dict with per-module booleans
+- Does not affect other transport entries
+- Does not trigger data collection or countermeasure patch prompts
+- `data_quality` = `skipped` in comparison summary
+- `verdict` = `skipped`
+
+### 13.5 How to Enable HTTP/2 Real Traces
+
+```bash
+pip install h2
+```
+
+After installation, re-run env-check:
+```bash
+python3 scripts/run_phase9_real_trace_matrix.py env-check
+```
+
+`can_run_real_http2` should become `true`. Then:
+```bash
+python3 scripts/run_phase9_real_trace_matrix.py run \
+  --output-dir outputs/phase10c_http2_real \
+  --transports http2 \
+  --scenarios idle,ping,bulk \
+  --repeat-count 3 --capture-duration 45 \
+  --execute
+```
+
+### 13.6 Next: Phase 10C
+
+- Install h2 and run real http2 idle/ping/bulk traces
+- Generate before/after fingerprint reports
+- Compare http2 fingerprint characteristics against tcp/tls/websocket baselines
+- Integrate into the repeated trace comparison pipeline

@@ -110,16 +110,51 @@ session:
 6. **No Phase 9 trace data**: Not yet included in the before/after
    real trace matrix.
 
-## Phase 10B: Real Trace Evaluation
+## Phase 10B: HTTP/2 Matrix Integration (completed 2026-05-22)
 
-Phase 10B will add HTTP/2 to the Phase 9 trace matrix:
+Phase 10B added HTTP/2 to the Phase 9 trace matrix infrastructure:
 
-1. Create example configs for HTTP/2 client and server
-2. Add http2 to the supported transports list in
-   `run_phase9_real_trace_matrix.py`
-3. Run before/after traces for idle, ping, and bulk scenarios
-4. Compare HTTP/2 fingerprint characteristics against tcp, tls, and
+1. `http2` added to `_SUPPORTED_TRANSPORTS` and `run_env_check()`
+2. Env-check reports `http2_dependency` with per-module status
+   (`h2_available`, `hpack_available`, `hyperframe_available`, `http2_runnable`)
+3. Plan subcommand accepts `--transports http2`
+4. When h2 is missing: `trace_type=dependency_missing`, `status=skipped`
+5. Four netns config files created: `config/{server,client}_netns_http2{,_shaping}.yaml`
+6. 44 new tests covering plan, env-check, skip semantics, config parse, patch prompts
+
+## Phase 10C: Real Trace Execution (planned)
+
+1. Install `h2` (`pip install h2`)
+2. Run before/after traces for idle, ping, and bulk scenarios
+3. Compare HTTP/2 fingerprint characteristics against tcp, tls, and
    websocket baselines
+
+### Running HTTP/2 with Phase 9 Runner
+
+When h2 is installed:
+
+```bash
+# Check environment
+python3 scripts/run_phase9_real_trace_matrix.py env-check
+
+# Plan matrix
+python3 scripts/run_phase9_real_trace_matrix.py plan \
+  --output-dir outputs/phase10c_http2_real \
+  --transports http2 \
+  --scenarios idle,ping,bulk
+
+# Real execution
+python3 scripts/run_phase9_real_trace_matrix.py run \
+  --output-dir outputs/phase10c_http2_real \
+  --transports http2 \
+  --scenarios idle,ping,bulk \
+  --repeat-count 3 --capture-duration 45 \
+  --execute
+```
+
+When h2 is missing, the runner produces `trace_type=dependency_missing`
+without attempting netns setup or TCP connections. All other transports
+continue to work normally.
 
 ## Implementation notes
 

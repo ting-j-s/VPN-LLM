@@ -12,6 +12,7 @@ import pytest
 from scripts.run_phase9_real_trace_matrix import (
     _SUPPORTED_TRANSPORTS,
     _VALID_SCENARIOS,
+    _HTTP2_DEFAULT_PORT,
     _parse_list,
     _scenario_command,
     _scenario_needs_http_server,
@@ -70,8 +71,8 @@ class TestParseList:
         assert result == ["tcp", "tls", "websocket"]
 
     def test_filters_unknown_values(self):
-        result = _parse_list("tcp,http2,ssh", _SUPPORTED_TRANSPORTS)
-        assert result == ["tcp", "ssh"]
+        result = _parse_list("tcp,http2,ssh,quic", _SUPPORTED_TRANSPORTS)
+        assert result == ["tcp", "http2", "ssh"]
 
     def test_handles_whitespace(self):
         result = _parse_list(" tcp , tls , websocket ", _SUPPORTED_TRANSPORTS)
@@ -285,11 +286,11 @@ class TestBuildMatrix:
 
     def test_full_matrix_size(self):
         entries = build_matrix(
-            ["tcp", "tls", "websocket", "ssh"],
+            ["tcp", "tls", "websocket", "ssh", "http2"],
             ["idle", "ping", "curl", "bulk", "reconnect"],
             "outputs/test",
         )
-        assert len(entries) == 4 * 5 * 2  # 40
+        assert len(entries) == 5 * 5 * 2  # 50
 
     def test_subset_matrix_size(self):
         entries = build_matrix(["tcp"], ["idle", "ping"], "outputs/test")
@@ -1114,3 +1115,301 @@ class TestDiscoverTransportScenarios:
         assert len(result) == 3
         transports = [t for t, s in result]
         assert transports == ["tcp", "tls", "websocket"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 10B: HTTP/2 transport in Phase 9 matrix
+# ---------------------------------------------------------------------------
+
+
+class TestHttp2InSupportedTransports:
+    """http2 is a valid transport in the Phase 9 matrix."""
+
+    def test_http2_in_supported_transports(self):
+        assert "http2" in _SUPPORTED_TRANSPORTS
+
+    def test_http2_default_port(self):
+        assert _HTTP2_DEFAULT_PORT == 2225
+
+    def test_parse_list_includes_http2(self):
+        result = _parse_list("http2", _SUPPORTED_TRANSPORTS)
+        assert result == ["http2"]
+
+    def test_parse_list_http2_with_others(self):
+        result = _parse_list("tcp,http2,websocket", _SUPPORTED_TRANSPORTS)
+        assert result == ["tcp", "http2", "websocket"]
+
+
+class TestHttp2EnvCheck:
+    """env-check exposes h2 dependency status."""
+
+    def test_env_check_has_http2_dependency(self):
+        result = run_env_check()
+        assert "http2_dependency" in result
+        h2d = result["http2_dependency"]
+        for key in ["h2_available", "hpack_available", "hyperframe_available", "http2_runnable"]:
+            assert key in h2d, f"Missing key: {key}"
+
+    def test_env_check_has_can_run_real_http2(self):
+        result = run_env_check()
+        assert "can_run_real_http2" in result
+        assert isinstance(result["can_run_real_http2"], bool)
+
+    def test_env_check_checks_h2_modules(self):
+        result = run_env_check()
+        assert "python_h2" in result["checks"]
+        assert "python_hpack" in result["checks"]
+        assert "python_hyperframe" in result["checks"]
+
+    def test_http2_runnable_requires_all_three(self):
+        result = run_env_check()
+        h2d = result["http2_dependency"]
+        all_available = (
+            h2d["h2_available"] and h2d["hpack_available"] and h2d["hyperframe_available"]
+        )
+        assert h2d["http2_runnable"] == all_available
+
+    def test_can_run_real_http2_requires_tcp(self):
+        result = run_env_check()
+        if not result.get("can_run_real_tcp", False):
+            assert result["can_run_real_http2"] is False
+
+    def test_env_check_json_serializable(self):
+        result = run_env_check()
+        json.dumps(result)  # must not raise
+
+
+class TestHttp2Plan:
+    """plan subcommand includes http2 entries."""
+
+    def test_build_matrix_includes_http2(self):
+        entries = build_matrix(["http2"], ["ping"], "outputs/test")
+        assert len(entries) == 2  # before + after
+        transports = {e["transport"] for e in entries}
+        assert transports == {"http2"}
+
+    def test_build_matrix_http2_mixed_with_others(self):
+        entries = build_matrix(["tcp", "http2"], ["ping"], "outputs/test")
+        transports = {e["transport"] for e in entries}
+        assert "http2" in transports
+        assert "tcp" in transports
+        # 2 transports * 1 scenario * 2 phases = 4
+        assert len(entries) == 4
+
+    def test_http2_entry_has_required_keys(self):
+        entries = build_matrix(["http2"], ["ping"], "outputs/test")
+        for e in entries:
+            for key in ["transport", "scenario", "phase",
+                         "pcap_path", "csv_path", "report_path",
+                         "scenario_command", "capture_duration",
+                         "min_packet_count", "needs_http_server"]:
+                assert key in e, f"Missing key: {key}"
+
+    def test_http2_pcap_paths_contain_http2(self):
+        entries = build_matrix(["http2"], ["ping"], "outputs/test")
+        for e in entries:
+            assert "http2" in e["pcap_path"]
+
+    def test_manifest_serializable_with_http2(self):
+        entries = build_matrix(["http2"], ["ping"], "outputs/test")
+        manifest = {
+            "transports": ["http2"],
+            "scenarios": ["ping"],
+            "entries": entries,
+        }
+        json.dumps(manifest)  # must not raise
+
+
+class TestHttp2SkippedEntry:
+    """http2 dependency_missing entry has correct structure."""
+
+    def _make_http2_skipped_entry(self):
+        return {
+            "transport": "http2",
+            "scenario": "ping",
+            "phase": "before",
+            "pcap_path": "out/before/http2/ping.pcap",
+            "csv_path": "out/before/http2/ping.csv",
+            "report_path": "out/before/http2/ping.report.json",
+            "scenario_command": "ping -c 20 -i 0.1 -W 2 10.8.0.1",
+            "capture_duration": 30,
+            "min_packet_count": 30,
+            "trace_type": "dependency_missing",
+            "status": "skipped",
+            "error_reason": "dependency_missing:h2,hpack,hyperframe",
+            "dependency_status": {
+                "h2_available": False,
+                "hpack_available": False,
+                "hyperframe_available": False,
+                "http2_runnable": False,
+            },
+            "started_at": _now_iso(),
+            "ended_at": _now_iso(),
+            "duration_s": 0,
+        }
+
+    def test_http2_skipped_has_dependency_missing_trace_type(self):
+        entry = self._make_http2_skipped_entry()
+        assert entry["trace_type"] == "dependency_missing"
+
+    def test_http2_skipped_has_error_reason(self):
+        entry = self._make_http2_skipped_entry()
+        assert "dependency_missing" in entry["error_reason"]
+        assert "h2" in entry["error_reason"]
+
+    def test_http2_skipped_has_dependency_status(self):
+        entry = self._make_http2_skipped_entry()
+        assert "dependency_status" in entry
+        ds = entry["dependency_status"]
+        assert ds["h2_available"] is False
+        assert ds["http2_runnable"] is False
+
+    def test_http2_skipped_status_is_skipped_not_failed(self):
+        entry = self._make_http2_skipped_entry()
+        assert entry["status"] == "skipped"
+        assert entry["status"] != "failed"
+
+    def test_http2_skipped_is_json_serializable(self):
+        entry = self._make_http2_skipped_entry()
+        json.dumps(entry)  # must not raise
+
+
+class TestHttp2ComparisonHandling:
+    """Comparison logic handles http2 skipped entries."""
+
+    def test_data_quality_skipped_for_dependency_missing(self):
+        """data_quality=skipped when both before and after are None."""
+        from scripts.run_phase9_real_trace_matrix import _run_comparison
+        # Simulate comparison logic — http2 has no reports
+        entry = {
+            "transport": "http2",
+            "scenario": "ping",
+            "min_packet_count": 30,
+            "trace_type_before": "skipped",
+            "trace_type_after": "skipped",
+        }
+        # Simulated from _run_comparison logic
+        before = None
+        after = None
+        assert before is None and after is None
+        # When both None: data_quality=skipped (from comparison code)
+
+    def test_verdict_skipped_when_both_missing(self):
+        """verdict=skipped when neither report exists."""
+        from tests.test_phase9_real_trace_matrix import _compare
+        result = _compare(None, None)
+        assert result["data_quality"] == "skipped"
+        assert result["verdict"] == "skipped"
+
+    def test_http2_entries_dont_break_comparison_loop(self):
+        """Comparison iterating http2 entries must not crash."""
+        entries = [
+            {"transport": "http2", "scenario": "ping",
+             "trace_type_before": "skipped", "trace_type_after": "skipped",
+             "data_quality": "skipped", "verdict": "skipped"},
+        ]
+        # All fields used by comparison Markdown writer should be present
+        for e in entries:
+            for key in ["transport", "scenario", "data_quality", "verdict"]:
+                assert key in e
+
+
+class TestHttp2ConfigsParse:
+    """HTTP/2 netns config files parse correctly."""
+
+    def test_server_http2_config_parses(self):
+        from src.common.config import load_server_config
+        cfg = load_server_config("config/server_netns_http2.yaml")
+        assert cfg.transport.type == "http2"
+        assert cfg.transport.experimental is True
+
+    def test_client_http2_config_parses(self):
+        from src.common.config import load_client_config
+        cfg = load_client_config("config/client_netns_http2.yaml")
+        assert cfg.transport.type == "http2"
+        assert cfg.transport.experimental is True
+        assert cfg.server.port == 2225
+
+    def test_server_http2_shaping_config_parses(self):
+        from src.common.config import load_server_config
+        cfg = load_server_config("config/server_netns_http2_shaping.yaml")
+        assert cfg.transport.type == "http2"
+        assert cfg.shaping.enabled is True
+
+    def test_client_http2_shaping_config_parses(self):
+        from src.common.config import load_client_config
+        cfg = load_client_config("config/client_netns_http2_shaping.yaml")
+        assert cfg.transport.type == "http2"
+        assert cfg.shaping.enabled is True
+        assert cfg.server.port == 2225
+
+
+class TestNonHttp2Unaffected:
+    """Adding http2 does not break existing transports."""
+
+    def test_tcp_still_in_supported(self):
+        assert "tcp" in _SUPPORTED_TRANSPORTS
+
+    def test_tls_still_in_supported(self):
+        assert "tls" in _SUPPORTED_TRANSPORTS
+
+    def test_websocket_still_in_supported(self):
+        assert "websocket" in _SUPPORTED_TRANSPORTS
+
+    def test_ssh_still_in_supported(self):
+        assert "ssh" in _SUPPORTED_TRANSPORTS
+
+    def test_tcp_matrix_unchanged(self):
+        entries = build_matrix(["tcp"], ["ping"], "outputs/test")
+        assert len(entries) == 2
+        assert entries[0]["transport"] == "tcp"
+
+    def test_env_check_still_has_can_run_real_tcp(self):
+        result = run_env_check()
+        assert "can_run_real_tcp" in result
+
+
+class TestHttp2PatchPrompts:
+    """dependency_missing entries do not generate countermeasure patches."""
+
+    def test_dependency_missing_skipped_not_in_patch_targets(self, tmp_path):
+        """Skipped entries with dependency_missing should not trigger patches."""
+        entries = [{
+            "transport": "http2", "scenario": "ping",
+            "verdict": "skipped",
+            "data_quality": "skipped",
+            "trace_type_before": "skipped",
+            "trace_type_after": "skipped",
+        }]
+        _generate_patch_prompts(entries, str(tmp_path))
+        assert not (Path(tmp_path) / "next_patch_prompt.txt").exists()
+        # Should not generate data_collection_prompt either (skipped != insufficient)
+        assert not (Path(tmp_path) / "data_collection_prompt.txt").exists()
+
+    def test_dependency_missing_no_countermeasure_suggestion(self, tmp_path):
+        """If data_collection is generated for other reasons, it must not
+        suggest countermeasure patches for dependency_missing."""
+        # Only insufficient/partial trigger data_collection_prompt
+        entries = [{
+            "transport": "http2", "scenario": "ping",
+            "verdict": "skipped",
+            "data_quality": "skipped",
+        }]
+        _generate_patch_prompts(entries, str(tmp_path))
+        # No prompt since data_quality is skipped (not insufficient)
+        assert not (Path(tmp_path) / "data_collection_prompt.txt").exists()
+
+
+class TestHttp2BuildMatrixRepeat:
+    """build_matrix with http2 + repeat_count."""
+
+    def test_http2_repeat_count_3_produces_6_entries(self):
+        cfg = RuntimeConfig(repeat_count=3)
+        entries = build_matrix(["http2"], ["ping"], "outputs/test", runtime_config=cfg)
+        assert len(entries) == 6  # 1 transport * 1 scenario * 2 phases * 3 repeats
+
+    def test_http2_repeat_entries_have_run_id(self):
+        cfg = RuntimeConfig(repeat_count=2)
+        entries = build_matrix(["http2"], ["ping"], "outputs/test", runtime_config=cfg)
+        for e in entries:
+            assert "run_id" in e

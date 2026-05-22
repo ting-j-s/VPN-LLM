@@ -30,7 +30,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_SUPPORTED_TRANSPORTS = frozenset({"tcp", "tls", "websocket", "ssh"})
+_SUPPORTED_TRANSPORTS = frozenset({"tcp", "tls", "websocket", "ssh", "http2"})
+_HTTP2_DEFAULT_PORT = 2225
 _VALID_SCENARIOS = frozenset({"idle", "ping", "curl", "bulk", "reconnect"})
 _SESSION_ID = "00112233445566778899aabbccddeeff"
 
@@ -124,7 +125,7 @@ def run_env_check() -> dict[str, Any]:
         result["checks"][tool] = _check_executable(tool) is not None
 
     # Python modules
-    for mod in ["websockets", "paramiko", "yaml"]:
+    for mod in ["websockets", "paramiko", "yaml", "h2", "hpack", "hyperframe"]:
         result["checks"][f"python_{mod}"] = _check_python_module(mod)
 
     # Netns capability
@@ -145,6 +146,18 @@ def run_env_check() -> dict[str, Any]:
         result["can_run_real_tcp"] and result["checks"]["python_paramiko"]
     )
 
+    # HTTP/2 dependency status (experimental)
+    h2_available = result["checks"].get("python_h2", False)
+    hpack_available = result["checks"].get("python_hpack", False)
+    hyperframe_available = result["checks"].get("python_hyperframe", False)
+    result["http2_dependency"] = {
+        "h2_available": h2_available,
+        "hpack_available": hpack_available,
+        "hyperframe_available": hyperframe_available,
+        "http2_runnable": h2_available and hpack_available and hyperframe_available,
+    }
+    result["can_run_real_http2"] = result["http2_dependency"]["http2_runnable"] and result["can_run_real_tcp"]
+
     return result
 
 
@@ -160,6 +173,14 @@ def _print_env_check(result: dict[str, Any]) -> None:
     print(f"  can_run_real_tls:         {result['can_run_real_tls']}")
     print(f"  can_run_real_websocket:   {result['can_run_real_websocket']}")
     print(f"  can_run_real_ssh:         {result['can_run_real_ssh']}")
+    print(f"  can_run_real_http2:       {result['can_run_real_http2']}")
+    if "http2_dependency" in result:
+        h2d = result["http2_dependency"]
+        print(f"  http2_dependency:")
+        print(f"    h2_available:            {h2d['h2_available']}")
+        print(f"    hpack_available:         {h2d['hpack_available']}")
+        print(f"    hyperframe_available:    {h2d['hyperframe_available']}")
+        print(f"    http2_runnable:          {h2d['http2_runnable']}")
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +282,11 @@ def _get_config_for_phase(transport: str, phase: str) -> tuple[str, str]:
         if phase == "before":
             return "config/server_netns_tls.yaml", "config/client_netns_tls.yaml"
         return "config/server_netns_tls_shaping.yaml", "config/client_netns_tls_shaping.yaml"
+
+    if transport == "http2":
+        if phase == "before":
+            return "config/server_netns_http2.yaml", "config/client_netns_http2.yaml"
+        return "config/server_netns_http2_shaping.yaml", "config/client_netns_http2_shaping.yaml"
 
     if phase == "before":
         return "config/server_netns.yaml", "config/client_netns.yaml"
@@ -526,6 +552,7 @@ def _start_server(transport: str, server_config: str) -> Optional[subprocess.Pop
 
 def _wait_server_ready(transport: str, timeout: int = 15) -> bool:
     """Wait for server to be ready (port listening)."""
+    port = "2225" if transport == "http2" else "2222"
     t0 = time.time()
     while time.time() - t0 < timeout:
         time.sleep(0.5)
@@ -533,7 +560,7 @@ def _wait_server_ready(transport: str, timeout: int = 15) -> bool:
             ["ip", "netns", "exec", _NS_SRV, "ss", "-tlnp"],
             timeout=5,
         )
-        if "2222" in r.stdout:
+        if port in r.stdout:
             return True
     return False
 
@@ -705,7 +732,23 @@ def _run_one_entry(
         result["error_reason"] = "cannot create netns"
         return result
     if not env.get(can_run_key, False):
-        result["error_reason"] = f"transport {transport} not runnable (missing tools or modules)"
+        if transport == "http2":
+            h2d = env.get("http2_dependency", {})
+            missing = [m for m in ("h2", "hpack", "hyperframe")
+                       if not h2d.get(f"{m}_available", False)]
+            if missing:
+                result["error_reason"] = f"dependency_missing:{','.join(missing)}"
+            else:
+                result["error_reason"] = f"transport {transport} not runnable"
+            result["dependency_status"] = {
+                "h2_available": h2d.get("h2_available", False),
+                "hpack_available": h2d.get("hpack_available", False),
+                "hyperframe_available": h2d.get("hyperframe_available", False),
+                "http2_runnable": False,
+            }
+            result["trace_type"] = "dependency_missing"
+        else:
+            result["error_reason"] = f"transport {transport} not runnable (missing tools or modules)"
         return result
 
     # Check curl availability for curl/bulk scenarios
@@ -820,7 +863,8 @@ def _run_one_entry(
         _stop_http_server_in_srv_ns()
 
         # Convert pcap → CSV
-        if _convert_pcap(pcap_path, csv_path, client_host="192.168.200.2", server_host="192.168.200.1", server_port=2222):
+        srv_port = 2225 if transport == "http2" else 2222
+        if _convert_pcap(pcap_path, csv_path, client_host="192.168.200.2", server_host="192.168.200.1", server_port=srv_port):
             # Run fingerprint report
             if _run_fingerprint_report(csv_path, report_path):
                 result["trace_type"] = "real"
@@ -1677,7 +1721,7 @@ def _generate_patch_prompts(
 def _write_skipped_report(output_dir: str, env: dict[str, Any]) -> None:
     """Write a report of which transports were skipped and why."""
     skipped = {}
-    for transport in ["tcp", "tls", "websocket", "ssh"]:
+    for transport in ["tcp", "tls", "websocket", "ssh", "http2"]:
         key = f"can_run_real_{transport}"
         if not env.get(key, False):
             reasons = []
@@ -1693,6 +1737,14 @@ def _write_skipped_report(output_dir: str, env: dict[str, Any]) -> None:
                 reasons.append("websockets module missing")
             if transport == "ssh" and not env.get("checks", {}).get("python_paramiko"):
                 reasons.append("paramiko module missing")
+            if transport == "http2":
+                h2d = env.get("http2_dependency", {})
+                if not h2d.get("h2_available", False):
+                    reasons.append("h2 dependency missing")
+                if not h2d.get("hpack_available", False):
+                    reasons.append("hpack dependency missing")
+                if not h2d.get("hyperframe_available", False):
+                    reasons.append("hyperframe dependency missing")
             skipped[transport] = {"skipped": True, "reasons": reasons}
         else:
             skipped[transport] = {"skipped": False, "reasons": []}

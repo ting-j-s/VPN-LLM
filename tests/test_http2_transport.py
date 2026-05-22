@@ -451,3 +451,46 @@ class TestConstructorDefaults:
     def test_explicit_server_hostname(self):
         t = HTTP2Transport(host="10.0.0.1", server_hostname="h2.example.com")
         assert t.server_hostname == "h2.example.com"
+
+
+# ---------------------------------------------------------------------------
+# 13. netns config parsing
+# ---------------------------------------------------------------------------
+
+
+class TestHttp2NetnsConfig:
+    """HTTP/2 netns config files parse and preserve experimental flag."""
+
+    def test_server_netns_http2_parses(self):
+        cfg = load_server_config("config/server_netns_http2.yaml")
+        assert cfg.transport.type == "http2"
+        assert cfg.transport.experimental is True
+        assert cfg.server.listen_port == 2225
+
+    def test_client_netns_http2_parses(self):
+        cfg = load_client_config("config/client_netns_http2.yaml")
+        assert cfg.transport.type == "http2"
+        assert cfg.transport.experimental is True
+        assert cfg.server.port == 2225
+
+    def test_server_netns_http2_shaping_parses(self):
+        cfg = load_server_config("config/server_netns_http2_shaping.yaml")
+        assert cfg.transport.type == "http2"
+        assert cfg.transport.experimental is True
+        assert cfg.shaping.enabled is True
+
+    def test_client_netns_http2_shaping_parses(self):
+        cfg = load_client_config("config/client_netns_http2_shaping.yaml")
+        assert cfg.transport.type == "http2"
+        assert cfg.transport.experimental is True
+        assert cfg.shaping.enabled is True
+
+    def test_missing_h2_connect_error_remains_clear(self):
+        """Even with netns config, missing h2 raises clear error."""
+        from src.transport.factory import create_transport
+        cfg = load_client_config("config/client_netns_http2.yaml")
+        transport = create_transport(cfg)
+        if _H2_AVAILABLE:
+            pytest.skip("h2 is installed — cannot test missing-dependency path")
+        with pytest.raises(TransportError, match="h2"):
+            transport.connect()
