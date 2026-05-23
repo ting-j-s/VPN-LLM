@@ -14,12 +14,13 @@ from .tcp_transport import TCPTransport
 from .tls_transport import TLSTransport
 from .websocket_transport import WebSocketTransport
 from .http2_transport import HTTP2Transport
+from .socks5_transport import Socks5Transport
 
 
 logger = get_logger(__name__)
 
 # Supported transport types
-SUPPORTED_TRANSPORTS = {"ssh", "tcp", "tls", "websocket", "http2", "mock"}
+SUPPORTED_TRANSPORTS = {"ssh", "tcp", "tls", "websocket", "http2", "mock", "socks5"}
 
 
 def create_transport(config) -> Transport:
@@ -57,6 +58,8 @@ def create_transport(config) -> Transport:
         return _create_websocket_transport(config)
     elif transport_type == "http2":
         return _create_http2_transport(config)
+    elif transport_type == "socks5":
+        return _create_socks5_transport(config)
     elif transport_type == "mock":
         logger.info("Using MockTransport for testing")
         return MockTransport()
@@ -264,6 +267,19 @@ def _create_websocket_transport(config) -> WebSocketTransport:
 
     else:
         raise ConfigError("Invalid configuration for WebSocket transport")
+
+
+def _create_socks5_transport(config) -> Socks5Transport:
+    """Create Socks5Transport skeleton from configuration.
+
+    Args:
+        config: Configuration object.
+
+    Returns:
+        Socks5Transport instance (skeleton).
+    """
+    logger.info("Creating Socks5Transport (skeleton)")
+    return Socks5Transport()
 
 
 def _create_http2_transport(config) -> HTTP2Transport:

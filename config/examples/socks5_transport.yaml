@@ -1,0 +1,21 @@
+# SOCKS5 transport example configuration (skeleton)
+# This file is for reference only – the transport is not yet implemented.
+
+# Server configuration (example)
+server:
+  listen_mode: socks5
+  listen_port: 2226  # example port
+
+transport:
+  type: socks5
+
+forwarding:
+  enable_nat: false
+  enable_route: true
+
+session:
+  heartbeat_interval: 10
+  heartbeat_timeout: 30
+
+shaping:
+  enabled: false
