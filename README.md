@@ -1,969 +1,142 @@
 # VPN-LLM — LLM-Assisted Modular VPN Transport Research Platform
 
-VPN-LLM is an LLM-assisted modular VPN transport framework supporting:
+VPN-LLM is a research platform that closes the loop from **detection paper analysis**
+through **local evaluation gates** and **LLM-generated countermeasures** to
+**real TUN/netns before/after trace comparison**. It supports pluggable transports
+(TCP, TLS, WebSocket, SSH, HTTP/2), traffic shaping primitives, and three local
+evaluation gates (fingerprint, active probe, cross-layer RTT).
 
-- **Pluggable transports** — mock / tcp / tls / websocket / ssh
-- **Local fingerprint evaluation** — packet size, timing, n-gram, burst analysis
-- **LLM-driven detection-adversarial patch loop** — DetectionReport → Gate → CountermeasurePolicy → LLM prompt
-- **Traffic shaping primitives** — padding, aggregation, jitter, fragmentation, scheduling
-- **Active probe resistance evaluation** — malformed-input silent-drop testing
-- **Cross-layer RTT evaluation** — CalcuLatency-style application/transport/network RTT comparison
-- **Before/after quantification** — synthetic shaping and RTT countermeasure comparison
+> **Security boundary**: Research and education only. No real undetectability claim.
+> No third-party scanning. All evaluation is local, controlled, reproducible.
+> No pcap files committed. No browser emulation claim.
 
-> **⚠️ Security boundary**: This project is for authorized experiment and education only. It does NOT claim real undetectability. It does NOT claim to bypass real censorship systems. All evaluation is local, controlled, and reproducible. No third-party network scanning. No traffic interception. No production use.
-
----
-
-## 1. 项目简介
-
-### 核心定位：LLM 驱动的 Transport/Core 替换
-
-本项目的核心研究问题是：
-
-> **"当用户提出修改外层协议或 VPN Core 的需求时，能否由 LLM Agent 生成可审计补丁，
-> 并通过自动化验证确认替换后的系统仍能运行？"**
-
-围绕这个问题，项目有三层设计：
-
-| 层 | 职责 | 可替换性 |
-|---|---|---|
-| **Transport（外层协议适配层）** | 承载 Frame 数据的网络传输 | mock / tcp / tls / ssh / websocket，后续可扩展 http2 / quic / grpc |
-| **VPN Core（数据平面核心）** | Frame 编解码、session_id 会话隔离、TUN 转发、路由/NAT、forwarding loop 策略 | 可形成多个 Core variant（strict_session / alt_frame_codec / experimental_forwarding 等） |
-| **LLM Agent（替换工程代理）** | 理解自然语言需求 → 生成 TaskPlan → 生成 patch.diff → SafetyGuard 检查 → 验证 Gate → 报告 + commit advice | 围绕 Transport/Core 的替换服务，永不自动 git push |
-
-本项目实现了一个模块化的 VPN 隧道原型系统，核心设计目标是：
-
-- **传输层无关**：通过抽象 Transport 接口，支持多种传输协议
-- **帧格式统一**：使用统一的 Frame 格式封装 IP 数据包
-- **双向转发**：支持 TUN 设备与远程端之间的双向数据流
-- **会话管理**：内置心跳机制检测连接健康状态
-- **统计监控**：提供线程安全的流量统计
-
-适用于网络协议学习、VPN 架构研究、安全教育等场景。
-
-## 2. 系统架构
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      User Space                          │
-│                                                          │
-│  ┌─────────────┐                    ┌─────────────┐    │
-│  │   Client    │◄────── Tunnel ──────►│   Server    │    │
-│  │   Core      │                      │   Core      │    │
-│  └──────┬──────┘                      └──────┬──────┘    │
-│         │                                    │           │
-│  ┌──────▼──────┐                      ┌──────▼──────┐    │
-│  │  Transport  │                      │  Transport  │    │
-│  │  Abstraction│                      │  Abstraction│    │
-│  └──────┬──────┘                      └──────┬──────┘    │
-│         │                                    │           │
-│  ┌──────▼──────┐                      ┌──────▼──────┐    │
-│  │ SSH/TCP/TLS │◄───── Wire ─────────►│ SSH/TCP/TLS │    │
-│  │ /WebSocket  │                      │ /WebSocket  │    │
-│  └─────────────┘                      └─────────────┘    │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
-         │                                    │
-  ┌──────▼──────────────────────────────────────▼──────┐
-  │                   TUN Device                       │
-  │        (MockTunDevice / LinuxTunDevice)             │
-  └─────────────────────────────────────────────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │  Physical   │
-                    │  Network    │
-                    └─────────────┘
+Detection papers → local evaluation gate → DetectionReport
+  → CountermeasurePolicy → LLM prompt → code patch
+  → unit tests → real TUN/netns trace → before/after risk comparison
 ```
 
-### 数据流
+**Data plane**: TUN → Core → Frame → TrafficShaper → Transport → Wire
 
-1. **客户端**：本地 TUN 设备接收 IP 数据包 → Frame 封装 → Transport 发送
-2. **服务端**：Transport 接收 → Frame 解封 → 写入远程 TUN 设备
+**Control loop** (LLM is NOT in the runtime data path): DetectionReport → Gate →
+CountermeasurePolicy → PromptBuilder → LLM Patch Loop → SafetyGuard → ValidationRunner →
+pytest → Real Trace Matrix
 
-### LLM 驱动的替换闭环架构
-
-```
-     User Request ("把传输协议换成 WebSocket")
-          |
-          v
-     LLM Agent
-     (TaskPlan / Patch / Safety / Validation)
-          |
-          v
-     Replacement Layer
-     ┌──────────────────────────────────┐
-     │ Transport: TCP / TLS / SSH / WS  │
-     │ Core: Frame / Session / TUN / NAT│
-     └──────────────────────────────────┘
-          |
-          v
-     Validation Gates
-     pytest → smoke matrix → netns/TUN E2E → benchmark
-```
-
-## 3. 目录结构
-
-以下结构以仓库根目录 `VPN-LLM/` 为准，而不是 `vpn_tunnel/` 子目录。
-当前主要源码与测试均在仓库根目录下的 `src/`、`tests/`、`config/` 中维护。
-
-```
-VPN-LLM/
-├── config/                    # 配置文件
-│   ├── client.yaml           # 默认 TCP 客户端配置
-│   ├── client_tcp.yaml       # TCP 客户端配置
-│   ├── client_tls.yaml       # TLS 客户端配置
-│   ├── client_websocket.yaml # WebSocket 客户端配置
-│   ├── server.yaml           # 默认 TCP 服务端配置
-│   ├── server_tcp.yaml       # TCP 服务端配置
-│   ├── server_tls.yaml       # TLS 服务端配置
-│   ├── server_websocket.yaml # WebSocket 服务端配置
-│   ├── client_netns.yaml     # netns 客户端配置
-│   ├── server_netns.yaml     # netns 服务端配置
-│   └── llm_agent.yaml.example # LLM Agent 配置示例（不提交）
-│
-├── docs/                      # 文档
-│   ├── llm_agent_design.md    # LLM Agent 框架设计文档
-│   ├── stage_status.md        # 阶段成果状态报告
-│   └── test_report.md         # 测试报告
-│
-├── scripts/                   # 脚本
-│   ├── llm_task.py            # LLM Agent 任务入口
-│   ├── validate_llm_task.sh   # LLM 框架验证脚本
-│   └── phase3_netns/          # Phase 3 network namespace 脚本
-│
-├── src/
-│   ├── client.py            # 客户端入口
-│   ├── server.py            # 服务端入口
-│   │
-│   ├── common/              # 公共组件
-│   │   ├── config.py        # 配置加载与验证
-│   │   ├── errors.py        # 统一错误类
-│   │   ├── frame.py         # Frame 编解码 (VTUNmagic + 4-byte length)
-│   │   └── logger.py        # 日志工具
-│   │
-│   ├── transport/           # 传输层抽象
-│   │   ├── base.py          # Transport 基类
-│   │   ├── factory.py       # Transport 工厂
-│   │   ├── ssh_transport.py # SSH 传输
-│   │   ├── tcp_transport.py # TCP 传输
-│   │   ├── tls_transport.py # TLS 传输
-│   │   └── websocket_transport.py # WebSocket 传输
-│   │
-│   ├── tun/                 # TUN 设备抽象
-│   │   └── tun_device.py    # MockTunDevice / LinuxTunDevice
-│   │
-│   ├── core/                # 核心业务逻辑
-│   │   ├── client_core.py   # 客户端转发循环 + 心跳
-│   │   └── server_core.py   # 服务端转发循环 + 心跳
-│   │
-│   ├── forwarding/          # 转发功能
-│   │   ├── nat.py           # NAT 规则生成
-│   │   └── route.py         # 路由规则生成
-│   │
-│   ├── evaluation/          # 评估工具
-│   │   └── stats.py         # 流量统计
-│   │
-│   └── llm/                 # LLM Agent 框架
-│       ├── llm_client.py    # OpenAI 风格 API 客户端
-│       ├── code_task_manager.py # 代码任务管理器
-│       ├── safety_guard.py       # 安全检查
-│       ├── task_planner.py       # 规则引擎任务规划
-│       ├── llm_task_planner.py   # LLM 任务规划
-│       ├── validation_runner.py  # 验证执行器
-│       ├── task_record.py        # 任务记录管理
-│       ├── report_writer.py      # 报告生成器
-│       ├── patch_generator.py    # Patch 生成器
-│       ├── commit_advisor.py     # 提交建议生成器
-│       └── __init__.py
-│
-├── tests/                   # 测试套件 (pytest 运行查看实际数量)
-│   ├── test_frame.py
-│   ├── test_config.py
-│   ├── test_tcp_transport.py
-│   ├── test_tls_transport.py
-│   ├── test_websocket_transport.py
-│   ├── test_transport_mock.py
-│   ├── test_core.py
-│   ├── test_tun_device.py
-│   ├── test_code_task_manager.py
-│   ├── test_llm_client.py
-│   ├── test_safety_guard.py
-│   ├── test_task_planner.py
-│   ├── test_llm_task_planner.py
-│   ├── test_validation_runner.py
-│   ├── test_task_record.py
-│   ├── test_report_writer.py
-│   ├── test_patch_generator.py
-│   ├── test_llm_task_apply_flow.py
-│   ├── test_commit_advisor.py
-│   └── test_llm_task_commit_advice_flow.py
-│
-├── .github/workflows/       # CI 配置
-├── vpn_tunnel/              # 历史遗留快照（不再更新，保留供参考）
-├── requirements.txt         # Python 依赖
-├── .gitignore
-└── README.md               # 本文档
-```
-
-> **关于 `vpn_tunnel/`**：该目录为项目早期阶段的代码快照，包含旧版 `src/`、`tests/`、
-> `config/` 等的副本。当前开发以仓库根目录下的 `src/`、`tests/`、`config/` 为准，
-> `vpn_tunnel/` 不再更新，仅保留供历史参考和兼容性对照。
-
-## 4. 运行方式
-
-### 环境准备
-
-```bash
-# 安装依赖
-pip install -r requirements.txt
-
-# 可选依赖（用于完整功能）
-pip install paramiko websockets requests pyyaml
-```
-
-### 运行测试
-
-```bash
-cd /data/xjr/VPN-LLM
-python3 -m pytest tests/ -v
-```
-
-### Mock TUN 模式（无需 root）
-
-MockTunDevice 不需要 TUN 设备权限，适合功能测试。使用 `--mock-tun` 参数启用：
-
-```bash
-# 服务端
-python3 -m src.server --config config/server.yaml --transport tcp --mock-tun
-
-# 客户端
-python3 -m src.client --config config/client.yaml --transport tcp --mock-tun
-```
-
-### MockTransport 模式（仅用于单元测试）
-
-**注意**：MockTransport 使用内存队列模拟传输，**不能**用于两个独立进程之间的通信。它仅适用于单进程内的单元测试和集成测试。
-
-```bash
-# 错误用法 - 两个独立进程无法通过 MockTransport 通信
-python3 -m src.server --transport mock  # 不会生效
-python3 -m src.client --transport mock  # 不会生效
-
-# 正确用法 - 在测试代码中使用 MockTransport
-# 参见 tests/test_transport_mock.py 和 tests/test_core.py
-```
-
-### TCP 模式（需要网络权限）
-
-默认配置文件已使用 TCP 类型：
-
-```bash
-# 服务端
-python3 -m src.server --config config/server.yaml --mock-tun
-
-# 客户端
-python3 -m src.client --config config/client.yaml --mock-tun
-```
-
-### TLS 模式
-
-```bash
-# 生成测试证书（仅用于实验）
-openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -subj "/CN=localhost"
-
-# 服务端（需要配置 certfile, keyfile）
-python3 -m src.server --config config/server.yaml --transport tls
-
-# 客户端（需要配置 cafile 验证服务器证书，或使用 insecure_skip_verify 跳过验证）
-python3 -m src.client --config config/client.yaml --transport tls
-```
-
-### WebSocket 模式
-
-WebSocketTransport 已通过本地 localhost client/server 基础通信测试：
-
-- ✅ 每个实例在 dedicated background asyncio event loop 中运行，不依赖调用方线程的事件循环
-- ✅ 对外提供同步 `connect` / `send` / `recv` 接口，与 Transport 抽象一致
-- ✅ `recv()` 超时时抛出 `TransportTimeout`，行为与 TCP/TLS transport 保持一致
-- ✅ 支持 client 和 server 两种模式
-- ⏳ 建议在真实网络和长时间运行场景下继续测试
-
-```bash
-# 服务端
-python3 -m src.server --config config/server.yaml --transport websocket
-
-# 客户端
-python3 -m src.client --config config/client.yaml --transport websocket
-```
-
-### 测试状态说明
-
-- **单向数据路径测试**：Client→Server 和 Server→Client 已验证通过
-- **双向数据路径测试**：因 timing 敏感性问题暂时跳过（test_bidirectional_data_path pytest.skip）
-- **MockTransport loopback 测试**：单进程内验证通过
-- **TCP 跨进程通信**：连接建立成功，mock-tun 环境下 recv 超时会触发 WARNING（非 ERROR）
-
-## 5. 配置文件说明
-
-### 客户端配置 (client.yaml)
-
-```yaml
-client:
-  tun_name: tun0        # TUN 设备名
-  tun_ip: 10.8.0.2      # 本地 TUN IP
-  tun_peer: 10.8.0.1    # 远程 TUN IP
-  mtu: 1400             # MTU
-
-server:
-  host: 127.0.0.1       # 服务器地址
-  port: 2222            # 服务器端口
-
-transport:
-  type: tcp             # 传输类型: ssh/tcp/tls/websocket/mock
-
-session:
-  heartbeat_interval: 10   # 心跳间隔（秒）
-  reconnect: true          # 是否自动重连
-  reconnect_interval: 3    # 重连间隔（秒）
-```
-
-### 服务端配置 (server.yaml)
-
-```yaml
-server:
-  tun_name: tun0        # TUN 设备名
-  tun_ip: 10.8.0.1      # 本地 TUN IP
-  tun_peer: 10.8.0.2    # 远程 TUN IP
-  mtu: 1400             # MTU
-  listen_port: 2222     # 监听端口
-
-forwarding:
-  enable_nat: false     # 是否启用 NAT
-  enable_route: true    # 是否启用路由
-
-transport:
-  type: tcp             # 传输类型
-
-session:
-  heartbeat_timeout: 30 # 心跳超时（秒）
-```
-
-### TLS 客户端配置扩展
-
-```yaml
-transport:
-  type: tls
-  certfile: /path/to/client.crt    # 客户端证书（可选）
-  keyfile: /path/to/client.key     # 客户端私钥（可选）
-  cafile: /path/to/ca.crt          # CA 证书，用于验证服务器
-  verify_server: true             # 是否验证服务器证书（默认 true）
-  insecure_skip_verify: false      # 跳过证书验证（默认 false，**生产环境勿用**）
-```
-
-### SSH 配置扩展
-
-```yaml
-transport:
-  type: ssh
-  auto_add_host_key: false        # 是否自动添加未知主机密钥（默认 false，**生产环境勿用**）
-```
-
-## 6. Frame 格式说明
-
-所有传输数据使用统一 Frame 格式封装：
-
-```
-┌────────┬────────┬────────┬────────┬─────────────────┬────────────┐
-│ Magic  │Version │ Type   │ Length │   Session ID    │  Payload   │
-│ 4字节  │ 1字节  │ 1字节  │ 4字节  │    16字节       │  变长      │
-│ "VTUN" │  0x01  │        │        │   (UUID)        │            │
-└────────┴────────┴────────┴────────┴─────────────────┴────────────┘
-```
-
-- **Magic (4字节)**：固定值 `VTUN` (0x5654554E)
-- **Version (1字节)**：当前为 `0x01`
-- **Type (1字节)**：`0x01`=DATA, `0x02`=HEARTBEAT, `0x03`=AUTH, `0x04`=CLOSE
-- **Length (4字节)**：Payload 的长度（大端序），不包括 Session ID
-- **Session ID (16字节)**：UUID，用于标识会话
-- **Payload (变长)**：数据负载
-
-### 传输层封装
-
-TCP / TLS / SSH Transport 在发送前额外添加 4 字节 big-endian 长度前缀，接收时先读长度再读完整 Frame：
-
-```
-┌──────────────┬─────────────┐
-│ Length (4B)  │ Frame bytes │
-│  big-endian  │             │
-└──────────────┴─────────────┘
-```
-
-WebSocket Transport 使用一个 binary WebSocket message 承载一个完整 Frame，不额外添加 length prefix。Frame 自身仍统一使用 Magic / Version / Type / Length / Session ID / Payload 格式。
-
-### 帧类型
-
-| 类型值 | 名称 | 说明 |
-|--------|------|------|
-| 0x01 | DATA | IP 数据包 |
-| 0x02 | HEARTBEAT | 心跳检测 |
-| 0x03 | AUTH | 认证消息 |
-| 0x04 | CLOSE | 关闭会话 |
-
-## 7. Transport 抽象说明
-
-所有 Transport 实现继承 `Transport` 基类：
-
-```python
-class Transport(ABC):
-    """Transport abstract base class."""
-
-    def connect(self) -> None:
-        """Connect or start listening."""
-
-    def send(self, data: bytes) -> None:
-        """Send data with length prefix framing."""
-
-    def recv(self, timeout: Optional[float] = None) -> Optional[bytes]:
-        """Receive data with length prefix framing."""
-
-    def close(self) -> None:
-        """Close the connection."""
-
-    def is_connected(self) -> bool:
-        """Check connection status."""
-```
-
-### 已实现的 Transport
-
-| 类型 | 说明 | 特性 |
-|------|------|------|
-| SSH | 基于 Paramiko | 加密传输，需 SSH 服务器，默认严格主机密钥验证 |
-| TCP | 原始 TCP | 简单直接，无加密 |
-| TLS | TLS 加密 TCP | 证书认证，默认启用服务器证书验证 |
-| WebSocket | WebSocket 协议 | 可穿透防火墙，HTTP 兼容，已通过本地基础通信测试 |
-| Mock | 内存模拟 | 无网络依赖，**仅用于单元测试，不能跨进程通信** |
-
-### 工厂模式
-
-使用工厂模式创建 Transport：
-
-```python
-from src.transport.factory import create_transport
-
-transport = create_transport(config)
-```
-
-## 8. 如何添加新的 Transport
-
-### 步骤 1：实现 Transport 类
-
-创建 `src/transport/my_transport.py`：
-
-```python
-from .base import Transport
-from ..common.errors import TransportError
-
-class MyTransport(Transport):
-    """My custom transport implementation."""
-
-    MODE_CLIENT = "client"
-    MODE_SERVER = "server"
-
-    def __init__(self, mode: str = MODE_CLIENT, host: str = "127.0.0.1", port: int = 2225):
-        if mode not in (self.MODE_CLIENT, self.MODE_SERVER):
-            raise TransportError(f"Invalid mode: {mode}")
-        self.mode = mode
-        self.host = host
-        self.port = port
-        self._connected = False
-
-    def connect(self) -> None:
-        """Connect or start listening."""
-        if self.mode == self.MODE_CLIENT:
-            # Connect to server
-            ...
-        else:
-            # Start server
-            ...
-
-    def send(self, data: bytes) -> None:
-        """Send data with 4-byte length prefix."""
-        if not self._connected:
-            raise TransportError("Not connected")
-        # Pack: 4-byte length + data
-        length_prefix = struct.pack(">I", len(data))
-        self._socket.sendall(length_prefix + data)
-
-    def recv(self, timeout: float = None) -> Optional[bytes]:
-        """Receive data with 4-byte length prefix."""
-        if not self._connected:
-            raise TransportError("Not connected")
-        # Read 4-byte length, then full data
-        ...
-
-    def close(self) -> None:
-        """Close connection."""
-        self._connected = False
-
-    def is_connected(self) -> bool:
-        return self._connected
-```
-
-### 步骤 2：注册到工厂
-
-编辑 `src/transport/factory.py`：
-
-```python
-from .my_transport import MyTransport
-
-SUPPORTED_TRANSPORTS = {"ssh", "tcp", "tls", "websocket", "mock", "my"}
-
-# 添加到 create_transport()
-elif transport_type == "my":
-    return _create_my_transport(config)
-
-# 添加工厂函数
-def _create_my_transport(config):
-    host = getattr(config.server, 'host', '127.0.0.1')
-    port = getattr(config.server, 'port', 2225)
-    return MyTransport(mode=MyTransport.MODE_CLIENT, host=host, port=port)
-```
-
-### 步骤 3：添加测试
-
-创建 `tests/test_my_transport.py`
-
-### 步骤 4：更新配置允许列表
-
-编辑 `src/common/config.py`：
-
-```python
-ALLOWED_TRANSPORT_TYPES = {"ssh", "tcp", "tls", "websocket", "mock", "my"}
-```
-
-## 9. 如何运行测试
-
-```bash
-# 运行所有测试
-python3 -m pytest tests/ -v
-
-# 运行特定测试文件
-python3 -m pytest tests/test_tcp_transport.py -v
-
-# 运行特定测试类
-python3 -m pytest tests/test_tcp_transport.py::TestTCPTransportRoundtrip -v
-
-# 显示详细输出
-python3 -m pytest tests/ -v -s --tb=long
-
-# 快速失败模式
-python3 -m pytest tests/ -v -x
-
-# 生成覆盖率报告
-python3 -m pytest tests/ --cov=src --cov-report=term-missing
-```
-
-## 10. Linux TUN 权限说明
-
-### 权限要求
-
-在 Linux 上使用真实的 TUN 设备需要 root 权限：
-
-```bash
-# 创建 TUN 设备需要 root
-sudo ip tuntap add mode tun name tun0
-sudo ip addr add 10.8.0.1/24 dev tun0
-sudo ip link set tun0 up
-sudo ip route add 10.8.0.0/24 dev tun0
-```
-
-### 替代方案
-
-| 方案 | 权限需求 | 适用场景 |
-|------|----------|----------|
-| MockTunDevice (--mock-tun) | 无需 root | 功能测试、开发 |
-| LinuxTunDevice (真实 TUN) | 需要 root | 真实隧道实验 |
-
-### Real Linux TUN (experimental)
-
-项目支持使用真实 Linux TUN 设备（替代 MockTunDevice）。当前状态：
-
-- ✅ LinuxTunDevice 可成功创建真实 TUN 设备（tun0, tun1）
-- ✅ Server/Client 可分别使用不同 TUN 设备启动
-- ✅ Graceful shutdown 工作正常
-- ⏳ 完整网络连通性需要手动配置 IP 地址和路由
-
-**快速开始：**
-
-```bash
-# 终端 1 - 启动服务端
-sudo python -m src.server --config config/server.yaml --transport tcp
-
-# 终端 2 - 启动客户端
-sudo python -m src.client --config config/client.yaml --transport tcp
-```
-
-**完整验证流程**：
-- [docs/real_tun_linux.md](docs/real_tun_linux.md) - 通用 real TUN 设置和故障排查
-- [docs/phase3_netns_validation.md](docs/phase3_netns_validation.md) - **推荐** 使用 network namespace 做单机可复现验证
-
-> **Phase 3 推荐使用 network namespace**：同一 namespace 下直接使用 tun0/tun1 ping 不可靠（可能直接被 kernel 路由），建议使用 `ip netns exec` 在隔离的 namespace 中运行 server/client 进行验证。详见 [docs/phase3_netns_validation.md](docs/phase3_netns_validation.md)。
-
-### 注意事项
-
-1. **最小权限原则**：仅在实验环境中使用 root 权限运行 VPN 程序
-2. **网络隔离**：实验环境应与生产网络隔离
-3. **日志监控**：关注异常的网络行为
-
-## 11. 路由和 NAT 实验说明
-
-### 路由配置
-
-项目提供路由规则生成工具（`src/forwarding/route.py`），但不自动执行：
-
-```python
-from src.forwarding.route import RouteManager
-
-route_mgr = RouteManager()
-rules = route_mgr.generate_rules(tun_ip="10.8.0.1", peer_ip="10.8.0.2")
-
-# 查看规则（不执行）
-print("\n".join(rules))
-
-# 需手动执行（需要 root）
-# route_mgr.apply_rules(rules)
-```
-
-### NAT 配置
-
-NAT 功能用于地址转换（`src/forwarding/nat.py`）：
-
-```bash
-# 查看 NAT 规则（不执行）
-python3 -c "
-from src.forwarding.nat import NATManager
-nat = NATManager()
-print(nat.generate_rules('tun0', '10.8.0.0/24'))
-"
-
-# 手动应用（需要 root）
-# iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
-```
-
-### 实验建议
-
-1. 使用虚拟网络命名空间隔离实验环境
-2. 使用网桥连接虚拟机进行实验
-3. 记录所有网络配置便于复现
-
-## 12. 安全边界说明
-
-> **⚠️ 重要提醒**
-
-本项目是**教学和研究原型**，设计用于以下场景：
-
-- ✅ 网络协议学习与实验
-- ✅ VPN 架构研究
-- ✅ 安全教育与渗透测试教学（需授权）
-- ✅ 课程设计与毕业设计
-
-以下使用场景**明确禁止**：
-
-- ❌ 未授权的网络访问
-- ❌ 规避网络审计或过滤
-- ❌ 隐藏网络流量以逃避监测
-- ❌ 任何违法违纪的活动
-
-### 安全建议
-
-1. **仅在授权环境使用**：确保实验获得适当授权
-2. **隔离实验环境**：使用虚拟机或容器隔离
-3. **不用于生产环境**：本项目未经安全审计
-4. **关注数据传输安全**：敏感数据应使用 TLS 等加密传输
-
-### 法律提示
-
-使用 VPN 技术时，请遵守当地法律法规。在中国境内，使用 VPN 必须通过持牌电信运营商。未经授权的 VPN 服务属于违法行为。
-
----
-
-## 13. LLM Agent 与替换闭环
-
-LLM Agent 是围绕 Transport/Core 替换工作的工程代理，不是泛用自动编码器。其职责是帮助用户
-以可审计、可验证的方式完成协议替换和内核修改。
-
-### 模块组成
-
-| 模块 | 文件 | 职责 |
-|---|---|---|
-| Rule-based TaskPlanner | [src/llm/task_planner.py](src/llm/task_planner.py) | 基于关键词规则的请求分类和任务规划 |
-| LLM-based TaskPlanner | [src/llm/llm_task_planner.py](src/llm/llm_task_planner.py) | 基于 LLM API 的请求理解和任务分解（需显式启用） |
-| **RepoIndexer** | [src/llm/repo_indexer.py](src/llm/repo_indexer.py) | 扫描仓库，提取 Python symbols/imports、config keys、识别 test/doc 文件（纯本地，不用 LLM） |
-| **FileRetriever** | [src/llm/file_retriever.py](src/llm/file_retriever.py) | 多路文件召回：关键词 + symbol + config key + task type 规则 + test/doc 映射 |
-| **ImpactExpander** | [src/llm/impact_expander.py](src/llm/impact_expander.py) | 影响面扩展：从候选文件生成 FileSelection（must_edit / must_review / test / doc / allowed_create） |
-| **ContextBuilder** | [src/llm/context_builder.py](src/llm/context_builder.py) | 读取 selected files 构建 LLM 上下文（12KB/file cap） |
-| LLMPatchGenerator | [src/llm/patch_generator.py](src/llm/patch_generator.py) | 生成 patch，受 allowed_edit_files/allowed_create_paths/allowed_create_patterns 约束，FIND 唯一性校验 |
-| SafetyGuard | [src/llm/safety_guard.py](src/llm/safety_guard.py) | 检查文件路径、命令和敏感信息，阻断危险操作 |
-| ValidationRunner | [src/llm/validation_runner.py](src/llm/validation_runner.py) | 执行编译检查、pytest、git status 等验证 |
-| ReplacementValidator | [src/llm/replacement_validator.py](src/llm/replacement_validator.py) | 运行 smoke replacement matrix，验证替换后最小可运行性 |
-| TaskRecordManager | [src/llm/task_record.py](src/llm/task_record.py) | 管理任务目录、持久化验证结果和 patch |
-| ReportWriter | [src/llm/report_writer.py](src/llm/report_writer.py) | 生成结构化 Markdown 报告 |
-| CommitAdvisor | [src/llm/commit_advisor.py](src/llm/commit_advisor.py) | 生成 Conventional Commits 格式的提交建议（永不自动提交） |
-
-### 完整替换流程 (Agentized)
-
-```
-User Request (自然语言需求，如 "把传输协议换成 WebSocket")
-    │
-    ▼
-TaskPlanner (rule-based 或 LLM-based)
-    → 分类 task_type (transport_change / core_change / ...)
-    → 生成结构化 TaskPlan
-    │
-    ▼
-Extreme Risk Control
-    → 检测 .git/、.env、sudo、rm -rf、auto push 等极端风险
-    → 高风险请求：停止执行，生成 clarification_questions.md
-    │
-    ▼
-SafetyGuard (对所有候选路径做安全检查)
-    │
-    ▼
-RepoIndexer.build() — 本地仓库索引（ast 提取 + 文件系统扫描，不用 LLM）
-    │
-    ▼
-FileRetriever.retrieve() — 多路文件召回
-    ├── 路径/文件名关键词匹配
-    ├── Python symbol 匹配
-    ├── Config key 匹配
-    ├── Task type 规则召回
-    ├── Test 文件映射
-    ├── Doc 文件映射
-    └── LLM planner hints（最低优先级，仅作补充）
-    │
-    ▼
-ImpactExpander.expand() — 影响面扩展 → FileSelection
-    ├── must_edit_files（仅高置信度文件：规则结构性文件 + 评分 ≥0.9 的候选文件）
-    ├── must_review_files（相关但不一定修改的文件，含纯 planner hint）
-    ├── test_files
-    ├── doc_files
-    ├── allowed_create_paths（目录前缀）
-    ├── allowed_create_patterns（fnmatch glob 命名模式，如 *_transport.py, test_*.py）
-    ├── action_sources（每个文件分类来源的可审计追踪）
-    └── rejected_hints（LLM 猜的不存在的文件）
-    │
-    ▼
-ContextBuilder.build() — 读取 selected files 构建 LLM 上下文
-    │
-    ▼
-LLMPatchGenerator.generate() — 生成 patch.diff
-    → 受 allowed_edit_files / allowed_create_paths 约束
-    → 校验 FIND 唯一性（0 次或多次匹配 → 失败）
-    → Secret scanning (API key, private key, password 等)
-    → 保存 patch.diff 到 .llm_tasks/<task_id>/
-    │
-    ▼
-git apply --check (dry-run 校验 patch 是否可应用)
-    │
-    ▼
-User 显式确认 --apply-patch (人工闸门，不可跳过)
-    │
-    ▼
-Post-apply Validation:
-    ├── python3 -m compileall src tests
-    ├── python3 -m pytest tests/ -v
-    └── git status --short
-    │
-    ▼
-Replacement Smoke Matrix (--run-replacement-smoke)
-    → 验证 Transport × Core 组合的最小可运行性
-    │
-    ▼
-netns + TUN E2E Validation (手动，需 root)
-    → 验证真实 TUN 设备和 IP 数据包转发
-    │
-    ▼
-Benchmark / Stability (Phase 10.7 planned)
-    │
-    ▼
-Report + Commit Advice (写入 .llm_tasks/<task_id>/)
-    → suggested_commit_message.txt
-    → commit_summary.md
-    → repo_index_summary.json, file_retrieval.json, impact_analysis.json, file_selection.json, context_summary.json
-    → 永不自动 git commit 或 git push
-```
-
-### 关键安全边界
-
-- **永不自动 git push** — 所有版本控制操作需用户手动执行
-- **永不自动 git commit** — commit message 仅作为建议生成
-- **--apply-patch 是显式闸门** — 不传此参数则 patch 仅做 dry-run
-- **Extreme Risk Control** — 高风险请求 (.git/, .env, sudo, rm -rf, auto push 等) 直接停止并生成澄清问题
-- **LLM 不再猜文件** — 文件选择由 RepoIndexer + FileRetriever + ImpactExpander 本地完成，LLM 只做 patch 生成且受 allowed_edit_files 约束
-- **Planner hints 不能直接授予 must_edit** — LLM planner 的 candidate_files 仅是 hints（0.6 分），必须经过 FileRetriever 多路召回 + ImpactExpander 评分才能进入 must_edit；纯 hint 文件只能进入 must_review
-- **FIND 唯一性校验** — PatchGenerator 验证 FIND 在目标文件中恰好出现 1 次；空 FIND、纯空白 FIND 均拒绝
-- **Create 路径受目录 + 命名模式双重约束** — allowed_create_paths（目录前缀）+ allowed_create_patterns（fnmatch glob），且禁止创建 README.md、隐藏文件、路径穿越、.env、.git、*.key、*.pem
-- **SafetyGuard 阻断** — 危险命令 (sudo, rm -rf, curl | bash)、敏感路径 (.env, .claude/, *.key, *.pem) 一律拒绝
-- **Secret scanning** — patch 内容扫描 private key、API key、password、JWT 等模式
-- **LLM 仅用于 plan/patch 生成** — 不能执行命令、写文件、修改代码或操作 git
-
----
-
-## 14. Current Status
-
-- **Test baseline**: 1324 passed, 6 skipped
-- **Current branch**: `test-2`
-- **Current commit**: `7f51223` (2026-05-20)
-- **Current phase**: Phase 8 — Integrated Evaluation & Documentation
-- **Completed phases**:
-  - Phase 1-3.5: Fingerprint evaluation, trace capture, summarization pipeline
-  - Phase 4: LLM detection-adversarial patch loop
-  - Phase 5/5B/5C: Traffic shaping primitives, core integration, YAML config, synthetic before/after
-  - Phase 6/6B: Active probe resistance gate, malformed behavior unification
-  - Phase 7/7B/7C: Cross-layer RTT gate, timing countermeasure hooks, local WebSocket RTT runner
-
-### Key Modules
-
-| Module | Path | Purpose |
-|---|---|---|
-| Fingerprint evaluation | `src/evaluation/fingerprint/` | Packet size, n-gram, burst, timing feature extraction |
-| Active probe gate | `src/evaluation/probe/` | Malformed-input resistance testing (mock/local) |
-| Cross-layer RTT gate | `src/evaluation/rtt/` | Application/transport/network RTT comparison (mock/tcp/websocket) |
-| Traffic shaping | `src/shaping/` | Padding, aggregation, jitter, fragmentation, scheduling, timing |
-| Detection workflow | `src/llm/detection/` | DetectionReport, DetectionGate, CountermeasurePolicy, PromptBuilder, PatchLoop |
-
-### Quick Commands
+## Quick Start
 
 ```bash
 # Run all tests
-python3 -m pytest tests/ -v
+python -m pytest tests/ --ignore=vpn_tunnel -q
+
+# Mock TUN mode (no root)
+python -m src.server --config config/server.yaml --transport tcp --mock-tun &
+python -m src.client --config config/client.yaml --transport tcp --mock-tun
+```
+
+## Key Modules
+
+| Area | Path | Purpose |
+|---|---|---|
+| **Transport** | `src/transport/` | TCP, TLS, WebSocket, SSH, HTTP/2 — pluggable via factory |
+| **Core** | `src/core/` | Client/server forwarding loops, heartbeat, session_id |
+| **Shaping** | `src/shaping/` | Padding, aggregation, jitter, fragmentation, scheduler, timing |
+| **Fingerprint** | `src/evaluation/fingerprint/` | Packet size, n-gram, burst feature extraction from pcap |
+| **Active Probe** | `src/evaluation/probe/` | Malformed-input resistance (9 scenarios, silent-drop) |
+| **Cross-Layer RTT** | `src/evaluation/rtt/` | App/transport/network RTT comparison |
+| **LLM Detection** | `src/llm/detection/` | DetectionReport, Gate, CountermeasurePolicy, PromptBuilder, PatchLoop |
+| **LLM Framework** | `src/llm/` | Task planning, file selection, impact expansion, patch generation, safety |
+
+## LLM Workflow
+
+```
+User request → TaskPlanner → RepoIndexer → FileRetriever → ImpactExpander
+  → ContextBuilder → PatchGenerator → SafetyGuard → ValidationRunner
+  → pytest → ReplacementValidator → Report + Commit Advice
+```
+
+Key safety boundaries: never auto-commit, never auto-push, `--apply-patch` is an
+explicit human gate, SafetyGuard blocks dangerous paths (`.git`, `.env`, `*.key`)
+and commands (`sudo`, `rm -rf`).
+
+## Evaluation Gates
+
+| Gate | Path | What it measures |
+|---|---|---|
+| **Fingerprint** | `src/evaluation/fingerprint/` | Packet size uniformity, small-packet ratio, n-gram entropy, burst patterns, IAT |
+| **Active Probe** | `src/evaluation/probe/` | Malformed-input response variance, close-time consistency |
+| **Cross-Layer RTT** | `src/evaluation/rtt/` | App/transport/network RTT gap, timing stability |
+| **Real Trace Matrix** | `scripts/run_phase9_real_trace_matrix.py` | TUN/netns before/after repeated capture + statistical comparison |
+
+## Transport Status
+
+| Transport | Status | Real Trace | Notes |
+|---|---|---|---|
+| TCP | Stable | Phase 9 before/after, e2e-ping | No encryption |
+| TLS | Stable | Phase 9 before/after | ping flush-limited |
+| WebSocket | Stable | Phase 9 before/after, e2e-ping | Background asyncio loop |
+| SSH | Client-only | Skipped | No server accept loop |
+| HTTP/2 | Experimental | Phase 10C→10E-B repeated | All after-risk <0.60; HPACK deferred |
+
+## HTTP/2 Pipeline (Phase 10)
+
+| Phase | Countermeasure | Result |
+|---|---|---|
+| 10C | Generic shaping | Regression on idle/ping |
+| 10D | DATA chunking + WU batching | Reversed regression |
+| 10E-A | Multi-stream (round_robin/random) | No added risk |
+| 10E-B | SETTINGS profiles (3 profiles, ±5% jitter) | No added risk; bulk after-risk 0.402 |
+
+HPACK/header behavior is explicitly deferred as future work.
+
+## Documentation Index
+
+| Document | Content |
+|---|---|
+| [docs/final_integrated_report.md](docs/final_integrated_report.md) | **Complete Phase 11 report** — architecture, LLM role, detection surfaces, evaluation gates, countermeasures, trace results, limitations, future work |
+| [docs/detection_coverage_matrix.md](docs/detection_coverage_matrix.md) | Paper-to-gate coverage matrix (4 papers, 14 surfaces) |
+| [docs/phase9_real_trace_matrix.md](docs/phase9_real_trace_matrix.md) | Phase 9 real TUN/netns trace methodology and results |
+| [docs/transports/http2.md](docs/transports/http2.md) | HTTP/2 transport design, phases 10C-10E-B, trace results |
+| [docs/llm_detection_adversarial_loop.md](docs/llm_detection_adversarial_loop.md) | LLM detection-adversarial patch loop design |
+| [docs/traffic_shaping.md](docs/traffic_shaping.md) | Traffic shaping design and primitives |
+| [docs/fingerprint_evaluation.md](docs/fingerprint_evaluation.md) | Fingerprint evaluation design |
+| [docs/active_probe_resistance.md](docs/active_probe_resistance.md) | Active probe resistance design |
+| [docs/cross_layer_rtt_evaluation.md](docs/cross_layer_rtt_evaluation.md) | Cross-layer RTT evaluation design |
+| [docs/llm_agent_design.md](docs/llm_agent_design.md) | LLM agent framework design |
+| [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md) | netns + TUN validation gates |
+
+## Current Status — Phase 11 Convergence
+
+- **Branch**: `test-2`, HEAD: `cfa4faf`
+- **Tests**: 1619 passed, 10 skipped
+- **Phase**: 11 — Final Integrated Report and Project Convergence
+- **No new features planned** — HPACK, passive RTT, full repeated matrix deferred to future work
+- **Focus**: documentation, experiment archiving, presentation materials
+
+## Quick Commands
+
+```bash
+# Tests
+python -m pytest tests/ --ignore=vpn_tunnel -q
+
+# Integrated evaluation summary
+python scripts/generate_integrated_evaluation_summary.py
+
+# Final project summary (Phase 11)
+python scripts/generate_final_project_summary.py --output-dir outputs/final_summary
 
 # Fingerprint report
-python3 scripts/summarize_fingerprint_reports.py --output-json traces/summary.json
+python scripts/summarize_fingerprint_reports.py --output-json traces/summary.json
 
-# Active probe mock report
-python3 -m src.evaluation.probe.report --mock --output-json /tmp/probe.report.json
-
-# RTT mock report (proxy-like high-risk profile)
-python3 -m src.evaluation.rtt.report --mock-profile proxy_like --output-json /tmp/rtt.report.json
-
-# RTT WebSocket + TCP report (requires local echo server on port 8765)
-python3 -m src.evaluation.rtt.report --mode websocket --ws-port 8765 --output-json /tmp/ws_rtt.report.json
-
-# LLM Detection patch loop
-python3 -m src.llm.detection.patch_loop \
+# LLM detection patch loop
+python -m src.llm.detection.patch_loop \
   --user-request "reduce cross-layer RTT fingerprint risk" \
   --report /tmp/rtt.report.json \
-  --output-prompt /tmp/fix_prompt.txt \
-  --output-json /tmp/patch_loop.json
+  --output-prompt /tmp/fix_prompt.txt
 
-# Synthetic shaping before/after comparison
-python3 scripts/synthetic_shaping_comparison.py --output-json /tmp/shaping_comparison.json
-
-# Synthetic RTT countermeasure comparison
-python3 scripts/synthetic_rtt_countermeasure_comparison.py --output-dir /tmp/rtt_compare
+# Real trace matrix (requires sudo + netns)
+sudo python scripts/run_phase9_real_trace_matrix.py run \
+  --output-dir outputs/phase9_run --transports tcp,websocket \
+  --scenarios idle,ping,bulk --repeat-count 3 --capture-duration 45 --execute
 ```
-
-### Transport Status
-
-| Transport | Status |
-|---|---|
-| TCP | Implemented, tested, netns e2e-ping verified |
-| TLS | Implemented, timeout semantics aligned with TCP |
-| WebSocket | Implemented with dedicated background asyncio event loop, netns e2e-ping verified |
-| SSH | Client-side implementation available |
-
-### Documentation Index
-
-- [docs/phase8_integrated_evaluation.md](docs/phase8_integrated_evaluation.md) — Phase 8 system overview
-- [docs/detection_coverage_matrix.md](docs/detection_coverage_matrix.md) — Paper-to-gate coverage matrix
-- [docs/fingerprint_evaluation.md](docs/fingerprint_evaluation.md) — Fingerprint evaluation design
-- [docs/active_probe_resistance.md](docs/active_probe_resistance.md) — Active probe resistance design
-- [docs/cross_layer_rtt_evaluation.md](docs/cross_layer_rtt_evaluation.md) — Cross-layer RTT evaluation design
-- [docs/traffic_shaping.md](docs/traffic_shaping.md) — Traffic shaping design
-- [docs/llm_detection_adversarial_loop.md](docs/llm_detection_adversarial_loop.md) — LLM detection-adversarial patch loop
-
----
-
-## 15. Phase 10: LLM 驱动的替换验证体系
-
-项目支持通过 LLM Agent 辅助修改外层协议（Transport）和 VPN 内核（Core）。
-每次替换必须通过以下验证 Gates：
-
-### 验证 Gate 总览
-
-| Gate | 目的 | 命令 | 状态 (本地验证) |
-|---|---|---|---|
-| **Gate 1** | 单元/集成测试 | `python3 -m pytest tests/ -v` | 562 passed, 6 skipped |
-| **Gate 2** | Transport/Core replacement smoke | `python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,websocket --cores default --json` | PASS |
-| **Gate 3** | netns + TUN 环境验证 | `sudo bash scripts/phase10_netns_tun_validation.sh --transport tcp --verbose` | PASS |
-| **Gate 4** | netns + TUN E2E ping | `sudo bash scripts/phase10_netns_tun_validation.sh --transport tcp --verbose --e2e-ping` | TCP / WebSocket PASS |
-| **Gate 5** | benchmark / stability | Phase 10.7 planned | TODO |
-
-### Gate 2: Replacement Smoke Matrix
-
-```bash
-# Run smoke matrix for stable transports
-python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,websocket --cores default
-
-# Full matrix with TLS
-python3 scripts/smoke_replacement_matrix.py --transports mock,tcp,tls,websocket --cores default --json
-```
-
-输出一个 Transport × Core 矩阵，标记每个组合的 pass/fail/skip 状态。
-这是 LLM 驱动替换后的**第一道运行时 Gate**，快速判断替换是否最小可运行。
-
-LLM Agent can optionally run replacement smoke validation after human-confirmed
-patch application via `--run-replacement-smoke`.
-
-详细说明见 [docs/phase10_replacement_smoke_matrix.md](docs/phase10_replacement_smoke_matrix.md)。
-
-### Gate 3 & 4: netns + TUN Validation
-
-After the local smoke matrix passes, use Linux network namespaces and
-real TUN devices for the second and third validation gates.
-
-**Default mode** (Gate 3) — environment, TUN, underlay, and process health:
-
-```bash
-# Requires root or CAP_NET_ADMIN — skips gracefully otherwise
-sudo scripts/phase10_netns_tun_validation.sh
-
-# Test with WebSocket transport
-sudo scripts/phase10_netns_tun_validation.sh --transport websocket
-
-# Safe for CI — pre-flight check only, no namespaces created
-bash scripts/phase10_netns_tun_validation.sh --preflight-only
-```
-
-**E2E ping mode** (Gate 4) — real IP packet forwarding through the TUN tunnel:
-
-```bash
-# Automated ping through the tunnel (bidirectional)
-sudo scripts/phase10_netns_tun_validation.sh --transport tcp --e2e-ping
-
-# With packet capture for diagnostics
-sudo scripts/phase10_netns_tun_validation.sh --transport websocket --e2e-ping --verbose --tcpdump
-```
-
-> **Shared session ID**: The netns e2e validation script automatically passes a fixed
-> test `--session-id` to both server and client. For manual invocation, use
-> `--session-id HEX` (CLI) or the `session_id` config field. `session_id` is a session
-> isolation identifier, not an authentication secret. See
-> [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md) for details.
->
-> **Verified (Phase 10.6)**: TCP and WebSocket e2e-ping both pass on Debian 12
-> (Linux 6.1). Real IP packets flow bidirectionally through the TUN tunnel with
-> 0% loss. See [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md#phase-106-real-e2e-results).
-
-详细说明见 [docs/phase10_netns_tun_validation.md](docs/phase10_netns_tun_validation.md)。
-
----
-
-## 参考资料
-
-- [OpenVPN 协议分析](https://openvpn.net/)
-- [WireGuard 协议](https://www.wireguard.com/)
-- [Python asyncio 文档](https://docs.python.org/3/library/asyncio.html)
-- [Paramiko SSH 库](https://paramiko.readthedocs.io/)
-- [websockets 库](https://websockets.readthedocs.io/)
