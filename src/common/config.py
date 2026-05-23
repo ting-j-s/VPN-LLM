@@ -68,6 +68,11 @@ class TransportConfig:
     # HTTP/2-specific options (experimental)
     server_hostname: Optional[str] = None
     experimental: bool = False
+    # HTTP/2-aware shaping (0 = disabled, preserve existing behavior)
+    http2_chunk_min_size: int = 0
+    http2_chunk_max_size: int = 0
+    http2_window_update_threshold: int = 0
+    http2_chunk_rng_seed: Optional[int] = None
 
 
 @dataclass
@@ -215,6 +220,10 @@ def load_client_config(path: str) -> ClientConfig:
         path=transport_data.get("path", "/"),
         server_hostname=transport_data.get("server_hostname"),
         experimental=transport_data.get("experimental", False),
+        http2_chunk_min_size=transport_data.get("http2_chunk_min_size", 0),
+        http2_chunk_max_size=transport_data.get("http2_chunk_max_size", 0),
+        http2_window_update_threshold=transport_data.get("http2_window_update_threshold", 0),
+        http2_chunk_rng_seed=transport_data.get("http2_chunk_rng_seed"),
     )
 
     # SSH-specific validation (only when using SSH transport)
@@ -284,6 +293,10 @@ def load_server_config(path: str) -> ServerConfig:
         path=transport_data.get("path", "/"),
         server_hostname=transport_data.get("server_hostname"),
         experimental=transport_data.get("experimental", False),
+        http2_chunk_min_size=transport_data.get("http2_chunk_min_size", 0),
+        http2_chunk_max_size=transport_data.get("http2_chunk_max_size", 0),
+        http2_window_update_threshold=transport_data.get("http2_window_update_threshold", 0),
+        http2_chunk_rng_seed=transport_data.get("http2_chunk_rng_seed"),
     )
 
     # Build SessionConfig

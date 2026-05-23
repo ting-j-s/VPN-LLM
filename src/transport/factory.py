@@ -285,6 +285,10 @@ def _create_http2_transport(config) -> HTTP2Transport:
     """
     path = getattr(config.transport, 'path', '/')
     server_hostname = getattr(config.transport, 'server_hostname', None)
+    chunk_min = getattr(config.transport, 'http2_chunk_min_size', 0)
+    chunk_max = getattr(config.transport, 'http2_chunk_max_size', 0)
+    wu_threshold = getattr(config.transport, 'http2_window_update_threshold', 0)
+    chunk_seed = getattr(config.transport, 'http2_chunk_rng_seed', None)
 
     if hasattr(config, 'server') and hasattr(config.server, 'host'):
         host = getattr(config.server, 'host', '127.0.0.1')
@@ -293,6 +297,8 @@ def _create_http2_transport(config) -> HTTP2Transport:
         logger.info("Creating HTTP2Transport (client): host=%s, port=%s, path=%s",
                      host, port, path)
         logger.info("HTTP/2 transport is experimental.")
+        if chunk_min > 0 or chunk_max > 0:
+            logger.info("HTTP/2 chunking enabled: min=%d, max=%d", chunk_min, chunk_max)
 
         return HTTP2Transport(
             mode=HTTP2Transport.MODE_CLIENT,
@@ -300,6 +306,10 @@ def _create_http2_transport(config) -> HTTP2Transport:
             port=port,
             path=path,
             server_hostname=server_hostname,
+            chunk_min_size=chunk_min,
+            chunk_max_size=chunk_max,
+            window_update_threshold=wu_threshold,
+            chunk_rng_seed=chunk_seed,
         )
 
     elif hasattr(config, 'server') and hasattr(config.server, 'tun_ip'):
@@ -309,6 +319,8 @@ def _create_http2_transport(config) -> HTTP2Transport:
         logger.info("Creating HTTP2Transport (server): host=%s, port=%s, path=%s",
                      host, port, path)
         logger.info("HTTP/2 transport is experimental.")
+        if chunk_min > 0 or chunk_max > 0:
+            logger.info("HTTP/2 chunking enabled: min=%d, max=%d", chunk_min, chunk_max)
 
         return HTTP2Transport(
             mode=HTTP2Transport.MODE_SERVER,
@@ -316,6 +328,10 @@ def _create_http2_transport(config) -> HTTP2Transport:
             port=port,
             path=path,
             server_hostname=server_hostname,
+            chunk_min_size=chunk_min,
+            chunk_max_size=chunk_max,
+            window_update_threshold=wu_threshold,
+            chunk_rng_seed=chunk_seed,
         )
 
     else:

@@ -12,6 +12,7 @@ importable and factory-constructable, but ``connect()`` raises a clear
 import asyncio
 import concurrent.futures
 import importlib.util
+import random as random_module
 import threading
 from typing import Optional
 
@@ -59,6 +60,10 @@ class HTTP2Transport(Transport):
         path: str = "/",
         backlog: int = 5,
         server_hostname: Optional[str] = None,
+        chunk_min_size: int = 0,
+        chunk_max_size: int = 0,
+        window_update_threshold: int = 0,
+        chunk_rng_seed: Optional[int] = None,
     ):
         if mode not in (self.MODE_CLIENT, self.MODE_SERVER):
             raise TransportError(
@@ -97,6 +102,17 @@ class HTTP2Transport(Transport):
         # Track whether the tunnel stream is open
         self._stream_open = False
         self._stream_ended = False
+
+        # HTTP/2-aware shaping (0 = disabled, preserve existing behavior)
+        self._chunk_min_size = max(0, chunk_min_size)
+        self._chunk_max_size = max(0, chunk_max_size)
+        self._chunk_enabled = self._chunk_min_size > 0 and self._chunk_max_size > 0
+        if self._chunk_enabled and self._chunk_max_size < self._chunk_min_size:
+            self._chunk_max_size = self._chunk_min_size
+        self._chunk_rng = random_module.Random(chunk_rng_seed)
+
+        self._window_update_threshold = max(0, window_update_threshold)
+        self._rx_bytes_since_update = 0
 
     # ------------------------------------------------------------------
     # Event-loop management (same pattern as WebSocketTransport)
@@ -144,6 +160,17 @@ class HTTP2Transport(Transport):
         except concurrent.futures.TimeoutError:
             future.cancel()
             raise TransportTimeout("Operation timed out")
+
+    def _flush_window_update(self, conn, writer) -> None:
+        """Flush accumulated WINDOW_UPDATE for batched flow control."""
+        if self._rx_bytes_since_update <= 0:
+            return
+        amount = self._rx_bytes_since_update
+        self._rx_bytes_since_update = 0
+        conn.increment_flow_control_window(amount)
+        out = conn.data_to_send()
+        if out and writer is not None:
+            writer.write(out)
 
     # ------------------------------------------------------------------
     # Transport interface
@@ -329,6 +356,8 @@ class HTTP2Transport(Transport):
             except asyncio.TimeoutError:
                 continue
             if not data:
+                # Flush any pending WINDOW_UPDATE before exit
+                self._flush_window_update(conn, writer)
                 break
             events = conn.receive_data(data)
             for event in events:
@@ -337,17 +366,21 @@ class HTTP2Transport(Transport):
                         event.flow_controlled_length,
                         stream_id=event.stream_id,
                     )
-                    # Increment flow control window for received data
-                    conn.increment_flow_control_window(
-                        event.flow_controlled_length,
-                        stream_id=event.stream_id,
-                    )
-                    conn.increment_flow_control_window(
-                        event.flow_controlled_length,
-                    )
-                    out = conn.data_to_send()
-                    if out:
-                        writer.write(out)
+                    if self._window_update_threshold > 0:
+                        self._rx_bytes_since_update += event.flow_controlled_length
+                        if self._rx_bytes_since_update >= self._window_update_threshold:
+                            self._flush_window_update(conn, writer)
+                    else:
+                        conn.increment_flow_control_window(
+                            event.flow_controlled_length,
+                            stream_id=event.stream_id,
+                        )
+                        conn.increment_flow_control_window(
+                            event.flow_controlled_length,
+                        )
+                        out = conn.data_to_send()
+                        if out:
+                            writer.write(out)
                     await self._rx_queue.put(event.data)
                 elif isinstance(event, h2.events.ResponseReceived):
                     # Server sent :status headers — stream is open
@@ -372,9 +405,11 @@ class HTTP2Transport(Transport):
                     pass  # h2 library handles flow control bookkeeping
                 elif isinstance(event, h2.events.StreamEnded):
                     self._stream_ended = True
+                    self._flush_window_update(conn, writer)
                     await self._rx_queue.put(None)
                     return
                 elif isinstance(event, h2.events.ConnectionTerminated):
+                    self._flush_window_update(conn, writer)
                     await self._rx_queue.put(None)
                     return
                 elif isinstance(event, h2.events.RemoteSettingsChanged):
@@ -427,10 +462,30 @@ class HTTP2Transport(Transport):
             raise TransportError(f"Send failed: {e}")
 
     async def _async_send(self, data: bytes) -> None:
-        self._h2_conn.send_data(stream_id=1, data=data, end_stream=False)
-        out = self._h2_conn.data_to_send()
-        if out and self._writer is not None:
-            self._writer.write(out)
+        if self._chunk_enabled and len(data) > self._chunk_min_size:
+            offset = 0
+            remaining = len(data)
+            while remaining > 0:
+                if remaining <= self._chunk_max_size:
+                    chunk = data[offset:]
+                    offset = len(data)
+                    remaining = 0
+                else:
+                    chunk_size = self._chunk_rng.randint(
+                        self._chunk_min_size, min(self._chunk_max_size, remaining)
+                    )
+                    chunk = data[offset:offset + chunk_size]
+                    offset += chunk_size
+                    remaining -= chunk_size
+                self._h2_conn.send_data(stream_id=1, data=chunk, end_stream=False)
+            out = self._h2_conn.data_to_send()
+            if out and self._writer is not None:
+                self._writer.write(out)
+        else:
+            self._h2_conn.send_data(stream_id=1, data=data, end_stream=False)
+            out = self._h2_conn.data_to_send()
+            if out and self._writer is not None:
+                self._writer.write(out)
 
     def recv(self, timeout: Optional[float] = None) -> Optional[bytes]:
         """Receive data from an HTTP/2 stream.
@@ -532,6 +587,7 @@ class HTTP2Transport(Transport):
         self._h2_conn = None
         self._reader = None
         self._rx_queue = asyncio.Queue()
+        self._rx_bytes_since_update = 0
         logger.info("HTTP/2 transport closed")
 
     def is_connected(self) -> bool:

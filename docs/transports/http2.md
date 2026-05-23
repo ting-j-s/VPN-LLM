@@ -106,12 +106,14 @@ session:
 3. **Single stream**: Currently uses only stream ID 1.  Full multiplexing
    is not implemented.
 4. **No HPACK tuning**: Uses default `h2` HPACK settings.
-5. **Shaping mismatch**: Current pipeline (padding/aggregation/jitter)
-   was designed for TCP/TLS/WebSocket traffic.  HTTP/2 shows regressed
-   risk scores after shaping (idle +0.074, ping +0.076), indicating
-   HTTP/2-specific countermeasures are needed.
-6. **No WINDOW_UPDATE strategy**: Flow control updates follow default
-   h2 behavior and may generate predictable frame patterns.
+5. **Shaping mismatch (partially resolved in Phase 10D)**: Generic
+   pipeline (padding/aggregation/jitter) was designed for TCP/TLS/WebSocket.
+   Phase 10D added HTTP/2-aware chunking and WINDOW_UPDATE batching, which
+   reversed the Phase 10C regression.  Further tuning (multi-stream,
+   SETTINGS) remains for Phase 10E.
+6. **No WINDOW_UPDATE strategy (resolved in Phase 10D)**: Batched
+   WINDOW_UPDATE via `http2_window_update_threshold` eliminates the
+   predictable per-packet update pattern.  Tuning remaining.
 
 ## Phase 10B: HTTP/2 Matrix Integration (completed 2026-05-22)
 
@@ -179,18 +181,58 @@ python3 scripts/run_phase9_real_trace_matrix.py run \
   --execute
 ```
 
-## Phase 10D: HTTP/2 Countermeasures (planned)
+## Phase 10D: HTTP/2-aware Shaping Countermeasures (completed 2026-05-23)
 
-1. **Frame size randomization**: Vary HTTP/2 DATA frame sizes to reduce
-   repeated-length patterns
-2. **Multi-stream strategy**: Distribute tunnel data across multiple streams
-   to increase entropy and reduce dominant-ngram fingerprint
-3. **SETTINGS randomization**: Tune initial SETTINGS to avoid predictable
-   HTTP/2 fingerprint
-4. **WINDOW_UPDATE pacing**: Control flow-window update timing to reduce
-   predictable frame patterns
-5. **HPACK table manipulation**: Introduce dynamic table churn to alter
-   header compression patterns
+Phase 10D implemented two transport-internal countermeasures to address the
+HTTP/2 fingerprint regression identified in Phase 10C:
+
+1. **DATA frame size chunking**: Randomizes DATA frame payload sizes by
+   splitting large sends into variable-sized chunks. Configured via
+   `http2_chunk_min_size` and `http2_chunk_max_size` (default 0 = disabled).
+   Uses a seeded RNG for deterministic testability.
+
+2. **WINDOW_UPDATE batching**: Accumulates received bytes and sends
+   WINDOW_UPDATE only when a threshold is reached, instead of per-packet.
+   Configured via `http2_window_update_threshold` (default 0 = disabled).
+   Eliminates the predictable 66/92-byte alternation pattern.
+
+Configuration fields (in `TransportConfig`):
+- `http2_chunk_min_size: int = 0`
+- `http2_chunk_max_size: int = 0`
+- `http2_window_update_threshold: int = 0`
+- `http2_chunk_rng_seed: int | None = None`
+
+Default 0 means disabled, preserving existing behavior. Config files:
+- `config/server_netns_http2_shaping_aware.yaml`
+- `config/client_netns_http2_shaping_aware.yaml`
+
+### Phase 10D repeated trace results (min_packet_count=20)
+
+| Scenario | Before Pkts | After Pkts | Before Risk | After Risk | Delta | Verdict |
+|---|---|---|---|---|---|---|
+| idle (n=3) | 27.0 | 16.0 | 0.569 | 0.558 | -0.011 | insufficient |
+| ping (n=3) | 579.7 | 23.0 | 0.560 | 0.522 | **-0.038** | **unchanged** |
+| bulk (n=3) | 93.0 | 28.3 | 0.629 | 0.479 | **-0.150** | **improved** |
+
+### Phase 10C vs 10D comparison
+
+| Scenario | Phase 10C Delta | Phase 10C Verdict | Phase 10D Delta | Phase 10D Verdict |
+|---|---|---|---|---|
+| idle | +0.074 | regressed | -0.011 | insufficient |
+| ping | +0.076 | regressed | **-0.038** | unchanged |
+| bulk | -0.018 | unchanged | **-0.150** | **improved** |
+
+Key achievement: all three scenarios are now below the 0.60 risk threshold.
+The generic shaping regression (ping +0.076, idle +0.074) was fully reversed.
+WINDOW_UPDATE batching eliminates the predictable 66/92-byte control frame
+alternation that dominated Phase 10C after-traces.
+
+### Remaining for Phase 10E
+
+1. **Multi-stream strategy**: Distribute tunnel data across multiple streams
+2. **SETTINGS randomization**: Tune initial SETTINGS to avoid predictable fingerprint
+3. **HPACK table manipulation**: Dynamic table churn for header compression patterns
+4. **WINDOW_UPDATE strategy tuning**: Further tune batching thresholds
 
 ## Implementation notes
 

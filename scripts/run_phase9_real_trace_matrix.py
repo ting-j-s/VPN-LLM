@@ -69,6 +69,7 @@ class RuntimeConfig:
     http_server_startup_timeout: int = 10
     post_scenario_wait: int = 2
     bulk_read_timeout: int = 60
+    http2_aware_shaping: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +272,7 @@ def _kill_server_client() -> None:
     time.sleep(0.3)
 
 
-def _get_config_for_phase(transport: str, phase: str) -> tuple[str, str]:
+def _get_config_for_phase(transport: str, phase: str, http2_aware: bool = False) -> tuple[str, str]:
     """Return (server_config, client_config) paths for a transport+phase.
 
     "before" phase: neither side uses shaping — baseline traces.
@@ -286,6 +287,8 @@ def _get_config_for_phase(transport: str, phase: str) -> tuple[str, str]:
     if transport == "http2":
         if phase == "before":
             return "config/server_netns_http2.yaml", "config/client_netns_http2.yaml"
+        if http2_aware:
+            return "config/server_netns_http2_shaping_aware.yaml", "config/client_netns_http2_shaping_aware.yaml"
         return "config/server_netns_http2_shaping.yaml", "config/client_netns_http2_shaping.yaml"
 
     if phase == "before":
@@ -778,7 +781,7 @@ def _run_one_entry(
             return result
 
         # Get configs
-        server_cfg, client_cfg = _get_config_for_phase(transport, phase)
+        server_cfg, client_cfg = _get_config_for_phase(transport, phase, cfg.http2_aware_shaping)
 
         # Start server
         server_proc = _start_server(transport, server_cfg)
@@ -960,6 +963,7 @@ def _runtime_config_from_args(args: argparse.Namespace) -> RuntimeConfig:
         http_server_startup_timeout=getattr(args, "http_server_startup_timeout", 10),
         post_scenario_wait=getattr(args, "post_scenario_wait", 2),
         bulk_read_timeout=getattr(args, "bulk_read_timeout", 60),
+        http2_aware_shaping=getattr(args, "http2_aware_shaping", False),
     )
 
 
@@ -1787,6 +1791,8 @@ def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
                         help="Post-scenario wait seconds (default: 2)")
     parser.add_argument("--bulk-read-timeout", type=int, default=60,
                         help="Bulk download read timeout seconds (default: 60)")
+    parser.add_argument("--http2-aware-shaping", action="store_true",
+                        help="Use HTTP/2-aware shaping configs (Phase 10D)")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

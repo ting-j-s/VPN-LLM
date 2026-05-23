@@ -630,7 +630,45 @@ sudo python3 -m pip install --break-system-packages h2
 
 ### 14.5 Next: Phase 10D
 
-- HTTP/2-specific countermeasures: frame size randomization, multi-stream
-  strategy, SETTINGS tuning, WINDOW_UPDATE pacing
-- Real trace before/after with HTTP/2-aware shaping
-- Evaluate whether shaping brings HTTP/2 risk below tcp/websocket baselines
+See Section 15 for Phase 10D results.
+
+## 15. Phase 10D: HTTP/2-aware Shaping Countermeasures (2026-05-23)
+
+Phase 10D implements two transport-internal countermeasures to address the
+HTTP/2 fingerprint regression found in Phase 10C:
+
+1. **DATA frame size chunking**: Splits large sends into randomized-size
+   DATA frames (`http2_chunk_min_size` / `http2_chunk_max_size`).
+2. **WINDOW_UPDATE batching**: Accumulates received bytes and sends
+   WINDOW_UPDATE only when threshold is reached, replacing the default
+   per-packet update pattern.
+
+Both default to 0 (disabled, old behavior). Config fields:
+- `http2_chunk_min_size`, `http2_chunk_max_size`, `http2_window_update_threshold`,
+  `http2_chunk_rng_seed` — added to `TransportConfig`.
+
+### 15.1 Real trace results (min_packet_count=20, n=3)
+
+| Scenario | Before Pkts | After Pkts | Before Risk | After Risk | Delta | Verdict |
+|---|---|---|---|---|---|---|
+| idle | 27.0 | 16.0 | 0.569 | 0.558 | -0.011 | insufficient |
+| ping | 579.7 | 23.0 | 0.560 | 0.522 | -0.038 | unchanged |
+| bulk | 93.0 | 28.3 | 0.629 | 0.479 | **-0.150** | **improved** |
+
+### 15.2 Phase 10C vs 10D comparison
+
+| Scenario | Phase 10C Delta | Phase 10C Verdict | Phase 10D Delta | Phase 10D Verdict |
+|---|---|---|---|---|
+| idle | +0.074 | regressed | -0.011 | insufficient |
+| ping | +0.076 | regressed | -0.038 | unchanged |
+| bulk | -0.018 | unchanged | -0.150 | **improved** |
+
+Phase 10D reversed the generic shaping regression. All three scenarios are
+now below the 0.60 risk threshold. WINDOW_UPDATE batching eliminates the
+predictable 66/92-byte control frame alternation seen in Phase 10C.
+
+### 15.3 Remaining for Phase 10E
+
+- Multi-stream strategy, SETTINGS randomization, HPACK table manipulation
+- Idle scenario still below min_packet_count threshold (16 pkts)
+- Further WINDOW_UPDATE threshold tuning

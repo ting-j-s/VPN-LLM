@@ -494,3 +494,390 @@ class TestHttp2NetnsConfig:
             pytest.skip("h2 is installed — cannot test missing-dependency path")
         with pytest.raises(TransportError, match="h2"):
             transport.connect()
+
+
+# ---------------------------------------------------------------------------
+# 14. HTTP/2-aware shaping — constructor and config
+# ---------------------------------------------------------------------------
+
+class TestHttp2ChunkingConfig:
+    """HTTP/2-aware shaping constructor and config parsing."""
+
+    def test_chunk_defaults_disabled(self):
+        t = HTTP2Transport()
+        assert t._chunk_enabled is False
+        assert t._chunk_min_size == 0
+        assert t._chunk_max_size == 0
+
+    def test_chunk_min_zero_stays_disabled(self):
+        t = HTTP2Transport(chunk_min_size=0, chunk_max_size=100)
+        assert t._chunk_enabled is False
+
+    def test_chunk_max_zero_stays_disabled(self):
+        t = HTTP2Transport(chunk_min_size=100, chunk_max_size=0)
+        assert t._chunk_enabled is False
+
+    def test_chunk_enabled_with_valid_range(self):
+        t = HTTP2Transport(chunk_min_size=256, chunk_max_size=1400)
+        assert t._chunk_enabled is True
+        assert t._chunk_min_size == 256
+        assert t._chunk_max_size == 1400
+
+    def test_chunk_max_auto_clamped_to_min(self):
+        t = HTTP2Transport(chunk_min_size=500, chunk_max_size=300)
+        assert t._chunk_max_size == 500
+
+    def test_chunk_negative_values_clamped_to_zero(self):
+        t = HTTP2Transport(chunk_min_size=-10, chunk_max_size=-5)
+        assert t._chunk_min_size == 0
+        assert t._chunk_max_size == 0
+        assert t._chunk_enabled is False
+
+    def test_fixed_seed_deterministic(self):
+        t1 = HTTP2Transport(chunk_min_size=10, chunk_max_size=50, chunk_rng_seed=42)
+        t2 = HTTP2Transport(chunk_min_size=10, chunk_max_size=50, chunk_rng_seed=42)
+        # Generate some random values and verify same sequence
+        for _ in range(10):
+            assert t1._chunk_rng.randint(10, 50) == t2._chunk_rng.randint(10, 50)
+
+    def test_none_seed_non_deterministic(self):
+        t1 = HTTP2Transport(chunk_min_size=10, chunk_max_size=50, chunk_rng_seed=None)
+        t2 = HTTP2Transport(chunk_min_size=10, chunk_max_size=50, chunk_rng_seed=None)
+        values1 = [t1._chunk_rng.randint(10, 50) for _ in range(5)]
+        values2 = [t2._chunk_rng.randint(10, 50) for _ in range(5)]
+        # Very unlikely to match for 5 values (but theoretically possible)
+        # Just verify they produce valid outputs
+        assert all(10 <= v <= 50 for v in values1)
+        assert all(10 <= v <= 50 for v in values2)
+
+    def test_window_update_threshold_default_zero(self):
+        t = HTTP2Transport()
+        assert t._window_update_threshold == 0
+        assert t._rx_bytes_since_update == 0
+
+    def test_window_update_threshold_custom(self):
+        t = HTTP2Transport(window_update_threshold=65535)
+        assert t._window_update_threshold == 65535
+
+    def test_window_update_threshold_negative_clamped(self):
+        t = HTTP2Transport(window_update_threshold=-100)
+        assert t._window_update_threshold == 0
+
+    def test_close_resets_rx_bytes_counter(self):
+        t = HTTP2Transport(window_update_threshold=1000)
+        t._rx_bytes_since_update = 500
+        t.close()
+        assert t._rx_bytes_since_update == 0
+
+
+# ---------------------------------------------------------------------------
+# 15. HTTP/2-aware shaping — async_send chunking behavior
+# ---------------------------------------------------------------------------
+
+class TestHttp2AsyncSendChunking:
+    """async_send splits payloads when chunking is enabled."""
+
+    @staticmethod
+    def _make_client_conn():
+        """Create a client h2 connection with stream 1 open for DATA."""
+        import h2.connection
+        config = h2.config.H2Configuration(client_side=True, header_encoding='utf-8')
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        # Open stream 1 — required before send_data
+        conn.send_headers(
+            stream_id=1,
+            headers=[(':method', 'POST'), (':path', '/'), (':scheme', 'http'), (':authority', '127.0.0.1:2225')],
+            end_stream=False,
+        )
+        return conn
+
+    def test_no_chunking_when_disabled(self):
+        """When chunking is disabled, single send_data call for entire payload."""
+        import asyncio
+        t = HTTP2Transport()
+        t._h2_conn = self._make_client_conn()
+        t._connected = True
+
+        sent_chunks = []
+        _orig_send = t._h2_conn.send_data
+
+        def _track(stream_id, data, end_stream=False):
+            sent_chunks.append(len(data))
+            return _orig_send(stream_id=stream_id, data=data, end_stream=end_stream)
+
+        t._h2_conn.send_data = _track
+
+        class _MockWriter:
+            def write(self, data):
+                pass
+        t._writer = _MockWriter()
+
+        async def _run():
+            await t._async_send(b"A" * 2000)
+
+        asyncio.run(_run())
+        # No chunking: single send_data call
+        assert len(sent_chunks) == 1
+        assert sent_chunks[0] == 2000
+
+    def test_chunking_splits_payload(self):
+        """Payload larger than chunk_max is split into multiple DATA frames."""
+        import asyncio
+        t = HTTP2Transport(chunk_min_size=256, chunk_max_size=512, chunk_rng_seed=42)
+        conn = self._make_client_conn()
+        t._h2_conn = conn
+        t._connected = True
+
+        sent_chunks = []
+        _orig_send = conn.send_data
+
+        def _track(stream_id, data, end_stream=False):
+            sent_chunks.append(len(data))
+            return _orig_send(stream_id=stream_id, data=data, end_stream=end_stream)
+
+        conn.send_data = _track
+
+        class _MockWriter:
+            def write(self, data):
+                pass
+        t._writer = _MockWriter()
+
+        async def _run():
+            await t._async_send(b"X" * 2000)
+
+        asyncio.run(_run())
+        # With 2000 bytes and chunk range 256-512, expect multiple chunks
+        assert len(sent_chunks) > 1
+        # Each chunk should be within range (last chunk may be smaller)
+        for i, size in enumerate(sent_chunks[:-1]):
+            assert 256 <= size <= 512, f"chunk {i} size {size} outside [256,512]"
+        # Total reassembled equals original
+        assert sum(sent_chunks) == 2000
+
+    def test_chunking_fixed_seed_produces_same_chunks(self):
+        """Same seed + same payload = same chunk sizes."""
+        import asyncio
+
+        async def _send_and_collect(t):
+            conn = TestHttp2AsyncSendChunking._make_client_conn()
+            sent = []
+            _orig = conn.send_data
+            def _track(stream_id, data, end_stream=False):
+                sent.append(len(data))
+                return _orig(stream_id=stream_id, data=data, end_stream=end_stream)
+            conn.send_data = _track
+            t._h2_conn = conn
+            t._connected = True
+
+            class _MW:
+                def write(self, data):
+                    pass
+            t._writer = _MW()
+            await t._async_send(b"D" * 1500)
+            return sent
+
+        t1 = HTTP2Transport(chunk_min_size=200, chunk_max_size=500, chunk_rng_seed=99)
+        t2 = HTTP2Transport(chunk_min_size=200, chunk_max_size=500, chunk_rng_seed=99)
+
+        chunks1 = asyncio.run(_send_and_collect(t1))
+        chunks2 = asyncio.run(_send_and_collect(t2))
+        assert chunks1 == chunks2
+        assert len(chunks1) > 1
+
+    def test_chunking_preserves_byte_order(self):
+        """Chunks concatenated in order produce the original payload."""
+        import asyncio
+
+        payload = b"".join(bytes([i % 256]) for i in range(1000))
+
+        t = HTTP2Transport(chunk_min_size=100, chunk_max_size=300, chunk_rng_seed=7)
+        conn = self._make_client_conn()
+        t._h2_conn = conn
+        t._connected = True
+
+        sent_chunks = []
+        _orig_send = conn.send_data
+
+        def _track(stream_id, data, end_stream=False):
+            sent_chunks.append(bytes(data))
+            return _orig_send(stream_id=stream_id, data=data, end_stream=end_stream)
+
+        conn.send_data = _track
+
+        class _MockWriter:
+            def write(self, data):
+                pass
+        t._writer = _MockWriter()
+
+        async def _run():
+            await t._async_send(payload)
+
+        asyncio.run(_run())
+
+        reassembled = b"".join(sent_chunks)
+        assert reassembled == payload
+        assert len(sent_chunks) > 1
+
+    def test_small_payload_not_chunked(self):
+        """Payload smaller than chunk_min is sent as a single DATA frame."""
+        import asyncio
+
+        payload = b"small"
+
+        t = HTTP2Transport(chunk_min_size=256, chunk_max_size=512)
+        conn = self._make_client_conn()
+        t._h2_conn = conn
+        t._connected = True
+
+        sent_chunks = []
+        _orig_send = conn.send_data
+
+        def _track(stream_id, data, end_stream=False):
+            sent_chunks.append(bytes(data))
+            return _orig_send(stream_id=stream_id, data=data, end_stream=end_stream)
+
+        conn.send_data = _track
+
+        class _MockWriter:
+            def write(self, data):
+                pass
+        t._writer = _MockWriter()
+
+        async def _run():
+            await t._async_send(payload)
+
+        asyncio.run(_run())
+
+        assert len(sent_chunks) == 1
+        assert sent_chunks[0] == payload
+
+
+# ---------------------------------------------------------------------------
+# 16. Factory passes HTTP/2-aware config fields
+# ---------------------------------------------------------------------------
+
+class TestFactoryHttp2AwareConfig:
+    """Factory passes http2_chunk_* and window_update_threshold fields."""
+
+    def test_factory_passes_chunk_config(self):
+        from src.transport.factory import create_transport
+
+        class _Server:
+            host = "127.0.0.1"
+            port = 2225
+
+        class _Transport:
+            type = "http2"
+            path = "/"
+            server_hostname = None
+            experimental = True
+            http2_chunk_min_size = 256
+            http2_chunk_max_size = 1400
+            http2_window_update_threshold = 65535
+            http2_chunk_rng_seed = 123
+
+        class _Cfg:
+            server = _Server()
+            transport = _Transport()
+
+        t = create_transport(_Cfg())
+        assert t._chunk_min_size == 256
+        assert t._chunk_max_size == 1400
+        assert t._chunk_enabled is True
+        assert t._window_update_threshold == 65535
+
+    def test_factory_defaults_when_fields_missing(self):
+        from src.transport.factory import create_transport
+
+        class _Server:
+            host = "127.0.0.1"
+            port = 2225
+
+        class _Transport:
+            type = "http2"
+            path = "/"
+            server_hostname = None
+            experimental = True
+
+        class _Cfg:
+            server = _Server()
+            transport = _Transport()
+
+        t = create_transport(_Cfg())
+        assert t._chunk_enabled is False
+        assert t._chunk_min_size == 0
+        assert t._chunk_max_size == 0
+        assert t._window_update_threshold == 0
+
+    def test_factory_chunking_disabled_when_fields_zero(self):
+        from src.transport.factory import create_transport
+
+        class _Server:
+            host = "127.0.0.1"
+            port = 2225
+
+        class _Transport:
+            type = "http2"
+            path = "/"
+            server_hostname = None
+            experimental = True
+            http2_chunk_min_size = 0
+            http2_chunk_max_size = 0
+            http2_window_update_threshold = 0
+
+        class _Cfg:
+            server = _Server()
+            transport = _Transport()
+
+        t = create_transport(_Cfg())
+        assert t._chunk_enabled is False
+        assert t._window_update_threshold == 0
+
+
+# ---------------------------------------------------------------------------
+# 17. Window update flush helper
+# ---------------------------------------------------------------------------
+
+class TestWindowUpdateFlush:
+    """_flush_window_update behavior."""
+
+    def test_flush_noop_when_zero_bytes(self):
+        t = HTTP2Transport(window_update_threshold=1000)
+        t._rx_bytes_since_update = 0
+
+        import h2.connection
+        config = h2.config.H2Configuration(client_side=True, header_encoding='utf-8')
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+
+        class _MockWriter:
+            def __init__(self):
+                self.writes = []
+            def write(self, data):
+                self.writes.append(data)
+
+        writer = _MockWriter()
+        t._flush_window_update(conn, writer)
+        assert t._rx_bytes_since_update == 0
+        # No WINDOW_UPDATE should be generated for zero bytes
+        # (writer.writes may or may not be empty depending on h2 internals)
+
+    def test_flush_resets_counter(self):
+        t = HTTP2Transport(window_update_threshold=1000)
+        t._rx_bytes_since_update = 500
+
+        import h2.connection
+        config = h2.config.H2Configuration(client_side=True, header_encoding='utf-8')
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+
+        class _MockWriter:
+            def __init__(self):
+                self.writes = []
+            def write(self, data):
+                self.writes.append(data)
+
+        writer = _MockWriter()
+        t._flush_window_update(conn, writer)
+        assert t._rx_bytes_since_update == 0
