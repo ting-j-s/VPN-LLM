@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 
 from src.llm.file_retriever import CandidateFile
 from src.llm.repo_indexer import RepoIndex, FileInfo
+from src.llm.task_rules import (
+    detect_transport_name,
+    get_transport_addition_required_files,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +30,7 @@ class FileSelection:
     """Partitioned file selection for patch generation."""
 
     must_edit_files: list[str] = field(default_factory=list)
+    must_create_files: list[str] = field(default_factory=list)
     must_review_files: list[str] = field(default_factory=list)
     test_files: list[str] = field(default_factory=list)
     doc_files: list[str] = field(default_factory=list)
@@ -40,7 +45,8 @@ class FileSelection:
         """All files in the selection (deduplicated)."""
         seen: set[str] = set()
         result: list[str] = []
-        for f in (self.must_edit_files + self.must_review_files +
+        for f in (self.must_edit_files + self.must_create_files +
+                  self.must_review_files +
                   self.test_files + self.doc_files):
             if f not in seen:
                 seen.add(f)
@@ -49,11 +55,12 @@ class FileSelection:
 
     @property
     def has_any_edits(self) -> bool:
-        return len(self.must_edit_files) > 0
+        return len(self.must_edit_files) > 0 or len(self.must_create_files) > 0
 
     def to_dict(self) -> dict:
         return {
             "must_edit_files": self.must_edit_files,
+            "must_create_files": self.must_create_files,
             "must_review_files": self.must_review_files,
             "test_files": self.test_files,
             "doc_files": self.doc_files,
@@ -402,6 +409,33 @@ class ImpactExpander:
                 for pat in _ALLOW_CREATE_PATTERNS.get(area_key, []):
                     allowed_create_patterns.add(pat)
 
+        # ---- Task-type mandatory file rules ----
+        task_type = getattr(plan, "task_type", "") if plan is not None else ""
+        must_create_files: set[str] = set()
+
+        if task_type in ("transport_addition", "feature_addition"):
+            transport_name = detect_transport_name(request)
+            if transport_name:
+                required = get_transport_addition_required_files(transport_name)
+
+                # must_edit: enforce that factory.py and config.py are in scope
+                for f in required["must_edit"]:
+                    if f in self._index.files:
+                        must_edit.add(f)
+                        action_sources[f] = f"task_rule:transport_addition(must_edit)"
+
+                # may_edit: add if exists, otherwise skip
+                for f in required["may_edit"]:
+                    if f in self._index.files:
+                        must_edit.add(f)
+                        action_sources[f] = f"task_rule:transport_addition(may_edit)"
+
+                # must_create: these files don't exist yet
+                for f in required["must_create"]:
+                    if f not in self._index.files:
+                        must_create_files.add(f)
+                        action_sources[f] = f"task_rule:transport_addition(must_create)"
+
         # Identify test files: from candidates + from rule patterns
         test_files: set[str] = set()
         for c in candidates:
@@ -475,6 +509,7 @@ class ImpactExpander:
 
         # Build result
         selection.must_edit_files = sorted(must_edit)
+        selection.must_create_files = sorted(must_create_files)
         selection.must_review_files = sorted(must_review - must_edit)
         selection.test_files = sorted(test_files)
         selection.doc_files = sorted(doc_files)

@@ -770,3 +770,286 @@ attempt 2
         assert attempt1.exists(), f"Missing {attempt1}"
         assert attempt2.exists(), f"Missing {attempt2}"
         assert not (task_dir / "patch.diff").exists()
+
+
+# ---------------------------------------------------------------------------
+# Tests: task_rules module
+# ---------------------------------------------------------------------------
+
+class TestDetectTransportName:
+    """Unit tests for detect_transport_name in src.llm.task_rules."""
+
+    def test_detect_socks5(self):
+        from src.llm.task_rules import detect_transport_name
+        assert detect_transport_name("add socks5 transport") == "socks5"
+        assert detect_transport_name("create a new socks5 transport") == "socks5"
+
+    def test_detect_http2(self):
+        from src.llm.task_rules import detect_transport_name
+        assert detect_transport_name("add new http2 transport") == "http2"
+        assert detect_transport_name("implement http2 protocol") == "http2"
+
+    def test_detect_with_chinese(self):
+        from src.llm.task_rules import detect_transport_name
+        assert detect_transport_name("生成并使用一种新的外层协议socks5") == "socks5"
+
+    def test_no_transport_returns_none(self):
+        from src.llm.task_rules import detect_transport_name
+        assert detect_transport_name("fix a bug in the core loop") is None
+
+    def test_common_words_filtered(self):
+        from src.llm.task_rules import detect_transport_name
+        assert detect_transport_name("add the transport") is None
+
+    def test_dash_in_name(self):
+        from src.llm.task_rules import detect_transport_name
+        assert detect_transport_name("add my-proto transport") == "my-proto"
+
+
+class TestTransportAdditionRequiredFiles:
+    """Unit tests for get_transport_addition_required_files."""
+
+    def test_returns_must_edit_and_must_create(self):
+        from src.llm.task_rules import get_transport_addition_required_files
+        result = get_transport_addition_required_files("socks5")
+        assert "src/transport/factory.py" in result["must_edit"]
+        assert "src/common/config.py" in result["must_edit"]
+        assert "src/transport/socks5_transport.py" in result["must_create"]
+        assert "tests/test_socks5_transport.py" in result["must_create"]
+        assert "docs/transports/socks5.md" in result["must_create"]
+
+    def test_works_for_any_name(self):
+        from src.llm.task_rules import get_transport_addition_required_files
+        result = get_transport_addition_required_files("quic")
+        assert "src/transport/quic_transport.py" in result["must_create"]
+        assert "tests/test_quic_transport.py" in result["must_create"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: patch completeness checker
+# ---------------------------------------------------------------------------
+
+class TestPatchCompleteness:
+    """Unit tests for check_patch_completeness in src.llm.patch_generator."""
+
+    def _make_create_diff(self, filepath: str, content: str) -> str:
+        lines = content.splitlines(keepends=True)
+        line_count = len(lines) if lines else 0
+        diff = (
+            f"diff --git a/{filepath} b/{filepath}\n"
+            f"new file mode 100644\n"
+            f"index 0000000..0000000\n"
+            f"--- /dev/null\n"
+            f"+++ b/{filepath}\n"
+            f"@@ -0,0 +1,{line_count} @@\n"
+        )
+        for line in lines:
+            diff += f"+{line}"
+        return diff
+
+    def test_complete_patch_passes(self):
+        from src.llm.patch_generator import check_patch_completeness
+        diff = (
+            self._make_create_diff(
+                "src/transport/socks5_transport.py",
+                "class Socks5Transport:\n    pass\n",
+            )
+            + self._make_create_diff(
+                "tests/test_socks5_transport.py",
+                "def test_dummy():\n    assert True\n",
+            )
+        )
+        result = check_patch_completeness(diff,
+            must_create_files=[
+                "src/transport/socks5_transport.py",
+                "tests/test_socks5_transport.py",
+            ])
+        assert result.passed
+        assert len(result.missing_files) == 0
+        assert len(result.truncated_files) == 0
+        assert len(result.syntax_errors) == 0
+
+    def test_missing_file_detected(self):
+        from src.llm.patch_generator import check_patch_completeness
+        diff = self._make_create_diff(
+            "src/transport/socks5_transport.py",
+            "class Socks5Transport:\n    pass\n",
+        )
+        result = check_patch_completeness(diff,
+            must_create_files=[
+                "src/transport/socks5_transport.py",
+                "tests/test_socks5_transport.py",
+                "docs/transports/socks5.md",
+            ])
+        assert not result.passed
+        assert "tests/test_socks5_transport.py" in result.missing_files
+        assert "docs/transports/socks5.md" in result.missing_files
+
+    def test_truncated_backslash_detected(self):
+        from src.llm.patch_generator import check_patch_completeness
+        diff = self._make_create_diff(
+            "src/transport/socks5_transport.py",
+            "self._server_s\\\n",
+        )
+        result = check_patch_completeness(diff)
+        assert not result.passed
+        assert len(result.truncated_files) > 0
+        assert any("socks5" in t for t in result.truncated_files)
+
+    def test_unclosed_triple_quote_detected(self):
+        from src.llm.patch_generator import check_patch_completeness
+        diff = self._make_create_diff(
+            "src/transport/socks5_transport.py",
+            '"""unclosed docstring\n',
+        )
+        result = check_patch_completeness(diff)
+        assert not result.passed
+        assert len(result.truncated_files) > 0
+
+    def test_syntax_error_detected(self):
+        from src.llm.patch_generator import check_patch_completeness
+        diff = self._make_create_diff(
+            "src/transport/socks5_transport.py",
+            "def broken(:\n    pass\n",
+        )
+        result = check_patch_completeness(diff)
+        assert not result.passed
+        assert len(result.syntax_errors) > 0
+
+    def test_planned_vs_actual_warning(self):
+        from src.llm.patch_generator import check_patch_completeness
+        diff = self._make_create_diff(
+            "src/transport/socks5_transport.py",
+            "class Socks5Transport:\n    pass\n",
+        )
+        result = check_patch_completeness(diff,
+            must_create_files=[
+                "src/transport/socks5_transport.py",
+                "tests/test_socks5_transport.py",
+                "docs/transports/socks5.md",
+            ],
+            must_edit_files=[
+                "src/transport/factory.py",
+                "src/common/config.py",
+            ])
+        assert not result.passed
+        assert result.planned_file_count == 5
+        assert result.actual_file_count == 1
+        assert any("Planned 5" in w for w in result.warnings)
+
+    def test_complete_transport_addition_passes(self):
+        """A full transport addition patch should pass completeness check."""
+        from src.llm.patch_generator import check_patch_completeness
+        transport_code = (
+            "class Socks5Transport:\n"
+            '    """SOCKS5 transport skeleton."""\n'
+            "    def __init__(self):\n"
+            "        pass\n"
+            "    def connect(self):\n"
+            '        raise NotImplementedError("skeleton")\n'
+            "    def close(self):\n"
+            "        pass\n"
+        )
+        test_code = (
+            "def test_import():\n"
+            "    from src.transport.socks5_transport import Socks5Transport\n"
+            "    t = Socks5Transport()\n"
+            "    assert t is not None\n"
+        )
+        doc_code = "# SOCKS5 Transport\n\nSkeleton implementation.\n"
+
+        diff = (
+            self._make_create_diff("src/transport/socks5_transport.py", transport_code)
+            + self._make_create_diff("tests/test_socks5_transport.py", test_code)
+            + self._make_create_diff("docs/transports/socks5.md", doc_code)
+        )
+        result = check_patch_completeness(diff,
+            must_create_files=[
+                "src/transport/socks5_transport.py",
+                "tests/test_socks5_transport.py",
+                "docs/transports/socks5.md",
+            ])
+        assert result.passed, (
+            f"missing={result.missing_files} "
+            f"truncated={result.truncated_files} "
+            f"syntax={result.syntax_errors}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: ImpactExpander must_create_files for transport_addition
+# ---------------------------------------------------------------------------
+
+class TestImpactExpanderMustCreate:
+    """Verify ImpactExpander adds must_create_files for transport_addition tasks."""
+
+    def test_transport_addition_generates_must_create(self, tmp_path, monkeypatch):
+        """ImpactExpander must add factory.py, config.py to must_edit and
+        new transport files to must_create."""
+        repo = _make_temp_git_repo(tmp_path)
+        record_dir = str(tmp_path / ".llm_tasks")
+
+        plan_extra = {
+            "task_type": "transport_addition",
+            "target_transport": None,
+            "summary": "Add SOCKS5 transport skeleton",
+            "candidate_files": [],
+            "risk_level": "high",
+        }
+        _setup_mock_api(monkeypatch, plan_extra=plan_extra, patch_text=_valid_edits())
+        _mock_validation_methods(monkeypatch)
+
+        rc = _run_main(monkeypatch, repo,
+                       ["--generate-patch"],
+                       record_dir,
+                       request="add a new socks5 transport skeleton with config support, tests and docs")
+
+        # Check file_selection.json was written and contains must_create_files
+        task_dirs = list((tmp_path / ".llm_tasks").iterdir())
+        assert len(task_dirs) > 0
+        selection_path = task_dirs[0] / "file_selection.json"
+        assert selection_path.exists(), f"Missing {selection_path}"
+        selection = json.loads(selection_path.read_text())
+
+        must_create = selection.get("must_create_files", [])
+        assert "src/transport/socks5_transport.py" in must_create, (
+            f"must_create_files={must_create}"
+        )
+        assert "tests/test_socks5_transport.py" in must_create
+        assert "docs/transports/socks5.md" in must_create
+
+        must_edit = selection.get("must_edit_files", [])
+        assert "src/transport/factory.py" in must_edit, (
+            f"must_edit_files={must_edit}"
+        )
+        assert "src/common/config.py" in must_edit
+
+    def test_http2_request_not_affected(self, tmp_path, monkeypatch):
+        """HTTP/2 request with transport_addition should also get must_create."""
+        repo = _make_temp_git_repo(tmp_path)
+        record_dir = str(tmp_path / ".llm_tasks")
+
+        plan_extra = {
+            "task_type": "transport_addition",
+            "target_transport": None,
+            "summary": "Add HTTP/2 transport",
+            "candidate_files": [],
+            "risk_level": "medium",
+        }
+        _setup_mock_api(monkeypatch, plan_extra=plan_extra, patch_text=_valid_edits())
+        _mock_validation_methods(monkeypatch)
+
+        rc = _run_main(monkeypatch, repo,
+                       ["--generate-patch"],
+                       record_dir,
+                       request="add new http2 transport")
+
+        task_dirs = list((tmp_path / ".llm_tasks").iterdir())
+        assert len(task_dirs) > 0
+        selection_path = task_dirs[0] / "file_selection.json"
+        selection = json.loads(selection_path.read_text())
+
+        must_create = selection.get("must_create_files", [])
+        assert "src/transport/http2_transport.py" in must_create, (
+            f"must_create_files={must_create}"
+        )

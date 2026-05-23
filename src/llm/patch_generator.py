@@ -10,6 +10,7 @@ import os
 import re
 import urllib.request
 import urllib.error
+from dataclasses import dataclass, field
 
 import yaml
 
@@ -296,6 +297,7 @@ class LLMPatchGenerator:
                  allowed_edit_files: list[str] | None = None,
                  allowed_create_paths: list[str] | None = None,
                  allowed_create_patterns: list[str] | None = None,
+                 must_create_files: list[str] | None = None,
                  task_dir: str | None = None) -> str:
         """Generate a unified diff for the given request and plan.
 
@@ -332,6 +334,7 @@ class LLMPatchGenerator:
             raw = self._call_api(user_request, task_plan, repository_context,
                                 allowed_edit_files, allowed_create_paths,
                                 allowed_create_patterns,
+                                must_create_files=must_create_files,
                                 extra_messages=extra_messages)
 
             # Phase 1: Strict protocol — response must start with FILE:
@@ -544,6 +547,7 @@ class LLMPatchGenerator:
                   allowed_edit_files: list[str] | None = None,
                   allowed_create_paths: list[str] | None = None,
                   allowed_create_patterns: list[str] | None = None,
+                  must_create_files: list[str] | None = None,
                   extra_messages: list[dict] | None = None) -> str:
         planner_type = "llm_based" if hasattr(task_plan, "summary") else "rule_based"
         plan_summary = getattr(task_plan, "summary", "") or getattr(task_plan, "description", "")
@@ -555,11 +559,39 @@ class LLMPatchGenerator:
         }
 
         # Add file selection constraints to the prompt
+        task_type = task_plan.task_type if hasattr(task_plan, "task_type") else ""
         constraints = ""
+
+        # ---- Output budget strategy for large multi-file tasks ----
+        planned_edit = len(allowed_edit_files or [])
+        planned_create = len(must_create_files or [])
+        planned_total = planned_edit + planned_create
+        if task_type in ("transport_addition", "feature_addition") and planned_total >= 4:
+            constraints += (
+                "\nOUTPUT BUDGET WARNING: This task requires editing ~"
+                f"{planned_edit} files and creating ~{planned_create} files "
+                f"({planned_total} total).\n"
+                "You MUST generate a complete FILE: block for EVERY required file. "
+                "Do NOT truncate any file mid-line. Each FILE block must end with "
+                "a complete line and newline. For new transport implementations, "
+                "generate a SKELETON only — the class must be importable and "
+                "constructable, but methods like connect() should raise "
+                "NotImplementedError or a clear skeleton message. "
+                "Full protocol implementation belongs in a follow-up task.\n"
+            )
+
         if allowed_edit_files:
             constraints += (
                 f"\nALLOWED EDIT FILES (you may ONLY edit these):\n"
                 + "\n".join(f"  - {f}" for f in allowed_edit_files)
+            )
+        if must_create_files:
+            constraints += (
+                f"\nMUST CREATE FILES (you MUST generate ALL of these):\n"
+                + "\n".join(f"  - {f}" for f in must_create_files)
+                + "\n\nIMPORTANT: Every file listed under MUST CREATE FILES must appear "
+                "as a FILE: block with ACTION: create. Missing any of these files "
+                "means the patch is INCOMPLETE and will be REJECTED."
             )
         if allowed_create_paths:
             constraints += (
@@ -790,6 +822,10 @@ class LLMPatchGenerator:
                     parts.append(f"+{line}")
 
                 if not had_newline:
+                    # Ensure the marker is on its own line: if the last
+                    # content line lacks \n, prepend one to the marker.
+                    if parts and not parts[-1].endswith("\n"):
+                        parts.append("\n")
                     parts.append("\\ No newline at end of file\n")
             else:
                 # Standard replace
@@ -938,3 +974,196 @@ class LLMPatchGenerator:
                 raise LLMPatchGeneratorError(
                     f"Diff contains suspected {label}: {snippet}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Patch completeness validation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PatchCompletenessResult:
+    """Result of checking a generated patch for completeness."""
+
+    passed: bool
+    planned_file_count: int
+    actual_file_count: int
+    missing_files: list[str] = field(default_factory=list)
+    truncated_files: list[str] = field(default_factory=list)
+    syntax_errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "passed": self.passed,
+            "planned_file_count": self.planned_file_count,
+            "actual_file_count": self.actual_file_count,
+            "missing_files": self.missing_files,
+            "truncated_files": self.truncated_files,
+            "syntax_errors": self.syntax_errors,
+            "warnings": self.warnings,
+        }
+
+
+def check_patch_completeness(
+    patch_text: str,
+    must_create_files: list[str] | None = None,
+    must_edit_files: list[str] | None = None,
+) -> PatchCompletenessResult:
+    """Validate a generated patch for completeness and integrity.
+
+    Checks:
+    1. File count: planned vs actual FILE blocks
+    2. Required files: must_create files are all present
+    3. Truncation: no file ends mid-line
+    4. Syntax: Python files parse without error
+
+    Args:
+        patch_text: The generated unified diff text.
+        must_create_files: Files that MUST appear as new-file blocks.
+        must_edit_files: Files that SHOULD appear as edit blocks.
+
+    Returns:
+        PatchCompletenessResult with pass/fail and details.
+    """
+    import ast
+
+    must_create = must_create_files or []
+    must_edit = must_edit_files or []
+    planned_count = len(must_create) + len(must_edit)
+    warnings: list[str] = []
+    truncated_files: list[str] = []
+    syntax_errors: list[str] = []
+    missing_files: list[str] = []
+
+    # Extract file paths from the diff
+    actual_paths = _extract_diff_file_paths(patch_text)
+    actual_count = len(actual_paths)
+
+    # 1. File count check
+    if planned_count > 0 and actual_count < planned_count:
+        warnings.append(
+            f"Planned {planned_count} files but patch only contains {actual_count}"
+        )
+
+    # 2. Required files presence
+    for f in must_create:
+        # Normalize: diff paths use a/ and b/ prefixes
+        if f not in actual_paths:
+            missing_files.append(f)
+
+    # 3. Truncation check — parse the diff hunks
+    new_file_content: dict[str, str] = {}
+    current_file = None
+    in_hunk = False
+    for line in patch_text.splitlines():
+        # Detect new file sections
+        if line.startswith("--- /dev/null"):
+            # Next +++ b/ line names the new file
+            continue
+        if line.startswith("+++ b/"):
+            current_file = line[6:]
+            new_file_content[current_file] = ""
+            in_hunk = False
+            continue
+        if line.startswith("@@") and current_file:
+            in_hunk = True
+            continue
+        if in_hunk and current_file and line.startswith("+"):
+            # Strip the leading +
+            content_line = line[1:]
+            # Strip git's "no newline" marker if it appears on the same line
+            no_nl_pos = content_line.find("\\ No newline at end of file")
+            if no_nl_pos >= 0:
+                content_line = content_line[:no_nl_pos]
+            new_file_content[current_file] += content_line + "\n"
+
+    for fpath, content in new_file_content.items():
+        if not content:
+            continue
+        # Check for mid-line truncation: last meaningful char is backslash
+        stripped = content.rstrip()
+        if stripped.endswith("\\"):
+            truncated_files.append(f"{fpath} (ends with backslash)")
+            continue
+
+        # Check for unclosed triple quotes
+        if stripped.count('"""') % 2 != 0:
+            truncated_files.append(f"{fpath} (unclosed triple-quoted string)")
+            continue
+        if stripped.count("'''") % 2 != 0:
+            truncated_files.append(f"{fpath} (unclosed triple-quoted string)")
+            continue
+
+        # Check for unbalanced brackets
+        brackets = {"(": ")", "[": "]", "{": "}"}
+        stack = []
+        in_string = False
+        string_char = ""
+        for ch in content:
+            if in_string:
+                if ch == string_char:
+                    in_string = False
+                continue
+            if ch in ('"', "'"):
+                in_string = True
+                string_char = ch
+                continue
+            if ch in brackets:
+                stack.append(brackets[ch])
+            elif ch in brackets.values():
+                if stack and stack[-1] == ch:
+                    stack.pop()
+        if stack:
+            truncated_files.append(
+                f"{fpath} (unclosed brackets: {''.join(stack[-3:])})"
+            )
+
+        # 4. Syntax check for Python files
+        if fpath.endswith(".py"):
+            try:
+                ast.parse(content)
+            except SyntaxError as e:
+                syntax_errors.append(f"{fpath}:{e.lineno}: {e.msg}")
+
+    # Determine overall pass/fail
+    passed = (
+        len(missing_files) == 0
+        and len(truncated_files) == 0
+        and len(syntax_errors) == 0
+    )
+
+    return PatchCompletenessResult(
+        passed=passed,
+        planned_file_count=planned_count,
+        actual_file_count=actual_count,
+        missing_files=missing_files,
+        truncated_files=truncated_files,
+        syntax_errors=syntax_errors,
+        warnings=warnings,
+    )
+
+
+def _extract_diff_file_paths(diff_text: str) -> list[str]:
+    """Extract file paths referenced in a unified diff.
+
+    Standalone helper for check_patch_completeness (avoids circular import).
+    """
+    _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$")
+    _DIFF_A_RE = re.compile(r"^--- a/(.+?)$")
+    _DIFF_B_RE = re.compile(r"^\+\+\+ b/(.+?)$")
+
+    paths = set()
+    for line in diff_text.splitlines():
+        m = _DIFF_GIT_RE.match(line)
+        if m:
+            paths.add(m.group(1))
+            paths.add(m.group(2))
+            continue
+        m = _DIFF_A_RE.match(line)
+        if m:
+            paths.add(m.group(1))
+            continue
+        m = _DIFF_B_RE.match(line)
+        if m:
+            paths.add(m.group(1))
+    return sorted(paths)

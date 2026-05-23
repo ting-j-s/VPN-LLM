@@ -170,6 +170,24 @@ _TASK_TYPE_RULES: dict[str, dict[str, list[str]]] = {
         "config_patterns": [],
         "script_patterns": [],
     },
+    "transport_addition": {
+        "patterns": [
+            "src/transport/base.py",
+            "src/transport/factory.py",
+            "src/common/config.py",
+            "src/transport/__init__.py",
+        ],
+        "keywords": ["transport", "factory", "config"],
+        "test_patterns": [
+            "test_transport",
+            "test_tcp_transport",
+            "test_http2_transport",
+            "test_websocket_transport",
+        ],
+        "doc_patterns": ["docs/transports/"],
+        "config_patterns": ["config/", "src/common/config.py"],
+        "script_patterns": [],
+    },
     "mixed_feature": {
         "patterns": ["src/", "tests/"],
         "keywords": [],
@@ -184,7 +202,7 @@ _TASK_TYPE_RULES: dict[str, dict[str, list[str]]] = {
 # Mapping from task_type to affected area keys
 _TASK_TO_AREA: dict[str, list[str]] = {
     "transport_change": ["transport", "config", "test", "docs"],
-    "transport_addition": ["transport", "config", "test", "docs", "transport_addition"],
+    "transport_addition": ["transport_addition", "transport", "config", "test", "docs"],
     "core_change": ["core", "test", "docs"],
     "config_change": ["config", "test", "docs"],
     "test_addition": ["test"],
@@ -201,6 +219,21 @@ _TASK_TO_AREA: dict[str, list[str]] = {
     "unknown": ["mixed_feature"],
 }
 
+
+# Maximum candidates per task type to limit noise.
+# None means no cap (return all).
+_MAX_CANDIDATES_FOR_TASK: dict[str, int | None] = {
+    "transport_addition": 50,
+    "transport_change": 80,
+    "feature_addition": 60,
+    "core_change": 80,
+    "config_change": 40,
+    "bugfix": 100,
+    "refactor": 100,
+    "fingerprint_mitigation": 80,
+    "traffic_shaping": 60,
+    "llm_detection": 60,
+}
 
 # Score weights per strategy
 _SCORE_KEYWORD = 0.9
@@ -310,6 +343,13 @@ class FileRetriever:
 
         # Sort by score descending
         result = sorted(seen.values(), key=lambda c: c.score, reverse=True)
+
+        # Cap candidates for broad task types to limit noise
+        task_type = getattr(plan, "task_type", "") if plan is not None else ""
+        max_candidates = _MAX_CANDIDATES_FOR_TASK.get(task_type)
+        if max_candidates is not None and len(result) > max_candidates:
+            result = result[:max_candidates]
+
         return result
 
     # ------------------------------------------------------------------

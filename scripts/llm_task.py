@@ -578,10 +578,12 @@ def main():
         allowed_edit_files = None
         allowed_create_paths = None
         allowed_create_patterns = None
+        must_create_files = None
         if file_selection is not None:
             allowed_edit_files = list(file_selection.must_edit_files)
             allowed_create_paths = list(file_selection.allowed_create_paths) or None
             allowed_create_patterns = list(file_selection.allowed_create_patterns) or None
+            must_create_files = list(file_selection.must_create_files) or None
 
         task_dir = record_mgr.get_task_dir(task_id) if record_mgr else None
 
@@ -591,6 +593,7 @@ def main():
                 allowed_edit_files=allowed_edit_files,
                 allowed_create_paths=allowed_create_paths,
                 allowed_create_patterns=allowed_create_patterns,
+                must_create_files=must_create_files,
                 task_dir=task_dir,
             )
             print("Patch generated successfully")
@@ -629,6 +632,86 @@ def main():
             patch_file_paths = PG._parse_file_paths(patch_text)
             print(f"Files in patch: {', '.join(patch_file_paths) if patch_file_paths else '(none)'}")
 
+            # ---- Patch completeness validation ----
+            from src.llm.patch_generator import check_patch_completeness
+            completeness = check_patch_completeness(
+                patch_text,
+                must_create_files=must_create_files,
+                must_edit_files=allowed_edit_files,
+            )
+            print(f"Completeness check: {'PASS' if completeness.passed else 'FAIL'}")
+            if completeness.missing_files:
+                print(f"  Missing files: {completeness.missing_files}")
+            if completeness.truncated_files:
+                print(f"  Truncated files: {completeness.truncated_files}")
+            if completeness.syntax_errors:
+                print(f"  Syntax errors: {completeness.syntax_errors}")
+            if completeness.warnings:
+                for w in completeness.warnings:
+                    print(f"  Warning: {w}")
+
+            # Save completeness result
+            record_mgr._write_file(
+                task_id, "completeness_check.json",
+                json.dumps(completeness.to_dict(), indent=2),
+            )
+
+            # ---- Retry prompt generation on completeness failure ----
+            if not completeness.passed:
+                retry_lines = ["# Patch Generation Retry Prompt", ""]
+                retry_lines.append(
+                    "The previously generated patch was INCOMPLETE. "
+                    "Regenerate with the following fixes:"
+                )
+                retry_lines.append("")
+                if completeness.missing_files:
+                    retry_lines.append("## Missing Files (MUST be generated)")
+                    for f in completeness.missing_files:
+                        retry_lines.append(f"- `{f}`")
+                    retry_lines.append("")
+                if completeness.truncated_files:
+                    retry_lines.append("## Truncated Files (MUST be completed)")
+                    for f in completeness.truncated_files:
+                        retry_lines.append(f"- `{f}`")
+                    retry_lines.append("")
+                if completeness.syntax_errors:
+                    retry_lines.append("## Syntax Errors (MUST be fixed)")
+                    for f in completeness.syntax_errors:
+                        retry_lines.append(f"- `{f}`")
+                    retry_lines.append("")
+                if completeness.warnings:
+                    retry_lines.append("## Additional Warnings")
+                    for w in completeness.warnings:
+                        retry_lines.append(f"- {w}")
+                    retry_lines.append("")
+
+                retry_lines.append("## Instructions")
+                retry_lines.append("")
+                task_type = plan.task_type if hasattr(plan, "task_type") else ""
+                if task_type in ("transport_addition", "feature_addition"):
+                    retry_lines.append(
+                        "- Generate a SKELETON implementation only. "
+                        "The class must be importable and constructable, but "
+                        "methods like connect() should raise NotImplementedError "
+                        "or a clear 'skeleton not yet implemented' message."
+                    )
+                    retry_lines.append(
+                        "- Full protocol implementation belongs in a follow-up task."
+                    )
+                retry_lines.append(
+                    "- Output a complete FILE: block for EVERY required file."
+                )
+                retry_lines.append(
+                    "- Do NOT include introductions, explanations, or markdown fences."
+                )
+                retry_lines.append(
+                    "- Ensure every file ends with a complete line."
+                )
+
+                retry_prompt = "\n".join(retry_lines)
+                record_mgr._write_file(task_id, "retry_prompt.txt", retry_prompt)
+                print(f"Retry prompt saved to: {task_dir}/retry_prompt.txt")
+
             # Artifact coverage check
             artifact_coverage_warnings = _check_artifact_coverage(
                 args.request, plan.task_type, patch_file_paths,
@@ -643,14 +726,20 @@ def main():
             print("Running git apply --check...")
             git_apply_check_result = runner.run_git_apply_check(patch_path)
             if git_apply_check_result.success:
-                print("  git apply --check: PASS (patch would apply cleanly)")
+                if not completeness.passed:
+                    print("  git apply --check: PASS (but completeness check FAILED — do not apply)")
+                else:
+                    print("  git apply --check: PASS (patch would apply cleanly)")
             else:
                 print(f"  git apply --check: FAIL (returncode={git_apply_check_result.returncode})")
                 if git_apply_check_result.stderr:
                     print(f"  {git_apply_check_result.stderr.strip()[:500]}")
 
             print()
-            print(">>> PATCH WAS NOT APPLIED. Review patch.diff manually before applying. <<<")
+            if not completeness.passed:
+                print(">>> PATCH IS INCOMPLETE. Review retry_prompt.txt and re-generate. <<<")
+            else:
+                print(">>> PATCH WAS NOT APPLIED. Review patch.diff manually before applying. <<<")
             print()
         else:
             print()
