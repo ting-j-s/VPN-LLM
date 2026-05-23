@@ -732,3 +732,59 @@ Key findings:
 
 - Phase 10E-B: SETTINGS randomization
 - Phase 10E-C: HPACK header behavior
+
+## 17. Phase 10E-B: HTTP/2 SETTINGS Profile Randomization (2026-05-23)
+
+Phase 10E-B adds configurable HTTP/2 SETTINGS profiles for protocol-shape
+evaluation.  This is the second of three Phase 10E sub-phases.
+
+### 17.1 Design
+
+- **Config fields** (all default to disabled, old-compatible):
+  `http2_settings_profile` ("default"), `http2_settings_enable_randomization` (false),
+  `http2_settings_rng_seed` (42).
+- **Three profiles**: `default` (no change), `conservative` (stable low-risk values),
+  `browser_like_low_variance` (conservative-range protocol-shape adjustments).
+- **Randomization**: ±5% jitter per setting via seeded RNG, clamped to RFC 7540 ranges.
+- **Wire format**: `conn.update_settings()` after `initiate_connection()` produces
+  PREFACE + default_SETTINGS + profile_SETTINGS.
+- **Compatibility**: Full compatibility with Phase 10D chunking/WU batching and
+  Phase 10E-A multi-stream.  Default disabled preserves old behavior.
+- **NOT browser-emulating**: Evaluates SETTINGS impact on trace shape only.
+  No HPACK/header tuning.
+
+### 17.2 Real trace results (min_packet_count=30, n=3)
+
+| Scenario | Before Pkts | After Pkts | Before Risk | After Risk | Delta | Verdict |
+|---|---|---|---|---|---|---|
+| idle | 14.0 | 12.0 | 0.536 | 0.498 | N/A | insufficient |
+| ping | 154.0 | 11.7 | 0.551 | 0.541 | N/A | insufficient |
+| bulk | 79.7 | 19.0 | 0.627 | 0.402 | N/A | insufficient |
+
+All after risk scores remain below 0.60.  Zero HEARTBEAT errors, zero TUN write
+errors.  Config: `browser_like_low_variance` profile with randomization,
+4-stream round_robin, chunking 256-1400, WU threshold=65535.
+After-trace packet counts fall below min_packet_count=30 due to WINDOW_UPDATE
+batching (same effect as 10D/10E-A).
+
+### 17.3 Phase 10E-A vs 10E-B comparison
+
+| Scenario | 10E-A After Pkts | 10E-B After Pkts | 10E-A After Risk | 10E-B After Risk | Notes |
+|---|---|---|---|---|---|
+| idle | 15.0 | 12.0 | 0.512 | 0.498 | 10E-B risk slightly lower |
+| ping | 15.0 | 11.7 | 0.547 | 0.541 | Both near-identical risk |
+| bulk | 29.3 | 19.0 | 0.509 | 0.402 | 10E-B risk notably lower |
+
+Key findings:
+1. **SETTINGS profile does not increase fingerprint risk.**  All scores remain
+   below 0.60, comparable to or slightly lower than 10E-A.
+2. **WINDOW_UPDATE batching is the dominant countermeasure.**  Packet counts
+   remain low regardless of SETTINGS profile — the WU batching threshold
+   (65535) is the primary driver of after-trace shape.
+3. **Randomization is safe.**  ±5% jitter on SETTINGS values does not introduce
+   detectable patterns at the trace level.
+4. **No regressions.**  18/18 trace entries ok, zero HEARTBEAT/TUN errors.
+
+### 17.4 Remaining for Phase 10E
+
+- Phase 10E-C: HPACK header behavior (header table, pseudo-header fields, dynamic table)

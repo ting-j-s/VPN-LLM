@@ -78,6 +78,10 @@ class TransportConfig:
     http2_stream_assignment: str = "single"
     http2_stream_rng_seed: Optional[int] = None
     http2_max_concurrent_streams: int = 8
+    # HTTP/2 SETTINGS profile (Phase 10E-B, default = disabled, preserve existing behavior)
+    http2_settings_profile: str = "default"
+    http2_settings_enable_randomization: bool = False
+    http2_settings_rng_seed: int = 42
 
 
 @dataclass
@@ -233,6 +237,9 @@ def load_client_config(path: str) -> ClientConfig:
         http2_stream_assignment=transport_data.get("http2_stream_assignment", "single"),
         http2_stream_rng_seed=transport_data.get("http2_stream_rng_seed"),
         http2_max_concurrent_streams=transport_data.get("http2_max_concurrent_streams", 8),
+        http2_settings_profile=transport_data.get("http2_settings_profile", "default"),
+        http2_settings_enable_randomization=transport_data.get("http2_settings_enable_randomization", False),
+        http2_settings_rng_seed=transport_data.get("http2_settings_rng_seed", 42),
     )
 
     # SSH-specific validation (only when using SSH transport)
@@ -310,6 +317,9 @@ def load_server_config(path: str) -> ServerConfig:
         http2_stream_assignment=transport_data.get("http2_stream_assignment", "single"),
         http2_stream_rng_seed=transport_data.get("http2_stream_rng_seed"),
         http2_max_concurrent_streams=transport_data.get("http2_max_concurrent_streams", 8),
+        http2_settings_profile=transport_data.get("http2_settings_profile", "default"),
+        http2_settings_enable_randomization=transport_data.get("http2_settings_enable_randomization", False),
+        http2_settings_rng_seed=transport_data.get("http2_settings_rng_seed", 42),
     )
 
     # Build SessionConfig

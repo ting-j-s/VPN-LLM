@@ -71,6 +71,7 @@ class RuntimeConfig:
     bulk_read_timeout: int = 60
     http2_aware_shaping: bool = False
     http2_multistream: bool = False
+    http2_settings: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -274,12 +275,15 @@ def _kill_server_client() -> None:
 
 
 def _get_config_for_phase(transport: str, phase: str, http2_aware: bool = False,
-                         http2_multistream: bool = False) -> tuple[str, str]:
+                         http2_multistream: bool = False,
+                         http2_settings: bool = False) -> tuple[str, str]:
     """Return (server_config, client_config) paths for a transport+phase.
 
     "before" phase: neither side uses shaping — baseline traces.
     "after" phase: BOTH sides use the same shaping pipeline so that
     encode/decode is symmetric and the TUN data path remains correct.
+
+    HTTP/2 config priority: settings > multistream > aware-shaping > base.
     """
     if transport == "tls":
         if phase == "before":
@@ -289,6 +293,8 @@ def _get_config_for_phase(transport: str, phase: str, http2_aware: bool = False,
     if transport == "http2":
         if phase == "before":
             return "config/server_netns_http2.yaml", "config/client_netns_http2.yaml"
+        if http2_settings:
+            return "config/server_netns_http2_settings.yaml", "config/client_netns_http2_settings.yaml"
         if http2_multistream:
             return "config/server_netns_http2_multistream.yaml", "config/client_netns_http2_multistream.yaml"
         if http2_aware:
@@ -786,7 +792,7 @@ def _run_one_entry(
 
         # Get configs
         server_cfg, client_cfg = _get_config_for_phase(
-            transport, phase, cfg.http2_aware_shaping, cfg.http2_multistream)
+            transport, phase, cfg.http2_aware_shaping, cfg.http2_multistream, cfg.http2_settings)
 
         # Start server
         server_proc = _start_server(transport, server_cfg)
@@ -970,6 +976,7 @@ def _runtime_config_from_args(args: argparse.Namespace) -> RuntimeConfig:
         bulk_read_timeout=getattr(args, "bulk_read_timeout", 60),
         http2_aware_shaping=getattr(args, "http2_aware_shaping", False),
         http2_multistream=getattr(args, "http2_multistream", False),
+        http2_settings=getattr(args, "http2_settings", False),
     )
 
 
@@ -1801,6 +1808,8 @@ def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
                         help="Use HTTP/2-aware shaping configs (Phase 10D)")
     parser.add_argument("--http2-multistream", action="store_true",
                         help="Use HTTP/2 multi-stream configs (Phase 10E-A)")
+    parser.add_argument("--http2-settings", action="store_true",
+                        help="Use HTTP/2 SETTINGS profile configs (Phase 10E-B)")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

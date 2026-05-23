@@ -293,6 +293,9 @@ def _create_http2_transport(config) -> HTTP2Transport:
     stream_assignment = getattr(config.transport, 'http2_stream_assignment', 'single')
     stream_seed = getattr(config.transport, 'http2_stream_rng_seed', None)
     max_concurrent = getattr(config.transport, 'http2_max_concurrent_streams', 8)
+    settings_profile = getattr(config.transport, 'http2_settings_profile', 'default')
+    settings_rand = getattr(config.transport, 'http2_settings_enable_randomization', False)
+    settings_seed = getattr(config.transport, 'http2_settings_rng_seed', 42)
 
     if hasattr(config, 'server') and hasattr(config.server, 'host'):
         host = getattr(config.server, 'host', '127.0.0.1')
@@ -306,6 +309,9 @@ def _create_http2_transport(config) -> HTTP2Transport:
         if stream_count > 1:
             logger.info("HTTP/2 multi-stream enabled: count=%d, assignment=%s",
                         stream_count, stream_assignment)
+        if settings_profile != "default":
+            logger.info("HTTP/2 SETTINGS profile: %s (randomization=%s)",
+                        settings_profile, settings_rand)
 
         return HTTP2Transport(
             mode=HTTP2Transport.MODE_CLIENT,
@@ -321,6 +327,9 @@ def _create_http2_transport(config) -> HTTP2Transport:
             stream_assignment=stream_assignment,
             stream_rng_seed=stream_seed,
             max_concurrent_streams=max_concurrent,
+            settings_profile=settings_profile,
+            settings_enable_randomization=settings_rand,
+            settings_rng_seed=settings_seed,
         )
 
     elif hasattr(config, 'server') and hasattr(config.server, 'tun_ip'):
@@ -335,6 +344,9 @@ def _create_http2_transport(config) -> HTTP2Transport:
         if stream_count > 1:
             logger.info("HTTP/2 multi-stream enabled: count=%d, assignment=%s",
                         stream_count, stream_assignment)
+        if settings_profile != "default":
+            logger.info("HTTP/2 SETTINGS profile: %s (randomization=%s)",
+                        settings_profile, settings_rand)
 
         return HTTP2Transport(
             mode=HTTP2Transport.MODE_SERVER,
@@ -350,6 +362,9 @@ def _create_http2_transport(config) -> HTTP2Transport:
             stream_assignment=stream_assignment,
             stream_rng_seed=stream_seed,
             max_concurrent_streams=max_concurrent,
+            settings_profile=settings_profile,
+            settings_enable_randomization=settings_rand,
+            settings_rng_seed=settings_seed,
         )
 
     else:

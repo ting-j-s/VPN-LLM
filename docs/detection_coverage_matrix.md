@@ -18,7 +18,7 @@ Machine-readable mapping of four detection papers to VPN-LLM evaluation infrastr
 | **Cross-Layer RTT** (passive detection) | Timing stability (CV-based) | Cross-Layer RTT Gate | `timing_stability_score` | `_HINT_MAP["timing_stability_score"]` → jitter, randomized scheduling | `src/shaping/jitter.py`, `src/shaping/scheduler.py` | Synthetic: CV=0.8575 (very stable, detectable). Jitter and scheduler modules implemented. | Before/after stability with jitter+scheduler enabled. |
 | **Cross-Layer RTT** (passive detection) | Network-layer RTT (ICMP) | Cross-Layer RTT Gate | `app_network_diff_ms` | Not yet mapped | Not yet implemented | `OptionalPingRunner` exists but ICMP is best-effort; no network diff data. | Requires CAP_NET_RAW or root for reliable ICMP. Real network-layer RTT measurement. |
 | **Cross-Layer RTT** (passive detection) | Multi-layer session misalignment | Cross-Layer RTT Gate | `rtt_risk_score` (composite) | `_HINT_MAP["rtt_risk_score"]` → multi-layer countermeasures | Composite: pacing + jitter + scheduler | Composite risk score from app/transport/network layers. Mock data only. | Real multi-layer RTT before/after with all three layers measured. |
-| **HTTP/2 Transport** (Phase 10E-A) | HTTP/2 wire-level fingerprinting: SETTINGS frames, HPACK, stream multiplexing patterns | Fingerprint Gate | `fingerprint_risk_score`, `ngram_entropy`, `burst_count` | Not yet mapped (HTTP/2-specific countermeasures) | `src/transport/http2_transport.py` (experimental, h2 required) | Phase 10D: chunking+WU-batching, all scores <0.60. Phase 10E-A: multi-stream round_robin/random, 4-stream pre-open, completes stream multiplexing evaluation. | SETTINGS tuning (10E-B), HPACK (10E-C). |
+| **HTTP/2 Transport** (Phase 10E-B) | HTTP/2 wire-level fingerprinting: SETTINGS frames, HPACK, stream multiplexing patterns | Fingerprint Gate | `fingerprint_risk_score`, `ngram_entropy`, `burst_count` | Not yet mapped (HTTP/2-specific countermeasures) | `src/transport/http2_transport.py` (experimental, h2 required) | Phase 10D: chunking+WU-batching. Phase 10E-A: multi-stream round_robin/random. Phase 10E-B: SETTINGS profile randomization (default/conservative/browser_like_low_variance). All scores <0.60. | HPACK (10E-C). |
 
 ## Summary
 
@@ -34,7 +34,7 @@ Machine-readable mapping of four detection papers to VPN-LLM evaluation infrastr
 | Remaining gaps: real TUN trace capture | 5+ surfaces |
 | Remaining gaps: real WebSocket RTT before/after | 2 surfaces |
 | Remaining gaps: real network probe testing | 2 surfaces |
-| Remaining gaps: HTTP/2 SETTINGS/HPACK | Phase 10D chunking+WU-batching resolved regression. 10E-A multi-stream completed. 10E-B (SETTINGS) and 10E-C (HPACK) remain. |
+| Remaining gaps: HTTP/2 HPACK | Phase 10D chunking+WU-batching resolved regression. 10E-A multi-stream completed. 10E-B SETTINGS profiles completed. 10E-C (HPACK) remains. |
 
 ## How to Read
 

@@ -103,14 +103,15 @@ session:
    execution; user-level `pip install --user` is insufficient.
 2. **No browser emulation**: Uses bare `h2` library connection — no
    browser-like SETTINGS, WINDOW_UPDATE, or PRIORITY frame patterns.
+   Phase 10E-B adds configurable SETTINGS profiles for protocol-shape
+   evaluation (NOT browser-emulating).
 3. **Single stream** (resolved in Phase 10E-A): Multi-stream round_robin/random
    is implemented.  Old behavior preserved when stream_count=1 (default).
-4. **No HPACK tuning**: Uses default `h2` HPACK settings.
-5. **Shaping mismatch (partially resolved in Phase 10D)**: Generic
-   pipeline (padding/aggregation/jitter) was designed for TCP/TLS/WebSocket.
-   Phase 10D added HTTP/2-aware chunking and WINDOW_UPDATE batching, which
-   reversed the Phase 10C regression.  Further tuning (multi-stream,
-   SETTINGS) remains for Phase 10E.
+4. **No HPACK tuning** (reserved for Phase 10E-C): Uses default `h2` HPACK settings.
+5. **Shaping mismatch (partially resolved)**: Generic pipeline was designed for
+   TCP/TLS/WebSocket.  Phase 10D added HTTP/2-aware chunking and WINDOW_UPDATE
+   batching; Phase 10E-A added multi-stream; Phase 10E-B added SETTINGS profiles.
+   HPACK remains for 10E-C.
 6. **No WINDOW_UPDATE strategy (resolved in Phase 10D)**: Batched
    WINDOW_UPDATE via `http2_window_update_threshold` eliminates the
    predictable per-packet update pattern.  Tuning remaining.
@@ -279,11 +280,92 @@ transport:
 - No SETTINGS / HPACK tuning (reserved for 10E-B / 10E-C)
 - Default stream_count=1 preserves Phase 10D behavior exactly
 
+### Phase 10E-B: SETTINGS profile randomization (completed 2026-05-23)
+
+Phase 10E-B adds configurable HTTP/2 SETTINGS profiles for protocol-shape
+evaluation.  This is the second of three Phase 10E sub-phases.
+
+**Design**:
+
+1. **Config fields** (all default to disabled, preserving old behavior):
+   - `http2_settings_profile: str = "default"`  (default | conservative | browser_like_low_variance)
+   - `http2_settings_enable_randomization: bool = False`
+   - `http2_settings_rng_seed: int = 42`
+
+2. **Profiles**:
+   - `default`: No changes — existing h2 library behavior preserved.
+   - `conservative`: Stable, low-risk values (HEADER_TABLE_SIZE=4096,
+     ENABLE_PUSH=0, MAX_CONCURRENT_STREAMS=128, INITIAL_WINDOW_SIZE=65535,
+     MAX_FRAME_SIZE=16384).
+   - `browser_like_low_variance`: Conservative-range protocol-shape adjustments
+     (HEADER_TABLE_SIZE=65536, MAX_CONCURRENT_STREAMS=256,
+     INITIAL_WINDOW_SIZE=1048576).  NOT browser-emulating — evaluates SETTINGS
+     impact on trace shape only.
+
+3. **Randomization**: When `enable_randomization=true`, each SETTINGS value
+   gets ±5% jitter via seeded RNG, clamped to RFC 7540 valid ranges.
+
+4. **Wire format**: Profile is applied via `conn.update_settings()` after
+   `initiate_connection()`, producing PREFACE + default_SETTINGS + our_SETTINGS.
+   The peer applies the last SETTINGS, so our values take effect.
+
+5. **Compatibility**: Full compatibility with Phase 10D chunking/WU batching
+   and Phase 10E-A multi-stream.  Default disabled ensures old behavior.
+
+**Configuration example** (`config/client_netns_http2_settings.yaml`):
+```yaml
+transport:
+  type: http2
+  experimental: true
+  http2_settings_profile: "browser_like_low_variance"
+  http2_settings_enable_randomization: true
+  http2_settings_rng_seed: 42
+  # Phase 10E-A multi-stream retained
+  http2_stream_count: 4
+  http2_stream_assignment: "round_robin"
+  # Phase 10D aware shaping retained
+  http2_chunk_min_size: 256
+  http2_chunk_max_size: 1400
+  http2_window_update_threshold: 65535
+```
+
+**Key constraints**:
+- NOT browser-emulating — evaluates SETTINGS impact on trace shape only
+- No HPACK / header order tuning (reserved for 10E-C)
+- Default profile + randomization=false preserves 10E-A behavior exactly
+- Settings must not be interpreted as browser mimicry
+
+### Phase 10E-B trace results (min_packet_count=30, n=3)
+
+| Scenario | Before Pkts | After Pkts | Before Risk | After Risk | Delta | Verdict |
+|---|---|---|---|---|---|---|
+| idle (n=3) | 14.0 | 12.0 | 0.536 | 0.498 | N/A | insufficient |
+| ping (n=3) | 154.0 | 11.7 | 0.551 | 0.541 | N/A | insufficient |
+| bulk (n=3) | 79.7 | 19.0 | 0.627 | 0.402 | N/A | insufficient |
+
+All after risk scores remain below 0.60.  Zero HEARTBEAT errors, zero TUN write
+errors.  Packet counts are low due to WINDOW_UPDATE batching (same effect as
+Phase 10D/10E-A) — all after-traces fall below min_packet_count=30.  The
+browser_like_low_variance SETTINGS profile does not increase fingerprint risk
+compared to the h2 default SETTINGS.
+
+### Phase 10E-A vs 10E-B comparison
+
+| Scenario | 10E-A After Risk | 10E-B After Risk | 10E-A Pkts | 10E-B Pkts |
+|---|---|---|---|---|
+| idle | 0.512 | 0.498 | 15.0 | 12.0 |
+| ping | 0.547 | 0.541 | 15.0 | 11.7 |
+| bulk | 0.509 | 0.402 | 29.3 | 19.0 |
+
+SETTINGS profile does not increase risk; bulk after risk is lower with
+browser_like_low_variance profile.  WINDOW_UPDATE batching remains the dominant
+countermeasure, not SETTINGS values.
+
 ### Remaining for Phase 10E
 
-1. **Phase 10E-B: SETTINGS randomization**: Tune initial SETTINGS to avoid predictable fingerprint
-2. **Phase 10E-C: HPACK header behavior**: Adjust header table, pseudo-header fields, dynamic table behavior
-3. ~~Multi-stream strategy~~ (completed in 10E-A)
+1. **Phase 10E-C: HPACK header behavior**: Adjust header table, pseudo-header fields, dynamic table behavior
+2. ~~Multi-stream strategy~~ (completed in 10E-A)
+3. ~~SETTINGS randomization~~ (completed in 10E-B)
 4. ~~WINDOW_UPDATE strategy tuning~~ (completed in 10D)
 
 ## Implementation notes

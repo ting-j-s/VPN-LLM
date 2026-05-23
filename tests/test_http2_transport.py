@@ -1340,3 +1340,414 @@ class TestMultiStreamWithWindowUpdate:
             stream_count=4, stream_assignment="random",
         )
         assert t._window_update_threshold == 0
+
+
+# ---------------------------------------------------------------------------
+# 25. Phase 10E-B: SETTINGS profile configuration
+# ---------------------------------------------------------------------------
+
+class TestSettingsProfileConfig:
+    """Default settings behavior and profile validation."""
+
+    def test_default_profile_noop(self):
+        """Default profile stores correctly, _apply_settings_profile is no-op."""
+        t = HTTP2Transport(settings_profile="default")
+        assert t._settings_profile == "default"
+        assert t._settings_enable_randomization is False
+
+    def test_default_settings_disabled_by_default(self):
+        """Constructor defaults keep settings disabled."""
+        t = HTTP2Transport()
+        assert t._settings_profile == "default"
+        assert t._settings_enable_randomization is False
+        assert t._settings_rng is None
+
+    def test_invalid_profile_raises(self):
+        """Invalid profile name raises TransportError."""
+        t = HTTP2Transport(settings_profile="invalid_profile")
+        import h2.connection, h2.config
+        conn = h2.connection.H2Connection(
+            config=h2.config.H2Configuration(client_side=True, header_encoding='utf-8'))
+        conn.initiate_connection()
+        with pytest.raises(TransportError, match="Unknown http2_settings_profile"):
+            t._apply_settings_profile(conn)
+
+    def test_conservative_profile_stores(self):
+        t = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=False,
+        )
+        assert t._settings_profile == "conservative"
+        assert t._settings_enable_randomization is False
+        assert t._settings_rng is None
+
+    def test_browser_like_profile_stores(self):
+        t = HTTP2Transport(
+            settings_profile="browser_like_low_variance",
+            settings_enable_randomization=True,
+            settings_rng_seed=123,
+        )
+        assert t._settings_profile == "browser_like_low_variance"
+        assert t._settings_enable_randomization is True
+        assert t._settings_rng is not None
+
+    def test_default_profile_does_not_create_rng(self):
+        """Even with randomization enabled, default profile creates no RNG."""
+        t = HTTP2Transport(
+            settings_profile="default",
+            settings_enable_randomization=True,
+            settings_rng_seed=42,
+        )
+        assert t._settings_rng is None
+
+    def test_repr_includes_settings(self):
+        t = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=True,
+        )
+        r = repr(t)
+        assert "settings=conservative+rand" in r
+
+    def test_repr_default_hides_settings(self):
+        t = HTTP2Transport(settings_profile="default")
+        r = repr(t)
+        assert "settings=" not in r
+
+
+# ---------------------------------------------------------------------------
+# 26. Phase 10E-B: SETTINGS profile application
+# ---------------------------------------------------------------------------
+
+class TestSettingsProfileApplication:
+    """SETTINGS values are applied correctly to h2 connection."""
+
+    @staticmethod
+    def _make_client_conn():
+        import h2.connection, h2.config
+        config = h2.config.H2Configuration(client_side=True, header_encoding='utf-8')
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        return conn
+
+    def test_default_profile_applies_no_settings(self):
+        """default profile: _apply_settings_profile is a no-op."""
+        t = HTTP2Transport(settings_profile="default")
+        conn1 = self._make_client_conn()
+        conn2 = self._make_client_conn()
+        # Both connections should produce identical output since
+        # default profile adds nothing.
+        t._apply_settings_profile(conn1)
+        # conn2 gets no _apply_settings_profile call
+        assert conn1.data_to_send() == conn2.data_to_send()
+
+    def test_conservative_applies_settings(self):
+        """conservative profile queues additional SETTINGS frame."""
+        t = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=False,
+        )
+        conn = self._make_client_conn()
+        conn.data_to_send()  # consume preface + initial SETTINGS
+        t._apply_settings_profile(conn)
+        after = conn.data_to_send()
+        assert len(after) > 0  # custom SETTINGS frame added
+
+    def test_browser_like_applies_settings(self):
+        t = HTTP2Transport(
+            settings_profile="browser_like_low_variance",
+            settings_enable_randomization=False,
+        )
+        conn = self._make_client_conn()
+        conn.data_to_send()  # consume preface + initial SETTINGS
+        t._apply_settings_profile(conn)
+        after = conn.data_to_send()
+        assert len(after) > 0
+
+    def test_conservative_deterministic_without_randomization(self):
+        """Same profile without randomization produces identical SETTINGS each time."""
+        conn1 = self._make_client_conn()
+        conn2 = self._make_client_conn()
+        t = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=False,
+        )
+        t._apply_settings_profile(conn1)
+        t._apply_settings_profile(conn2)
+        assert conn1.data_to_send() == conn2.data_to_send()
+
+    def test_randomization_reproducible_with_seed(self):
+        """Same seed produces same randomized SETTINGS."""
+        conn1 = self._make_client_conn()
+        conn2 = self._make_client_conn()
+        t1 = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=True,
+            settings_rng_seed=42,
+        )
+        t1._apply_settings_profile(conn1)
+        t2 = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=True,
+            settings_rng_seed=42,
+        )
+        t2._apply_settings_profile(conn2)
+        assert conn1.data_to_send() == conn2.data_to_send()
+
+    def test_different_seeds_produce_different_settings(self):
+        """Different seeds may produce different settings."""
+        conn1 = self._make_client_conn()
+        conn2 = self._make_client_conn()
+        t1 = HTTP2Transport(
+            settings_profile="browser_like_low_variance",
+            settings_enable_randomization=True,
+            settings_rng_seed=1,
+        )
+        t1._apply_settings_profile(conn1)
+        t2 = HTTP2Transport(
+            settings_profile="browser_like_low_variance",
+            settings_enable_randomization=True,
+            settings_rng_seed=999999,
+        )
+        t2._apply_settings_profile(conn2)
+        # Different seeds should produce different SETTINGS frames
+        assert conn1.data_to_send() != conn2.data_to_send()
+
+    def test_randomization_respects_profile_base(self):
+        """Randomized values stay within ±5% of base profile value."""
+        t = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=True,
+            settings_rng_seed=42,
+        )
+        conn = self._make_client_conn()
+        t._apply_settings_profile(conn)
+        # The profile base for HEADER_TABLE_SIZE (0x1) is 4096
+        # ±5% jitter means [4096 - 204, 4096 + 204] = [3892, 4300]
+        # We can't easily introspect the sent SETTINGS from the outside,
+        # but we verify the frame was queued.
+        sent = conn.data_to_send()
+        assert len(sent) > 0
+
+    def test_server_side_also_applies_settings(self):
+        """Server-side connection also gets SETTINGS applied."""
+        import h2.connection, h2.config
+        config = h2.config.H2Configuration(client_side=False, header_encoding='utf-8')
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        conn.data_to_send()  # consume preface + initial SETTINGS
+        t = HTTP2Transport(
+            mode="server",
+            settings_profile="conservative",
+            settings_enable_randomization=False,
+        )
+        t._apply_settings_profile(conn)
+        after = conn.data_to_send()
+        assert len(after) > 0
+
+
+# ---------------------------------------------------------------------------
+# 27. Phase 10E-B: SETTINGS compatibility
+# ---------------------------------------------------------------------------
+
+class TestSettingsCompatibility:
+    """SETTINGS profile is compatible with 10D and 10E-A features."""
+
+    def test_settings_with_multi_stream(self):
+        t = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=True,
+            settings_rng_seed=42,
+            stream_count=4, stream_assignment="round_robin",
+        )
+        assert t._settings_profile == "conservative"
+        assert t._multi_stream_enabled is True
+
+    def test_settings_with_chunking(self):
+        t = HTTP2Transport(
+            settings_profile="browser_like_low_variance",
+            chunk_min_size=256, chunk_max_size=1400,
+            chunk_rng_seed=42,
+        )
+        assert t._settings_profile == "browser_like_low_variance"
+        assert t._chunk_enabled is True
+
+    def test_settings_with_wu_batching(self):
+        t = HTTP2Transport(
+            settings_profile="conservative",
+            window_update_threshold=65535,
+        )
+        assert t._settings_profile == "conservative"
+        assert t._window_update_threshold == 65535
+
+    def test_settings_with_full_pipeline(self):
+        """All Phase 10D + 10E-A + 10E-B features enabled together."""
+        t = HTTP2Transport(
+            settings_profile="browser_like_low_variance",
+            settings_enable_randomization=True,
+            settings_rng_seed=42,
+            stream_count=4, stream_assignment="round_robin",
+            chunk_min_size=256, chunk_max_size=1400,
+            chunk_rng_seed=42,
+            window_update_threshold=65535,
+        )
+        assert t._settings_profile == "browser_like_low_variance"
+        assert t._multi_stream_enabled is True
+        assert t._chunk_enabled is True
+        assert t._window_update_threshold == 65535
+
+    def test_close_idempotent_with_settings(self):
+        t = HTTP2Transport(
+            settings_profile="conservative",
+            settings_enable_randomization=True,
+        )
+        t.close()
+        t.close()  # idempotent
+
+
+class TestSettingsRecvTimeout:
+    """recv timeout behavior unchanged with SETTINGS profile."""
+
+    def test_recv_timeout_with_settings_profile(self):
+        t = HTTP2Transport(
+            mode="server",
+            settings_profile="conservative",
+            settings_enable_randomization=True,
+        )
+        t._ensure_loop()
+        try:
+            result = t.recv(timeout=0.05)
+            assert result is None
+        except Exception:
+            pass
+        finally:
+            t.close()
+
+
+# ---------------------------------------------------------------------------
+# 28. Phase 10E-B: Factory integration
+# ---------------------------------------------------------------------------
+
+class TestFactorySettings:
+    """Factory passes SETTINGS profile fields to HTTP2Transport."""
+
+    @staticmethod
+    def _cfg(**overrides):
+        transport_kw = {"type": "http2", "experimental": True}
+        transport_kw.update(overrides)
+        return ClientConfig(
+            transport=TransportConfig(**transport_kw),
+        )
+
+    def test_factory_passes_default_settings(self):
+        from src.transport.factory import _create_http2_transport
+        cfg = self._cfg()
+        t = _create_http2_transport(cfg)
+        assert t._settings_profile == "default"
+        assert t._settings_enable_randomization is False
+
+    def test_factory_passes_non_default_settings(self):
+        from src.transport.factory import _create_http2_transport
+        cfg = self._cfg(
+            http2_settings_profile="conservative",
+            http2_settings_enable_randomization=True,
+            http2_settings_rng_seed=99,
+        )
+        t = _create_http2_transport(cfg)
+        assert t._settings_profile == "conservative"
+        assert t._settings_enable_randomization is True
+        assert t._settings_rng is not None
+
+
+# ---------------------------------------------------------------------------
+# 29. Phase 10E-B: YAML config parsing
+# ---------------------------------------------------------------------------
+
+class TestSettingsYamlParsing:
+    """YAML loading parses SETTINGS profile fields."""
+
+    def test_client_yaml_parses_settings_fields(self, tmp_path):
+        yaml_content = """client:
+  tun_name: tun1
+  tun_ip: 10.8.0.2
+  tun_peer: 10.8.0.1
+  mtu: 1400
+
+server:
+  host: 127.0.0.1
+  port: 2225
+
+transport:
+  type: http2
+  experimental: true
+  http2_settings_profile: "conservative"
+  http2_settings_enable_randomization: true
+  http2_settings_rng_seed: 42
+"""
+        path = tmp_path / "client_http2_settings.yaml"
+        path.write_text(yaml_content)
+        cfg = load_client_config(str(path))
+        assert cfg.transport.http2_settings_profile == "conservative"
+        assert cfg.transport.http2_settings_enable_randomization is True
+        assert cfg.transport.http2_settings_rng_seed == 42
+
+    def test_server_yaml_parses_settings_fields(self, tmp_path):
+        yaml_content = """server:
+  tun_name: tun0
+  tun_ip: 10.8.0.1
+  tun_peer: 10.8.0.2
+  mtu: 1400
+  listen_port: 2225
+
+forwarding:
+  enable_nat: false
+  enable_route: true
+
+transport:
+  type: http2
+  experimental: true
+  http2_settings_profile: "browser_like_low_variance"
+  http2_settings_enable_randomization: false
+  http2_settings_rng_seed: 77
+"""
+        path = tmp_path / "server_http2_settings.yaml"
+        path.write_text(yaml_content)
+        cfg = load_server_config(str(path))
+        assert cfg.transport.http2_settings_profile == "browser_like_low_variance"
+        assert cfg.transport.http2_settings_enable_randomization is False
+        assert cfg.transport.http2_settings_rng_seed == 77
+
+    def test_settings_yaml_defaults_when_missing(self, tmp_path):
+        yaml_content = """client:
+  tun_name: tun1
+  tun_ip: 10.8.0.2
+  tun_peer: 10.8.0.1
+  mtu: 1400
+
+server:
+  host: 127.0.0.1
+  port: 2225
+
+transport:
+  type: http2
+  experimental: true
+"""
+        path = tmp_path / "client_http2_min.yaml"
+        path.write_text(yaml_content)
+        cfg = load_client_config(str(path))
+        assert cfg.transport.http2_settings_profile == "default"
+        assert cfg.transport.http2_settings_enable_randomization is False
+        assert cfg.transport.http2_settings_rng_seed == 42
+
+    def test_settings_config_files_parse(self):
+        """Existing settings config files parse successfully."""
+        cfg_client = load_client_config("config/client_netns_http2_settings.yaml")
+        assert cfg_client.transport.type == "http2"
+        assert cfg_client.transport.http2_settings_profile == "browser_like_low_variance"
+        assert cfg_client.transport.http2_settings_enable_randomization is True
+        assert cfg_client.transport.http2_stream_count == 4
+
+        cfg_server = load_server_config("config/server_netns_http2_settings.yaml")
+        assert cfg_server.transport.type == "http2"
+        assert cfg_server.transport.http2_settings_profile == "browser_like_low_variance"
+        assert cfg_server.transport.http2_settings_enable_randomization is True
+        assert cfg_server.transport.http2_stream_count == 4

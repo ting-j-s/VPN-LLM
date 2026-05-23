@@ -68,6 +68,9 @@ class HTTP2Transport(Transport):
         stream_assignment: str = "single",
         stream_rng_seed: Optional[int] = None,
         max_concurrent_streams: int = 8,
+        settings_profile: str = "default",
+        settings_enable_randomization: bool = False,
+        settings_rng_seed: int = 42,
     ):
         if mode not in (self.MODE_CLIENT, self.MODE_SERVER):
             raise TransportError(
@@ -132,6 +135,13 @@ class HTTP2Transport(Transport):
         if self._multi_stream_enabled and self._stream_assignment == "random":
             self._stream_rng = random_module.Random(stream_rng_seed)
         self._open_streams: set[int] = set()
+
+        # SETTINGS profile (Phase 10E-B, default = disabled, old behavior unchanged)
+        self._settings_profile = settings_profile
+        self._settings_enable_randomization = settings_enable_randomization
+        self._settings_rng: Optional[random_module.Random] = None
+        if self._settings_profile != "default" and self._settings_enable_randomization:
+            self._settings_rng = random_module.Random(settings_rng_seed)
 
     # ------------------------------------------------------------------
     # Event-loop management (same pattern as WebSocketTransport)
@@ -248,6 +258,76 @@ class HTTP2Transport(Transport):
         self._open_streams.add(stream_id)
 
     # ------------------------------------------------------------------
+    # SETTINGS profile (Phase 10E-B)
+    # ------------------------------------------------------------------
+
+    # Module-level SETTINGS profile definitions.
+    # default profile applies no changes — existing h2 behavior preserved.
+    _SETTINGS_PROFILES = {
+        "conservative": {
+            0x1: 4096,    # HEADER_TABLE_SIZE
+            0x2: 0,       # ENABLE_PUSH
+            0x3: 128,     # MAX_CONCURRENT_STREAMS
+            0x4: 65535,   # INITIAL_WINDOW_SIZE
+            0x5: 16384,   # MAX_FRAME_SIZE
+        },
+        "browser_like_low_variance": {
+            0x1: 65536,   # HEADER_TABLE_SIZE
+            0x2: 0,       # ENABLE_PUSH
+            0x3: 256,     # MAX_CONCURRENT_STREAMS
+            0x4: 1048576, # INITIAL_WINDOW_SIZE
+            0x5: 16384,   # MAX_FRAME_SIZE
+        },
+    }
+
+    _ALLOWED_SETTINGS_PROFILES = frozenset({"default", "conservative", "browser_like_low_variance"})
+
+    def _apply_settings_profile(self, conn) -> None:
+        """Apply SETTINGS values based on profile and randomization.
+
+        Must be called after ``conn.initiate_connection()`` but before
+        ``conn.data_to_send()`` is written, so that our SETTINGS frame
+        follows the HTTP/2 preface + initial SETTINGS.
+
+        On the wire: PREFACE + default_SETTINGS + our_SETTINGS.
+        The peer applies our SETTINGS last, thus our values take effect.
+        """
+        if self._settings_profile == "default":
+            return  # no changes — preserve old behavior
+
+        if self._settings_profile not in self._ALLOWED_SETTINGS_PROFILES:
+            raise TransportError(
+                f"Unknown http2_settings_profile: '{self._settings_profile}'. "
+                f"Allowed: {sorted(self._ALLOWED_SETTINGS_PROFILES)}"
+            )
+
+        base = self._SETTINGS_PROFILES[self._settings_profile]
+        settings: dict[int, int] = {}
+
+        if self._settings_enable_randomization and self._settings_rng is not None:
+            for code, value in base.items():
+                jitter = int(value * 0.05)  # ±5% range
+                if jitter < 1:
+                    jitter = 1
+                offset = self._settings_rng.randint(-jitter, jitter)
+                raw = value + offset
+                # Clamp to RFC 7540 valid ranges
+                if code == 0x5:  # MAX_FRAME_SIZE: [16384, 16777215]
+                    raw = max(16384, min(raw, 16777215))
+                elif code == 0x4:  # INITIAL_WINDOW_SIZE: [0, 2147483647]
+                    raw = max(0, min(raw, 2147483647))
+                else:
+                    raw = max(1, raw)
+                settings[code] = raw
+        else:
+            settings = dict(base)
+
+        conn.update_settings(settings)
+        logger.debug("Applied SETTINGS profile=%s randomization=%s values=%s",
+                      self._settings_profile, self._settings_enable_randomization,
+                      {hex(k): v for k, v in settings.items()})
+
+    # ------------------------------------------------------------------
     # Transport interface
     # ------------------------------------------------------------------
 
@@ -308,9 +388,8 @@ class HTTP2Transport(Transport):
             )
             conn = h2.connection.H2Connection(config=config)
             conn.initiate_connection()
+            self._apply_settings_profile(conn)
             writer.write(conn.data_to_send())
-
-            # Read server preface + SETTINGS
             data = await asyncio.wait_for(reader.read(65535), timeout=5.0)
             events = conn.receive_data(data)
             for event in events:
@@ -413,6 +492,7 @@ class HTTP2Transport(Transport):
         )
         conn = h2.connection.H2Connection(config=config)
         conn.initiate_connection()
+        self._apply_settings_profile(conn)
         writer.write(conn.data_to_send())
 
         self._h2_conn = conn
@@ -701,9 +781,14 @@ class HTTP2Transport(Transport):
         multi = ""
         if self._multi_stream_enabled:
             multi = f", streams={self._stream_count}/{self._stream_assignment}"
+        settings = ""
+        if self._settings_profile != "default":
+            settings = f", settings={self._settings_profile}"
+            if self._settings_enable_randomization:
+                settings += "+rand"
         return (
             f"HTTP2Transport(mode={self.mode}, host={self.host}, "
             f"port={self.port}, path={self.path}, "
             f"h2_available={_H2_AVAILABLE}, "
-            f"connected={self._connected}{multi})"
+            f"connected={self._connected}{multi}{settings})"
         )
