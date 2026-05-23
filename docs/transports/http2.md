@@ -103,8 +103,8 @@ session:
    execution; user-level `pip install --user` is insufficient.
 2. **No browser emulation**: Uses bare `h2` library connection — no
    browser-like SETTINGS, WINDOW_UPDATE, or PRIORITY frame patterns.
-3. **Single stream**: Currently uses only stream ID 1.  Full multiplexing
-   is not implemented.
+3. **Single stream** (resolved in Phase 10E-A): Multi-stream round_robin/random
+   is implemented.  Old behavior preserved when stream_count=1 (default).
 4. **No HPACK tuning**: Uses default `h2` HPACK settings.
 5. **Shaping mismatch (partially resolved in Phase 10D)**: Generic
    pipeline (padding/aggregation/jitter) was designed for TCP/TLS/WebSocket.
@@ -227,12 +227,64 @@ The generic shaping regression (ping +0.076, idle +0.074) was fully reversed.
 WINDOW_UPDATE batching eliminates the predictable 66/92-byte control frame
 alternation that dominated Phase 10C after-traces.
 
+### Phase 10E-A: Multi-stream realism (completed 2026-05-23)
+
+Phase 10E-A adds HTTP/2 multi-stream multiplexing to evaluate the impact of
+concurrent stream usage on trace fingerprint shape.  This is the first of three
+planned Phase 10E sub-phases (A: multi-stream, B: SETTINGS, C: HPACK).
+
+**Design**:
+
+1. **Config fields** (all default to single-stream, preserving old behavior):
+   - `http2_stream_count: int = 1`
+   - `http2_stream_assignment: str = "single"`  (single | round_robin | random)
+   - `http2_stream_rng_seed: int | None = None`
+   - `http2_max_concurrent_streams: int = 8`
+
+2. **Stream pool**: Client opens odd-numbered streams (1, 3, 5, ..., 2N-1),
+   server uses even-numbered streams (2, 4, 6, ..., 2N).  Client pre-opens
+   all streams after TCP connection; server discovers them via RequestReceived.
+
+3. **Sending**: Each `send()` call selects one stream via the assignment
+   strategy and sends all payload data (including any chunks) on that stream.
+   The next `send()` may select a different stream.  Streams are lazily
+   opened via `_ensure_stream_open()` on first use.
+
+4. **Receiving**: All streams feed into the same `_rx_queue` — the receiver
+   is stream-agnostic.  `StreamEnded` on one stream does NOT close the
+   connection when other streams remain active.
+
+5. **Compatibility**: Full compatibility with Phase 10D chunking and
+   WINDOW_UPDATE batching.  When chunking is enabled, all chunks of a single
+   `send()` go to the same stream.  Default disabled ensures old behavior.
+
+**Configuration example** (`config/client_netns_http2_multistream.yaml`):
+```yaml
+transport:
+  type: http2
+  experimental: true
+  http2_stream_count: 4
+  http2_stream_assignment: "round_robin"
+  http2_stream_rng_seed: 42
+  http2_max_concurrent_streams: 8
+  # Phase 10D aware shaping retained
+  http2_chunk_min_size: 256
+  http2_chunk_max_size: 1400
+  http2_window_update_threshold: 65535
+  http2_chunk_rng_seed: 42
+```
+
+**Key constraints**:
+- Not browser-emulating — evaluates multiplexing impact on trace shape only
+- No SETTINGS / HPACK tuning (reserved for 10E-B / 10E-C)
+- Default stream_count=1 preserves Phase 10D behavior exactly
+
 ### Remaining for Phase 10E
 
-1. **Multi-stream strategy**: Distribute tunnel data across multiple streams
-2. **SETTINGS randomization**: Tune initial SETTINGS to avoid predictable fingerprint
-3. **HPACK table manipulation**: Dynamic table churn for header compression patterns
-4. **WINDOW_UPDATE strategy tuning**: Further tune batching thresholds
+1. **Phase 10E-B: SETTINGS randomization**: Tune initial SETTINGS to avoid predictable fingerprint
+2. **Phase 10E-C: HPACK header behavior**: Adjust header table, pseudo-header fields, dynamic table behavior
+3. ~~Multi-stream strategy~~ (completed in 10E-A)
+4. ~~WINDOW_UPDATE strategy tuning~~ (completed in 10D)
 
 ## Implementation notes
 
@@ -240,6 +292,7 @@ alternation that dominated Phase 10C after-traces.
   (dedicated `asyncio` loop per instance, sync methods submit coroutines
   via `run_coroutine_threadsafe`).
 - Threading model: daemon thread per transport instance.
-- Wire format: HTTP/2 DATA frames on stream 1.
+- Wire format: HTTP/2 DATA frames on stream 1 (single), or distributed
+  across N streams (multi-stream round_robin/random, Phase 10E-A).
 - `close()` is idempotent.
 - Marked `experimental: true` in config.

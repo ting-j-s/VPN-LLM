@@ -64,6 +64,10 @@ class HTTP2Transport(Transport):
         chunk_max_size: int = 0,
         window_update_threshold: int = 0,
         chunk_rng_seed: Optional[int] = None,
+        stream_count: int = 1,
+        stream_assignment: str = "single",
+        stream_rng_seed: Optional[int] = None,
+        max_concurrent_streams: int = 8,
     ):
         if mode not in (self.MODE_CLIENT, self.MODE_SERVER):
             raise TransportError(
@@ -113,6 +117,21 @@ class HTTP2Transport(Transport):
 
         self._window_update_threshold = max(0, window_update_threshold)
         self._rx_bytes_since_update = 0
+
+        # Multi-stream (Phase 10E-A, 1 = disabled, old behavior preserved)
+        self._stream_count = max(1, stream_count)
+        self._stream_assignment = stream_assignment
+        self._multi_stream_enabled = (
+            self._stream_count > 1
+            and self._stream_assignment in ("round_robin", "random")
+        )
+        self._max_concurrent_streams = max(1, max_concurrent_streams)
+        self._stream_ids: list[int] = []
+        self._next_stream_idx = 0
+        self._stream_rng: Optional[random_module.Random] = None
+        if self._multi_stream_enabled and self._stream_assignment == "random":
+            self._stream_rng = random_module.Random(stream_rng_seed)
+        self._open_streams: set[int] = set()
 
     # ------------------------------------------------------------------
     # Event-loop management (same pattern as WebSocketTransport)
@@ -171,6 +190,62 @@ class HTTP2Transport(Transport):
         out = conn.data_to_send()
         if out and writer is not None:
             writer.write(out)
+
+    # ------------------------------------------------------------------
+    # Multi-stream helpers (Phase 10E-A)
+    # ------------------------------------------------------------------
+
+    def _build_stream_ids(self) -> None:
+        """Populate the stream ID pool for multi-stream mode.
+
+        Both sides use the same client-initiated odd stream IDs (1, 3, 5, ...).
+        The client opens streams via HEADERS; the server discovers them via
+        RequestReceived.  Both sides select from the same pool when sending.
+        """
+        if not self._multi_stream_enabled:
+            self._stream_ids = [1]
+            return
+        self._stream_ids = [2 * i + 1 for i in range(self._stream_count)]
+
+    def _select_stream_id(self) -> int:
+        """Select the next stream ID based on the assignment strategy."""
+        if not self._multi_stream_enabled or not self._stream_ids:
+            return 1
+        # Fall back to stream 1 if no open streams available for sending
+        available = [s for s in self._stream_ids if s in self._open_streams]
+        if not available:
+            available = [s for s in self._stream_ids if s == 1] or self._stream_ids[:1]
+        if self._stream_assignment == "round_robin":
+            sid = available[self._next_stream_idx % len(available)]
+            self._next_stream_idx = (self._next_stream_idx + 1) % len(available)
+            return sid
+        elif self._stream_assignment == "random" and self._stream_rng is not None:
+            return self._stream_rng.choice(available)
+        return available[0]
+
+    async def _ensure_stream_open(self, conn, writer, stream_id: int) -> None:
+        """Open an HTTP/2 stream if it is not already open (client side).
+
+        On the client, sends HEADERS to initiate the stream.
+        On the server, this is a no-op — the client opens streams and the
+        server discovers them via RequestReceived.
+        """
+        if stream_id in self._open_streams:
+            return
+        if self.mode == self.MODE_SERVER:
+            return  # server doesn't open streams; client does
+        # Client opens stream with HEADERS
+        headers = [
+            (':method', 'POST'),
+            (':path', self.path),
+            (':scheme', 'http'),
+            (':authority', f'{self.server_hostname}:{self.port}'),
+        ]
+        conn.send_headers(stream_id=stream_id, headers=headers, end_stream=False)
+        out = conn.data_to_send()
+        if out and writer is not None:
+            writer.write(out)
+        self._open_streams.add(stream_id)
 
     # ------------------------------------------------------------------
     # Transport interface
@@ -259,8 +334,18 @@ class HTTP2Transport(Transport):
             self._reader = reader
             self._writer = writer
             self._connected = True
+            self._open_streams.add(1)  # stream 1 is open after HEADERS
+            self._build_stream_ids()
             self._connection_event.set()
             logger.info("HTTP/2 client connected")
+
+            # Pre-open additional streams for multi-stream mode
+            if self._multi_stream_enabled:
+                for sid in self._stream_ids:
+                    if sid != 1 and sid not in self._open_streams:
+                        await self._ensure_stream_open(conn, writer, sid)
+                logger.info("HTTP/2 multi-stream: %d streams pre-opened (%s)",
+                            len(self._open_streams), self._stream_assignment)
 
             # Read loop — dispatches events, queues data for recv()
             await self._read_loop(reader, conn, writer)
@@ -334,8 +419,12 @@ class HTTP2Transport(Transport):
         self._reader = reader
         self._writer = writer
         self._connected = True
+        self._build_stream_ids()
         self._connection_event.set()
         logger.info("HTTP/2 connection accepted")
+        if self._multi_stream_enabled:
+            logger.info("HTTP/2 multi-stream server: %d stream pool (%s)",
+                        len(self._stream_ids), self._stream_assignment)
 
         try:
             await self._read_loop(reader, conn, writer)
@@ -362,6 +451,7 @@ class HTTP2Transport(Transport):
             events = conn.receive_data(data)
             for event in events:
                 if isinstance(event, h2.events.DataReceived):
+                    self._open_streams.add(event.stream_id)
                     conn.acknowledge_received_data(
                         event.flow_controlled_length,
                         stream_id=event.stream_id,
@@ -385,11 +475,13 @@ class HTTP2Transport(Transport):
                 elif isinstance(event, h2.events.ResponseReceived):
                     # Server sent :status headers — stream is open
                     self._stream_open = True
-                    logger.debug("Stream 1 opened (response received)")
+                    self._open_streams.add(event.stream_id)
+                    logger.debug("Stream %d opened (response received)", event.stream_id)
                 elif isinstance(event, h2.events.RequestReceived):
                     # Client sent :method headers — open stream and respond
                     self._stream_open = True
-                    logger.debug("Stream 1 opened (request received)")
+                    self._open_streams.add(event.stream_id)
+                    logger.debug("Stream %d opened (request received)", event.stream_id)
                     response_headers = [
                         (':status', '200'),
                     ]
@@ -404,10 +496,16 @@ class HTTP2Transport(Transport):
                 elif isinstance(event, h2.events.WindowUpdated):
                     pass  # h2 library handles flow control bookkeeping
                 elif isinstance(event, h2.events.StreamEnded):
-                    self._stream_ended = True
-                    self._flush_window_update(conn, writer)
-                    await self._rx_queue.put(None)
-                    return
+                    self._open_streams.discard(event.stream_id)
+                    if self._multi_stream_enabled and self._open_streams:
+                        logger.debug("Stream %d ended (%d streams remain)",
+                                     event.stream_id, len(self._open_streams))
+                        # Don't exit — other streams still active
+                    else:
+                        self._stream_ended = True
+                        self._flush_window_update(conn, writer)
+                        await self._rx_queue.put(None)
+                        return
                 elif isinstance(event, h2.events.ConnectionTerminated):
                     self._flush_window_update(conn, writer)
                     await self._rx_queue.put(None)
@@ -462,6 +560,10 @@ class HTTP2Transport(Transport):
             raise TransportError(f"Send failed: {e}")
 
     async def _async_send(self, data: bytes) -> None:
+        # Select stream for this send — all chunks go to the same stream
+        stream_id = self._select_stream_id()
+        await self._ensure_stream_open(self._h2_conn, self._writer, stream_id)
+
         if self._chunk_enabled and len(data) > self._chunk_min_size:
             offset = 0
             remaining = len(data)
@@ -477,12 +579,12 @@ class HTTP2Transport(Transport):
                     chunk = data[offset:offset + chunk_size]
                     offset += chunk_size
                     remaining -= chunk_size
-                self._h2_conn.send_data(stream_id=1, data=chunk, end_stream=False)
+                self._h2_conn.send_data(stream_id=stream_id, data=chunk, end_stream=False)
             out = self._h2_conn.data_to_send()
             if out and self._writer is not None:
                 self._writer.write(out)
         else:
-            self._h2_conn.send_data(stream_id=1, data=data, end_stream=False)
+            self._h2_conn.send_data(stream_id=stream_id, data=data, end_stream=False)
             out = self._h2_conn.data_to_send()
             if out and self._writer is not None:
                 self._writer.write(out)
@@ -588,15 +690,20 @@ class HTTP2Transport(Transport):
         self._reader = None
         self._rx_queue = asyncio.Queue()
         self._rx_bytes_since_update = 0
+        self._open_streams.clear()
+        self._next_stream_idx = 0
         logger.info("HTTP/2 transport closed")
 
     def is_connected(self) -> bool:
         return self._connected
 
     def __repr__(self) -> str:
+        multi = ""
+        if self._multi_stream_enabled:
+            multi = f", streams={self._stream_count}/{self._stream_assignment}"
         return (
             f"HTTP2Transport(mode={self.mode}, host={self.host}, "
             f"port={self.port}, path={self.path}, "
             f"h2_available={_H2_AVAILABLE}, "
-            f"connected={self._connected})"
+            f"connected={self._connected}{multi})"
         )

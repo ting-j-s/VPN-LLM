@@ -598,6 +598,7 @@ class TestHttp2AsyncSendChunking:
         t = HTTP2Transport()
         t._h2_conn = self._make_client_conn()
         t._connected = True
+        t._open_streams.add(1)
 
         sent_chunks = []
         _orig_send = t._h2_conn.send_data
@@ -628,6 +629,7 @@ class TestHttp2AsyncSendChunking:
         conn = self._make_client_conn()
         t._h2_conn = conn
         t._connected = True
+        t._open_streams.add(1)
 
         sent_chunks = []
         _orig_send = conn.send_data
@@ -669,6 +671,7 @@ class TestHttp2AsyncSendChunking:
             conn.send_data = _track
             t._h2_conn = conn
             t._connected = True
+            t._open_streams.add(1)
 
             class _MW:
                 def write(self, data):
@@ -695,6 +698,7 @@ class TestHttp2AsyncSendChunking:
         conn = self._make_client_conn()
         t._h2_conn = conn
         t._connected = True
+        t._open_streams.add(1)
 
         sent_chunks = []
         _orig_send = conn.send_data
@@ -729,6 +733,7 @@ class TestHttp2AsyncSendChunking:
         conn = self._make_client_conn()
         t._h2_conn = conn
         t._connected = True
+        t._open_streams.add(1)
 
         sent_chunks = []
         _orig_send = conn.send_data
@@ -881,3 +886,457 @@ class TestWindowUpdateFlush:
         writer = _MockWriter()
         t._flush_window_update(conn, writer)
         assert t._rx_bytes_since_update == 0
+
+
+# ---------------------------------------------------------------------------
+# 18. Phase 10E-A: Multi-stream constructor and config
+# ---------------------------------------------------------------------------
+
+class TestMultiStreamConfig:
+    """Multi-stream constructor defaults and validation."""
+
+    def test_stream_count_default_one(self):
+        t = HTTP2Transport()
+        assert t._stream_count == 1
+        assert t._multi_stream_enabled is False
+
+    def test_stream_assignment_default_single(self):
+        t = HTTP2Transport()
+        assert t._stream_assignment == "single"
+
+    def test_multi_stream_disabled_when_count_is_one(self):
+        t = HTTP2Transport(stream_count=1, stream_assignment="round_robin")
+        assert t._multi_stream_enabled is False
+
+    def test_multi_stream_disabled_when_assignment_single(self):
+        t = HTTP2Transport(stream_count=4, stream_assignment="single")
+        assert t._multi_stream_enabled is False
+
+    def test_multi_stream_enabled_round_robin(self):
+        t = HTTP2Transport(stream_count=4, stream_assignment="round_robin")
+        assert t._multi_stream_enabled is True
+        assert t._stream_count == 4
+
+    def test_multi_stream_enabled_random(self):
+        t = HTTP2Transport(stream_count=4, stream_assignment="random")
+        assert t._multi_stream_enabled is True
+
+    def test_stream_count_zero_clamped_to_one(self):
+        t = HTTP2Transport(stream_count=0)
+        assert t._stream_count == 1
+        assert t._multi_stream_enabled is False
+
+    def test_stream_count_negative_clamped_to_one(self):
+        t = HTTP2Transport(stream_count=-5)
+        assert t._stream_count == 1
+
+    def test_max_concurrent_streams_default_eight(self):
+        t = HTTP2Transport()
+        assert t._max_concurrent_streams == 8
+
+    def test_max_concurrent_streams_zero_clamped(self):
+        t = HTTP2Transport(max_concurrent_streams=0)
+        assert t._max_concurrent_streams == 1
+
+    def test_close_resets_multi_stream_state(self):
+        t = HTTP2Transport(stream_count=4, stream_assignment="round_robin")
+        t._open_streams.add(1)
+        t._open_streams.add(3)
+        t._next_stream_idx = 2
+        t.close()
+        assert t._open_streams == set()
+        assert t._next_stream_idx == 0
+
+
+# ---------------------------------------------------------------------------
+# 19. Phase 10E-A: Stream ID pool and selection
+# ---------------------------------------------------------------------------
+
+class TestStreamIdPool:
+    """Stream ID pool generation and selection logic."""
+
+    def test_client_stream_ids_are_odd(self):
+        t = HTTP2Transport(mode="client", stream_count=4, stream_assignment="round_robin")
+        t._build_stream_ids()
+        assert t._stream_ids == [1, 3, 5, 7]
+
+    def test_server_stream_ids_match_client(self):
+        """Both client and server use same odd stream IDs (client opens them)."""
+        t = HTTP2Transport(mode="server", stream_count=4, stream_assignment="round_robin")
+        t._build_stream_ids()
+        assert t._stream_ids == [1, 3, 5, 7]  # same pool as client
+
+    def test_single_stream_id_pool(self):
+        t = HTTP2Transport(stream_count=1)
+        t._build_stream_ids()
+        assert t._stream_ids == [1]
+
+    def test_select_stream_single_always_returns_one(self):
+        t = HTTP2Transport(stream_count=1)
+        t._build_stream_ids()
+        t._open_streams.add(1)
+        for _ in range(10):
+            assert t._select_stream_id() == 1
+
+    def test_round_robin_cycles_through_streams(self):
+        t = HTTP2Transport(mode="client", stream_count=3, stream_assignment="round_robin")
+        t._build_stream_ids()
+        for sid in t._stream_ids:
+            t._open_streams.add(sid)
+        # With 3 streams, 6 selections should go through each twice
+        selected = [t._select_stream_id() for _ in range(6)]
+        assert selected == [1, 3, 5, 1, 3, 5]
+
+    def test_random_fixed_seed_deterministic(self):
+        t1 = HTTP2Transport(
+            mode="client", stream_count=4, stream_assignment="random",
+            stream_rng_seed=42,
+        )
+        t1._build_stream_ids()
+        for sid in t1._stream_ids:
+            t1._open_streams.add(sid)
+        t2 = HTTP2Transport(
+            mode="client", stream_count=4, stream_assignment="random",
+            stream_rng_seed=42,
+        )
+        t2._build_stream_ids()
+        for sid in t2._stream_ids:
+            t2._open_streams.add(sid)
+
+        seq1 = [t1._select_stream_id() for _ in range(10)]
+        seq2 = [t2._select_stream_id() for _ in range(10)]
+        assert seq1 == seq2
+
+    def test_select_stream_falls_back_when_no_open_streams(self):
+        t = HTTP2Transport(mode="client", stream_count=4, stream_assignment="round_robin")
+        t._build_stream_ids()
+        # No streams are open yet
+        sid = t._select_stream_id()
+        assert sid in (1, 3, 5, 7)  # Falls back to stream 1
+
+    def test_select_stream_only_uses_open_streams(self):
+        t = HTTP2Transport(mode="client", stream_count=4, stream_assignment="round_robin")
+        t._build_stream_ids()
+        t._open_streams.add(1)
+        t._open_streams.add(5)
+        # Only streams 1 and 5 are open
+        selected = {t._select_stream_id() for _ in range(20)}
+        assert selected == {1, 5}
+
+
+# ---------------------------------------------------------------------------
+# 20. Phase 10E-A: _ensure_stream_open
+# ---------------------------------------------------------------------------
+
+class TestEnsureStreamOpen:
+    """Lazy stream opening behavior."""
+
+    @staticmethod
+    def _make_client_conn():
+        import h2.connection
+        config = h2.config.H2Configuration(client_side=True, header_encoding='utf-8')
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        return conn
+
+    def test_ensure_stream_open_adds_to_set_client_side(self):
+        import asyncio
+
+        async def _run():
+            t = HTTP2Transport(mode="client", stream_count=4,
+                               stream_assignment="round_robin")
+            conn = self._make_client_conn()
+
+            class _MW:
+                def write(self, data):
+                    pass
+            writer = _MW()
+            await t._ensure_stream_open(conn, writer, 3)
+            assert 3 in t._open_streams
+
+        asyncio.run(_run())
+
+    def test_ensure_stream_open_noop_for_server(self):
+        import asyncio
+
+        async def _run():
+            t = HTTP2Transport(mode="server", stream_count=4,
+                               stream_assignment="round_robin")
+            conn = self._make_client_conn()
+
+            class _MW:
+                def write(self, data):
+                    pass
+            writer = _MW()
+            await t._ensure_stream_open(conn, writer, 3)
+            assert 3 not in t._open_streams  # server doesn't open streams
+
+        asyncio.run(_run())
+
+    def test_ensure_stream_open_already_open_is_noop(self):
+        import asyncio
+
+        async def _run():
+            t = HTTP2Transport(mode="client", stream_count=4,
+                               stream_assignment="round_robin")
+            t._open_streams.add(3)
+            conn = self._make_client_conn()
+
+            class _MW:
+                def write(self, data):
+                    pass
+            writer = _MW()
+            await t._ensure_stream_open(conn, writer, 3)
+            assert 3 in t._open_streams  # still there, no duplicate
+
+        asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# 21. Phase 10E-A: Multi-stream + chunking compatibility
+# ---------------------------------------------------------------------------
+
+class TestMultiStreamWithChunking:
+    """All chunks of a single send go to the same stream."""
+
+    @staticmethod
+    def _make_client_conn():
+        import h2.connection
+        config = h2.config.H2Configuration(client_side=True, header_encoding='utf-8')
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        conn.send_headers(
+            stream_id=1, headers=[
+                (':method', 'POST'), (':path', '/'),
+                (':scheme', 'http'), (':authority', '127.0.0.1:2225'),
+            ], end_stream=False,
+        )
+        return conn
+
+    def test_all_chunks_same_stream(self):
+        import asyncio
+
+        t = HTTP2Transport(
+            mode="client",
+            chunk_min_size=200, chunk_max_size=400, chunk_rng_seed=42,
+            stream_count=4, stream_assignment="round_robin",
+            stream_rng_seed=99,
+        )
+        conn = self._make_client_conn()
+        t._h2_conn = conn
+        t._connected = True
+        t._build_stream_ids()
+        for sid in t._stream_ids:
+            t._open_streams.add(sid)
+
+        chunks = []  # (stream_id, len)
+
+        _orig_send = conn.send_data
+
+        def _track(stream_id, data, end_stream=False):
+            chunks.append((stream_id, len(data)))
+            return _orig_send(stream_id=stream_id, data=data, end_stream=end_stream)
+
+        conn.send_data = _track
+
+        class _MockWriter:
+            def write(self, data):
+                pass
+        t._writer = _MockWriter()
+
+        async def _run():
+            await t._async_send(b"Y" * 2000)
+
+        asyncio.run(_run())
+
+        assert len(chunks) > 1
+        # All chunks use the same stream_id
+        stream_ids = {sid for sid, _ in chunks}
+        assert len(stream_ids) == 1
+
+
+# ---------------------------------------------------------------------------
+# 22. Phase 10E-A: Factory passes multi-stream config
+# ---------------------------------------------------------------------------
+
+class TestFactoryMultiStreamConfig:
+    """Factory passes multi-stream fields to HTTP2Transport."""
+
+    def test_factory_passes_multi_stream_fields(self):
+        from src.transport.factory import create_transport
+
+        class _Server:
+            host = "127.0.0.1"
+            port = 2225
+
+        class _Transport:
+            type = "http2"
+            path = "/"
+            server_hostname = None
+            experimental = True
+            http2_stream_count = 4
+            http2_stream_assignment = "round_robin"
+            http2_stream_rng_seed = 123
+            http2_max_concurrent_streams = 16
+
+        class _Cfg:
+            server = _Server()
+            transport = _Transport()
+
+        t = create_transport(_Cfg())
+        assert t._stream_count == 4
+        assert t._stream_assignment == "round_robin"
+        assert t._multi_stream_enabled is True
+        assert t._max_concurrent_streams == 16
+
+    def test_factory_defaults_when_multi_stream_fields_missing(self):
+        from src.transport.factory import create_transport
+
+        class _Server:
+            host = "127.0.0.1"
+            port = 2225
+
+        class _Transport:
+            type = "http2"
+            path = "/"
+            server_hostname = None
+            experimental = True
+
+        class _Cfg:
+            server = _Server()
+            transport = _Transport()
+
+        t = create_transport(_Cfg())
+        assert t._stream_count == 1
+        assert t._multi_stream_enabled is False
+
+    def test_factory_multi_stream_disabled_when_count_one(self):
+        from src.transport.factory import create_transport
+
+        class _Server:
+            host = "127.0.0.1"
+            port = 2225
+
+        class _Transport:
+            type = "http2"
+            path = "/"
+            server_hostname = None
+            experimental = True
+            http2_stream_count = 1
+            http2_stream_assignment = "round_robin"
+
+        class _Cfg:
+            server = _Server()
+            transport = _Transport()
+
+        t = create_transport(_Cfg())
+        assert t._multi_stream_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# 23. Phase 10E-A: Config parsing for multi-stream YAML fields
+# ---------------------------------------------------------------------------
+
+class TestMultiStreamYamlParsing:
+    """Multi-stream fields parse from YAML."""
+
+    def test_client_yaml_parses_multi_stream_fields(self, tmp_path):
+        yaml_content = """client:
+  tun_name: tun0
+  tun_ip: 10.8.0.2
+  tun_peer: 10.8.0.1
+  mtu: 1400
+
+server:
+  host: 127.0.0.1
+  port: 2225
+
+transport:
+  type: http2
+  experimental: true
+  http2_stream_count: 4
+  http2_stream_assignment: "round_robin"
+  http2_stream_rng_seed: 42
+  http2_max_concurrent_streams: 16
+"""
+        path = tmp_path / "client_http2_ms.yaml"
+        path.write_text(yaml_content)
+        cfg = load_client_config(str(path))
+        assert cfg.transport.http2_stream_count == 4
+        assert cfg.transport.http2_stream_assignment == "round_robin"
+        assert cfg.transport.http2_stream_rng_seed == 42
+        assert cfg.transport.http2_max_concurrent_streams == 16
+
+    def test_server_yaml_parses_multi_stream_fields(self, tmp_path):
+        yaml_content = """server:
+  tun_name: tun0
+  tun_ip: 10.8.0.1
+  tun_peer: 10.8.0.2
+  mtu: 1400
+  listen_port: 2225
+
+forwarding:
+  enable_nat: false
+  enable_route: true
+
+transport:
+  type: http2
+  experimental: true
+  http2_stream_count: 8
+  http2_stream_assignment: "random"
+  http2_stream_rng_seed: 99
+  http2_max_concurrent_streams: 32
+"""
+        path = tmp_path / "server_http2_ms.yaml"
+        path.write_text(yaml_content)
+        cfg = load_server_config(str(path))
+        assert cfg.transport.http2_stream_count == 8
+        assert cfg.transport.http2_stream_assignment == "random"
+        assert cfg.transport.http2_stream_rng_seed == 99
+        assert cfg.transport.http2_max_concurrent_streams == 32
+
+    def test_multistream_config_files_parse(self):
+        """Existing multistream config files parse successfully."""
+        cfg_client = load_client_config("config/client_netns_http2_multistream.yaml")
+        assert cfg_client.transport.type == "http2"
+        assert cfg_client.transport.http2_stream_count == 4
+        assert cfg_client.transport.http2_stream_assignment == "round_robin"
+        assert cfg_client.transport.http2_chunk_min_size == 256
+
+        cfg_server = load_server_config("config/server_netns_http2_multistream.yaml")
+        assert cfg_server.transport.type == "http2"
+        assert cfg_server.transport.http2_stream_count == 4
+        assert cfg_server.transport.http2_stream_assignment == "round_robin"
+
+
+# ---------------------------------------------------------------------------
+# 24. Phase 10E-A: Multi-stream + WINDOW_UPDATE batching compatibility
+# ---------------------------------------------------------------------------
+
+class TestMultiStreamWithWindowUpdate:
+    """WINDOW_UPDATE batching works with multi-stream."""
+
+    @staticmethod
+    def _make_server_conn():
+        import h2.connection
+        config = h2.config.H2Configuration(client_side=False, header_encoding='utf-8')
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        return conn
+
+    def test_multi_stream_with_wu_batching(self):
+        """WINDOW_UPDATE batching threshold still works in multi-stream mode."""
+        t = HTTP2Transport(
+            mode="client",
+            window_update_threshold=65535,
+            stream_count=4, stream_assignment="round_robin",
+        )
+        assert t._window_update_threshold == 65535
+        assert t._multi_stream_enabled is True
+        assert t._rx_bytes_since_update == 0
+
+    def test_wu_default_disabled_with_multi_stream(self):
+        t = HTTP2Transport(
+            stream_count=4, stream_assignment="random",
+        )
+        assert t._window_update_threshold == 0

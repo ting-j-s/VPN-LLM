@@ -73,6 +73,11 @@ class TransportConfig:
     http2_chunk_max_size: int = 0
     http2_window_update_threshold: int = 0
     http2_chunk_rng_seed: Optional[int] = None
+    # HTTP/2 multi-stream (Phase 10E-A, 1 = disabled, preserve existing behavior)
+    http2_stream_count: int = 1
+    http2_stream_assignment: str = "single"
+    http2_stream_rng_seed: Optional[int] = None
+    http2_max_concurrent_streams: int = 8
 
 
 @dataclass
@@ -224,6 +229,10 @@ def load_client_config(path: str) -> ClientConfig:
         http2_chunk_max_size=transport_data.get("http2_chunk_max_size", 0),
         http2_window_update_threshold=transport_data.get("http2_window_update_threshold", 0),
         http2_chunk_rng_seed=transport_data.get("http2_chunk_rng_seed"),
+        http2_stream_count=transport_data.get("http2_stream_count", 1),
+        http2_stream_assignment=transport_data.get("http2_stream_assignment", "single"),
+        http2_stream_rng_seed=transport_data.get("http2_stream_rng_seed"),
+        http2_max_concurrent_streams=transport_data.get("http2_max_concurrent_streams", 8),
     )
 
     # SSH-specific validation (only when using SSH transport)
@@ -297,6 +306,10 @@ def load_server_config(path: str) -> ServerConfig:
         http2_chunk_max_size=transport_data.get("http2_chunk_max_size", 0),
         http2_window_update_threshold=transport_data.get("http2_window_update_threshold", 0),
         http2_chunk_rng_seed=transport_data.get("http2_chunk_rng_seed"),
+        http2_stream_count=transport_data.get("http2_stream_count", 1),
+        http2_stream_assignment=transport_data.get("http2_stream_assignment", "single"),
+        http2_stream_rng_seed=transport_data.get("http2_stream_rng_seed"),
+        http2_max_concurrent_streams=transport_data.get("http2_max_concurrent_streams", 8),
     )
 
     # Build SessionConfig
