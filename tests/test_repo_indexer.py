@@ -247,12 +247,11 @@ class Foo:
         assert "public" in fi.symbols
         assert "Foo" in fi.symbols
 
-    def test_vpn_tunnel_dir_is_excluded(self, tmp_path):
-        """vpn_tunnel/ directory is excluded from indexing by default."""
-        # Create vpn_tunnel subtree
-        vpn_dir = tmp_path / "vpn_tunnel"
-        vpn_dir.mkdir()
-        (vpn_dir / "dummy.py").write_text("x = 1\n")
+    def test_excluded_dir_not_indexed(self, tmp_path):
+        """Excluded directories (e.g. .llm_tasks) are not indexed."""
+        excluded_dir = tmp_path / ".llm_tasks"
+        excluded_dir.mkdir()
+        (excluded_dir / "dummy.py").write_text("x = 1\n")
         # Create a normal file too
         src_dir = tmp_path / "src"
         src_dir.mkdir()
@@ -262,5 +261,5 @@ class Foo:
         index = indexer.build()
 
         assert "src/real.py" in index.files
-        assert "vpn_tunnel/dummy.py" not in index.files
-        assert not any(p.startswith("vpn_tunnel/") for p in index.files)
+        assert ".llm_tasks/dummy.py" not in index.files
+        assert not any(p.startswith(".llm_tasks/") for p in index.files)

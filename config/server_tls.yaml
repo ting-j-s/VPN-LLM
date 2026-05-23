@@ -12,8 +12,8 @@ forwarding:
 
 transport:
   type: tls
-  certfile: cert.pem
-  keyfile: key.pem
+  certfile: config/certs/cert.pem
+  keyfile: config/certs/key.pem
 
 session:
   heartbeat_timeout: 30

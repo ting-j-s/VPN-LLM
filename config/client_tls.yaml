@@ -11,7 +11,7 @@ server:
 
 transport:
   type: tls
-  cafile: cert.pem
+  cafile: config/certs/cert.pem
   verify_server: false
   insecure_skip_verify: true
 

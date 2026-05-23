@@ -38,6 +38,17 @@ from src.transport.http2_transport import HTTP2Transport, _H2_AVAILABLE
 # Helpers
 # ---------------------------------------------------------------------------
 
+def require_h2_stack():
+    """Skip the current test if h2 module stack is not installed.
+
+    h2 is an optional dependency — tests that exercise real h2 connections
+    (import h2.connection, h2.config, h2.settings, etc.) must call this before
+    constructing h2 objects.
+    """
+    pytest.importorskip("h2")
+    pytest.importorskip("hpack")
+    pytest.importorskip("hyperframe")
+
 def _make_client_config(**overrides):
     """Return a minimal ClientConfig-like object for factory testing."""
     transport_type = overrides.get("type", "http2")
@@ -577,6 +588,9 @@ class TestHttp2ChunkingConfig:
 class TestHttp2AsyncSendChunking:
     """async_send splits payloads when chunking is enabled."""
 
+    def setup_method(self):
+        require_h2_stack()
+
     @staticmethod
     def _make_client_conn():
         """Create a client h2 connection with stream 1 open for DATA."""
@@ -847,6 +861,9 @@ class TestFactoryHttp2AwareConfig:
 class TestWindowUpdateFlush:
     """_flush_window_update behavior."""
 
+    def setup_method(self):
+        require_h2_stack()
+
     def test_flush_noop_when_zero_bytes(self):
         t = HTTP2Transport(window_update_threshold=1000)
         t._rx_bytes_since_update = 0
@@ -1031,6 +1048,9 @@ class TestStreamIdPool:
 class TestEnsureStreamOpen:
     """Lazy stream opening behavior."""
 
+    def setup_method(self):
+        require_h2_stack()
+
     @staticmethod
     def _make_client_conn():
         import h2.connection
@@ -1098,6 +1118,9 @@ class TestEnsureStreamOpen:
 
 class TestMultiStreamWithChunking:
     """All chunks of a single send go to the same stream."""
+
+    def setup_method(self):
+        require_h2_stack()
 
     @staticmethod
     def _make_client_conn():
@@ -1364,6 +1387,7 @@ class TestSettingsProfileConfig:
 
     def test_invalid_profile_raises(self):
         """Invalid profile name raises TransportError."""
+        require_h2_stack()
         t = HTTP2Transport(settings_profile="invalid_profile")
         import h2.connection, h2.config
         conn = h2.connection.H2Connection(
@@ -1420,6 +1444,9 @@ class TestSettingsProfileConfig:
 
 class TestSettingsProfileApplication:
     """SETTINGS values are applied correctly to h2 connection."""
+
+    def setup_method(self):
+        require_h2_stack()
 
     @staticmethod
     def _make_client_conn():

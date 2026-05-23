@@ -241,14 +241,11 @@ Phase 9 introduced real TUN/netns before/after trace capture with statistical ev
 
 ## 10. Test Summary
 
-**Latest run (2026-05-23): 1619 passed, 10 skipped**
+**Latest run (2026-05-23): 1633 passed, 10 skipped**
 
 ```
-python -m pytest tests/ --ignore=vpn_tunnel -q
+python -m pytest tests/ -q
 ```
-
-The `--ignore=vpn_tunnel` flag is required to avoid duplicate module name conflicts
-between `tests/` and `vpn_tunnel/tests/`.
 
 ### Test Coverage by Area
 

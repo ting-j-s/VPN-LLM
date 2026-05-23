@@ -98,6 +98,8 @@ def _collect_final_report() -> dict:
 def _collect_phase9_results() -> dict:
     """Collect Phase 9 real trace matrix results."""
     candidates = [
+        REPO_ROOT / "outputs" / "phase9" / "phase9_real_matrix_e" / "results.json",
+        REPO_ROOT / "outputs" / "phase9" / "phase9_real_matrix" / "results.json",
         REPO_ROOT / "outputs" / "phase9_real_matrix_e" / "results.json",
         REPO_ROOT / "outputs" / "phase9_real_matrix" / "results.json",
     ]
@@ -133,10 +135,16 @@ def _collect_phase10_results() -> dict:
         "10E-B": "phase10e_b_settings",
     }
     for label, dirname in phase_dirs.items():
-        # Try repeated format first, then single-run format
-        path = REPO_ROOT / "outputs" / dirname / "summaries" / "repeated_before_after_comparison.json"
+        # Try new structure first (outputs/phase10/), then old flat structure
+        path = REPO_ROOT / "outputs" / "phase10" / dirname / "summaries" / "repeated_before_after_comparison.json"
         data = _read_json(path)
         is_repeated = data is not None
+        if data is None:
+            path = REPO_ROOT / "outputs" / dirname / "summaries" / "repeated_before_after_comparison.json"
+            data = _read_json(path)
+        if data is None:
+            path = REPO_ROOT / "outputs" / "phase10" / dirname / "summaries" / "before_after_comparison.json"
+            data = _read_json(path)
         if data is None:
             path = REPO_ROOT / "outputs" / dirname / "summaries" / "before_after_comparison.json"
             data = _read_json(path)

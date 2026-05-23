@@ -355,11 +355,11 @@ class TestRetrieveMixedFeature:
         assert len(paths) >= 2
 
 
-class TestVpnTunnelExclusion:
-    """vpn_tunnel/ files are excluded by RepoIndexer by default."""
+class TestExcludedDirFiltering:
+    """.llm_tasks/ files are excluded by RepoIndexer by default."""
 
-    def test_vpn_tunnel_not_in_index_for_transport_addition(self):
-        """vpn_tunnel/ subtree is not indexed, so transport_addition doesn't recall it."""
+    def test_excluded_dir_not_recalled_for_transport_addition(self):
+        """Excluded subtrees are not indexed, so transport_addition doesn't recall them."""
         index = _make_index_with_files([
             _fi("src/transport/tcp.py", symbols=["TCPTransport"]),
             _fi("src/transport/factory.py", symbols=["TransportFactory"]),
@@ -380,28 +380,25 @@ class TestVpnTunnelExclusion:
         retriever = FileRetriever(index)
         candidates = retriever.retrieve("add a new http2 transport", plan)
         paths = {c.path for c in candidates}
-        # vpn_tunnel/ must not appear — it's excluded by RepoIndexer
         for p in paths:
-            assert not p.startswith("vpn_tunnel/"), f"vpn_tunnel/ leaked: {p}"
+            assert not p.startswith(".llm_tasks/"), f".llm_tasks/ leaked: {p}"
 
-    def test_vpn_tunnel_explicitly_requested_can_be_included(self):
-        """When request includes 'vpn_tunnel' keyword, area inference picks mixed_feature,
-        and the index can contain vpn_tunnel files if manually added."""
-        # RepoIndexer excludes vpn_tunnel/ by default, but a caller can
-        # construct an index with vpn_tunnel/ files if needed.
+    def test_excluded_dir_explicitly_requested_can_be_included(self):
+        """When request includes an excluded dir keyword, area inference picks mixed_feature,
+        and the index can contain those files if manually added."""
         index = _make_index_with_files([
             _fi("src/transport/tcp.py", symbols=["TCPTransport"]),
-            _fi("vpn_tunnel/src/transport/tcp.py",
+            _fi(".llm_tasks/src/transport/tcp.py",
                 symbols=["TCPTransport"]),
         ])
 
         retriever = FileRetriever(index)
         candidates = retriever.retrieve(
-            "update vpn_tunnel tcp transport", None,
+            "update .llm_tasks tcp transport", None,
             affected_areas=["mixed_feature"],
         )
         paths = {c.path for c in candidates}
-        assert "vpn_tunnel/src/transport/tcp.py" in paths
+        assert ".llm_tasks/src/transport/tcp.py" in paths
 
 
 class TestCoreChangeFileSelection:

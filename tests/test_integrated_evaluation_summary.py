@@ -137,10 +137,24 @@ class TestRTTSummary:
 # Shaping summary
 # ---------------------------------------------------------------------------
 
+def _make_shaping_json(path):
+    """Write a minimal synthetic_comparison.json for testing."""
+    data = {
+        "generated_by": "test_fixture",
+        "seed": 42,
+        "before": {"fingerprint_risk_score": 0.60},
+        "after_padding": {"fingerprint_risk_score": 0.48},
+        "after_padding_aggregation": {"fingerprint_risk_score": 0.35},
+        "deltas": {"test_delta": "value"},
+    }
+    Path(path).write_text(json.dumps(data), encoding="utf-8")
+    return path
+
 
 class TestShapingSummary:
-    def test_reads_synthetic_comparison(self):
-        shaping = _collect_shaping_summary(Path("traces_after/synthetic_comparison.json"))
+    def test_reads_synthetic_comparison(self, tmp_path):
+        shaping_path = _make_shaping_json(tmp_path / "synthetic_comparison.json")
+        shaping = _collect_shaping_summary(Path(shaping_path))
         assert shaping["status"] == "ok"
         assert shaping["before_risk"] is not None
         assert "deltas" in shaping
@@ -156,10 +170,11 @@ class TestShapingSummary:
 
 
 class TestGenerateSummary:
-    def test_produces_all_gate_sections(self):
+    def test_produces_all_gate_sections(self, tmp_path):
+        shaping_path = _make_shaping_json(tmp_path / "synthetic_comparison.json")
         summary = generate_summary(
             fingerprint_path="traces/summary.json",
-            shaping_path="traces_after/synthetic_comparison.json",
+            shaping_path=str(shaping_path),
         )
         assert set(summary["gates"].keys()) == {
             "fingerprint", "active_probe", "cross_layer_rtt", "traffic_shaping",
@@ -167,10 +182,11 @@ class TestGenerateSummary:
         assert summary["fingerprint"]["status"] == "ok"
         assert summary["traffic_shaping"]["status"] == "ok"
 
-    def test_json_structure(self):
+    def test_json_structure(self, tmp_path):
+        shaping_path = _make_shaping_json(tmp_path / "synthetic_comparison.json")
         summary = generate_summary(
             fingerprint_path="traces/summary.json",
-            shaping_path="traces_after/synthetic_comparison.json",
+            shaping_path=str(shaping_path),
         )
         assert "generated_at" in summary
         assert "generated_by" in summary
@@ -187,10 +203,11 @@ class TestGenerateSummary:
 
 
 class TestMarkdownOutput:
-    def test_markdown_contains_all_four_gates(self):
+    def test_markdown_contains_all_four_gates(self, tmp_path):
+        shaping_path = _make_shaping_json(tmp_path / "synthetic_comparison.json")
         summary = generate_summary(
             fingerprint_path="traces/summary.json",
-            shaping_path="traces_after/synthetic_comparison.json",
+            shaping_path=str(shaping_path),
         )
         md = render_markdown(summary)
         assert "Fingerprint Gate" in md
@@ -210,10 +227,11 @@ class TestMarkdownOutput:
         assert "Fingerprint Gate" in md
         assert "missing" in md.lower() or "Missing" in md
 
-    def test_markdown_renders_risk_table(self):
+    def test_markdown_renders_risk_table(self, tmp_path):
+        shaping_path = _make_shaping_json(tmp_path / "synthetic_comparison.json")
         summary = generate_summary(
             fingerprint_path="traces/summary.json",
-            shaping_path="traces_after/synthetic_comparison.json",
+            shaping_path=str(shaping_path),
         )
         md = render_markdown(summary)
         assert "| Transport | Scenario |" in md

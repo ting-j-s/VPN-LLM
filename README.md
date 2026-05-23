@@ -28,7 +28,7 @@ pytest → Real Trace Matrix
 
 ```bash
 # Run all tests
-python -m pytest tests/ --ignore=vpn_tunnel -q
+python -m pytest tests/ -q
 
 # Mock TUN mode (no root)
 python -m src.server --config config/server.yaml --transport tcp --mock-tun &
@@ -118,7 +118,7 @@ HPACK/header behavior is explicitly deferred as future work.
 
 ```bash
 # Tests
-python -m pytest tests/ --ignore=vpn_tunnel -q
+python -m pytest tests/ -q
 
 # Integrated evaluation summary
 python scripts/generate_integrated_evaluation_summary.py
