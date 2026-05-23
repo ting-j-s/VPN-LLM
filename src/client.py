@@ -48,7 +48,7 @@ def main():
     parser.add_argument(
         "--transport",
         type=str,
-        choices=["ssh", "tcp", "tls", "websocket", "mock"],
+        choices=["ssh", "tcp", "tls", "websocket", "http2", "mock"],
         help="Override transport type from config",
     )
     parser.add_argument(

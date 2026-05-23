@@ -18,7 +18,7 @@ Machine-readable mapping of four detection papers to VPN-LLM evaluation infrastr
 | **Cross-Layer RTT** (passive detection) | Timing stability (CV-based) | Cross-Layer RTT Gate | `timing_stability_score` | `_HINT_MAP["timing_stability_score"]` → jitter, randomized scheduling | `src/shaping/jitter.py`, `src/shaping/scheduler.py` | Synthetic: CV=0.8575 (very stable, detectable). Jitter and scheduler modules implemented. | Before/after stability with jitter+scheduler enabled. |
 | **Cross-Layer RTT** (passive detection) | Network-layer RTT (ICMP) | Cross-Layer RTT Gate | `app_network_diff_ms` | Not yet mapped | Not yet implemented | `OptionalPingRunner` exists but ICMP is best-effort; no network diff data. | Requires CAP_NET_RAW or root for reliable ICMP. Real network-layer RTT measurement. |
 | **Cross-Layer RTT** (passive detection) | Multi-layer session misalignment | Cross-Layer RTT Gate | `rtt_risk_score` (composite) | `_HINT_MAP["rtt_risk_score"]` → multi-layer countermeasures | Composite: pacing + jitter + scheduler | Composite risk score from app/transport/network layers. Mock data only. | Real multi-layer RTT before/after with all three layers measured. |
-| **HTTP/2 Transport** (Phase 10B) | HTTP/2 wire-level fingerprinting: SETTINGS frames, HPACK, stream multiplexing patterns | Fingerprint Gate | `fingerprint_risk_score`, `ngram_entropy`, `burst_count` | Not yet mapped (HTTP/2-specific countermeasures) | `src/transport/http2_transport.py` (experimental, h2 optional dependency) | HTTP/2 transport skeleton importable without h2. Phase 10B: matrix integration with dependency_missing skip. No real HTTP/2 traces yet. | Install h2 (`pip install h2`). Run Phase 10C real http2 idle/ping/bulk traces. Compare HTTP/2 fingerprint vs tcp/tls/websocket baselines. Develop HTTP/2-aware countermeasures. |
+| **HTTP/2 Transport** (Phase 10C) | HTTP/2 wire-level fingerprinting: SETTINGS frames, HPACK, stream multiplexing patterns | Fingerprint Gate | `fingerprint_risk_score`, `ngram_entropy`, `burst_count` | Not yet mapped (HTTP/2-specific countermeasures) | `src/transport/http2_transport.py` (experimental, h2 required) | Phase 10C: real idle/ping/bulk traces captured. Idle risk 0.54→0.61 (regressed), ping risk 0.56→0.64 (regressed), bulk risk 0.64→0.62 (unchanged). Current shaping pipeline not effective for HTTP/2. | Develop HTTP/2-aware countermeasures: frame size randomization, multi-stream strategy, SETTINGS tuning (Phase 10D). |
 
 ## Summary
 
@@ -30,11 +30,11 @@ Machine-readable mapping of four detection papers to VPN-LLM evaluation infrastr
 | Transport types supported | 6 (tcp, tls, websocket, ssh, http2, mock) |
 | Surfaces with real-trace evidence | 7 (4 with only 3 real idle traces) |
 | Surfaces with synthetic-only evidence | 6 |
-| Surfaces with before/after data | 2 (synthetic only) |
+| Surfaces with before/after data | 5 (3 synthetic, 2 real) |
 | Remaining gaps: real TUN trace capture | 5+ surfaces |
 | Remaining gaps: real WebSocket RTT before/after | 2 surfaces |
 | Remaining gaps: real network probe testing | 2 surfaces |
-| Remaining gaps: HTTP/2 real trace | dependency optional, real trace pending |
+| Remaining gaps: HTTP/2-aware countermeasures | shaping mismatch, needs Phase 10D |
 
 ## How to Read
 

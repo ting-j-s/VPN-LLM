@@ -91,6 +91,13 @@ class HTTP2Transport(Transport):
         self._writer = None
         self._reader = None
 
+        # Queue for data received on HTTP/2 streams (decouples read loop from recv())
+        self._rx_queue: asyncio.Queue = asyncio.Queue()
+
+        # Track whether the tunnel stream is open
+        self._stream_open = False
+        self._stream_ended = False
+
     # ------------------------------------------------------------------
     # Event-loop management (same pattern as WebSocketTransport)
     # ------------------------------------------------------------------
@@ -201,6 +208,26 @@ class HTTP2Transport(Transport):
             conn.initiate_connection()
             writer.write(conn.data_to_send())
 
+            # Read server preface + SETTINGS
+            data = await asyncio.wait_for(reader.read(65535), timeout=5.0)
+            events = conn.receive_data(data)
+            for event in events:
+                if isinstance(event, h2.events.RemoteSettingsChanged):
+                    logger.debug("Client received server SETTINGS")
+            out = conn.data_to_send()
+            if out:
+                writer.write(out)
+
+            # Open stream 1 with HEADERS (required before sending DATA)
+            headers = [
+                (':method', 'POST'),
+                (':path', self.path),
+                (':scheme', 'http'),
+                (':authority', f'{self.server_hostname}:{self.port}'),
+            ]
+            conn.send_headers(stream_id=1, headers=headers, end_stream=False)
+            writer.write(conn.data_to_send())
+
             self._h2_conn = conn
             self._reader = reader
             self._writer = writer
@@ -208,23 +235,14 @@ class HTTP2Transport(Transport):
             self._connection_event.set()
             logger.info("HTTP/2 client connected")
 
-            # Read loop — runs until connection closes
-            while True:
-                data = await reader.read(65535)
-                if not data:
-                    break
-                events = conn.receive_data(data)
-                for event in events:
-                    if isinstance(event, h2.events.ConnectionTerminated):
-                        break
-                out = conn.data_to_send()
-                if out:
-                    writer.write(out)
+            # Read loop — dispatches events, queues data for recv()
+            await self._read_loop(reader, conn, writer)
         except Exception as e:
             self._setup_error = e
             self._connection_event.set()
         finally:
             self._connected = False
+            self._stream_open = False
             logger.debug("HTTP/2 client connection closed")
 
     def _start_server(self) -> None:
@@ -293,20 +311,84 @@ class HTTP2Transport(Transport):
         logger.info("HTTP/2 connection accepted")
 
         try:
-            while True:
-                data = await reader.read(65535)
-                if not data:
-                    break
-                events = conn.receive_data(data)
-                for event in events:
-                    if isinstance(event, h2.events.ConnectionTerminated):
-                        break
-                out = conn.data_to_send()
-                if out:
-                    writer.write(out)
+            await self._read_loop(reader, conn, writer)
         finally:
             self._connected = False
+            self._stream_open = False
             logger.debug("HTTP/2 server connection closed")
+
+    async def _read_loop(self, reader, conn, writer) -> None:
+        """Shared read loop: dispatch events, queue DataReceived for recv()."""
+        import h2.connection as _h2_conn_mod
+        import h2.events
+        import h2.config
+
+        while True:
+            try:
+                data = await asyncio.wait_for(reader.read(65535), timeout=30.0)
+            except asyncio.TimeoutError:
+                continue
+            if not data:
+                break
+            events = conn.receive_data(data)
+            for event in events:
+                if isinstance(event, h2.events.DataReceived):
+                    conn.acknowledge_received_data(
+                        event.flow_controlled_length,
+                        stream_id=event.stream_id,
+                    )
+                    # Increment flow control window for received data
+                    conn.increment_flow_control_window(
+                        event.flow_controlled_length,
+                        stream_id=event.stream_id,
+                    )
+                    conn.increment_flow_control_window(
+                        event.flow_controlled_length,
+                    )
+                    out = conn.data_to_send()
+                    if out:
+                        writer.write(out)
+                    await self._rx_queue.put(event.data)
+                elif isinstance(event, h2.events.ResponseReceived):
+                    # Server sent :status headers — stream is open
+                    self._stream_open = True
+                    logger.debug("Stream 1 opened (response received)")
+                elif isinstance(event, h2.events.RequestReceived):
+                    # Client sent :method headers — open stream and respond
+                    self._stream_open = True
+                    logger.debug("Stream 1 opened (request received)")
+                    response_headers = [
+                        (':status', '200'),
+                    ]
+                    conn.send_headers(
+                        stream_id=event.stream_id,
+                        headers=response_headers,
+                        end_stream=False,
+                    )
+                    out = conn.data_to_send()
+                    if out:
+                        writer.write(out)
+                elif isinstance(event, h2.events.WindowUpdated):
+                    pass  # h2 library handles flow control bookkeeping
+                elif isinstance(event, h2.events.StreamEnded):
+                    self._stream_ended = True
+                    await self._rx_queue.put(None)
+                    return
+                elif isinstance(event, h2.events.ConnectionTerminated):
+                    await self._rx_queue.put(None)
+                    return
+                elif isinstance(event, h2.events.RemoteSettingsChanged):
+                    logger.debug("Remote SETTINGS changed")
+                elif isinstance(event, h2.events.SettingsAcknowledged):
+                    pass
+                elif isinstance(event, h2.events.PingAcknowledged):
+                    pass
+                else:
+                    logger.debug("Unhandled h2 event: %s", type(event).__name__)
+            # Flush any protocol data
+            out = conn.data_to_send()
+            if out:
+                writer.write(out)
 
     def accept(self, timeout: Optional[float] = None) -> None:
         """Wait for a client to connect (server mode only)."""
@@ -381,43 +463,19 @@ class HTTP2Transport(Transport):
             raise TransportError(f"Receive failed: {e}")
 
     async def _async_recv(self, timeout: Optional[float]) -> Optional[bytes]:
-        import h2.events
-
-        while True:
-            if self._reader is None:
-                return None
-            try:
-                if timeout is not None:
-                    if timeout <= 0:
-                        data = await asyncio.wait_for(
-                            self._reader.read(65535), timeout=0.01
-                        )
-                    else:
-                        data = await asyncio.wait_for(
-                            self._reader.read(65535), timeout=timeout
-                        )
-                else:
-                    data = await self._reader.read(65535)
-            except asyncio.TimeoutError:
-                raise TransportTimeout("Receive timeout")
-
-            if not data:
-                return None
-
-            events = self._h2_conn.receive_data(data)
-            for event in events:
-                if isinstance(event, h2.events.DataReceived):
-                    self._h2_conn.acknowledge_received_data(
-                        event.flow_controlled_length, stream_id=event.stream_id
-                    )
-                    out = self._h2_conn.data_to_send()
-                    if out and self._writer is not None:
-                        self._writer.write(out)
-                    return event.data
-                elif isinstance(event, h2.events.ConnectionTerminated):
-                    return None
-                elif isinstance(event, h2.events.StreamEnded):
-                    return None
+        """Read from the rx queue (populated by the read loop)."""
+        if self._stream_ended:
+            return None
+        try:
+            if timeout is not None and timeout > 0:
+                data = await asyncio.wait_for(
+                    self._rx_queue.get(), timeout=timeout
+                )
+            else:
+                data = await self._rx_queue.get()
+            return data
+        except asyncio.TimeoutError:
+            raise TransportTimeout("Receive timeout")
 
     def close(self) -> None:
         """Close the connection and stop the background event loop.
@@ -430,10 +488,17 @@ class HTTP2Transport(Transport):
         logger.info("Closing HTTP/2 transport")
         self._shutting_down = True
         self._connected = False
+        self._stream_open = False
         self._server_ready.set()
         self._connection_event.set()
 
         loop = self._loop
+
+        # Wake up any pending recv()
+        try:
+            self._rx_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
 
         # Close writer
         writer = self._writer
@@ -466,6 +531,7 @@ class HTTP2Transport(Transport):
         self._loop_thread = None
         self._h2_conn = None
         self._reader = None
+        self._rx_queue = asyncio.Queue()
         logger.info("HTTP/2 transport closed")
 
     def is_connected(self) -> bool:

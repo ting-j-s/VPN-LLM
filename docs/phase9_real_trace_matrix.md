@@ -572,3 +572,65 @@ python3 scripts/run_phase9_real_trace_matrix.py run \
 - Generate before/after fingerprint reports
 - Compare http2 fingerprint characteristics against tcp/tls/websocket baselines
 - Integrate into the repeated trace comparison pipeline
+
+## 14. Phase 10C: HTTP/2 Real Trace Execution (2026-05-22)
+
+### 14.1 What Changed
+
+Phase 10C installed h2/hpack/hyperframe (v4.3.0) and ran the full idle/ping/bulk
+before/after trace matrix with real HTTP/2 transport.  14 real traces were captured
+(2 idle + 12 ping/bulk repeated).
+
+Two blocking issues were fixed to enable the data path:
+
+1. **argparse transport choices**: `server.py` and `client.py` `--transport` flag
+   did not include `http2` in its `choices` list, causing immediate startup failure.
+   Fixed by adding `http2` to the choices.
+
+2. **Data path: stream not opened**: The HTTP/2 transport skeleton called
+   `send_data(stream_id=1)` without first opening stream 1 via `send_headers()`.
+   The h2 library requires a HEADERS frame to create a stream before DATA frames
+   can be sent.  Fixed by:
+   - Client: opening stream 1 with POST headers after connection setup
+   - Server: responding with :status=200 headers when RequestReceived fires
+   - Adding `asyncio.Queue` to decouple the internal read loop from `recv()`
+   - Handling flow control (WINDOW_UPDATE increments) in the read loop
+
+### 14.2 Results
+
+| Scenario | Before Pkts | After Pkts | Before Risk | After Risk | Delta | Verdict | Quality |
+|---|---|---|---|---|---|---|---|
+| idle | 14 | 24 | 0.536 | 0.610 | +0.074 | regressed | ok |
+| ping (n=3) | 580.7±0.6 | 39.3±0.6 | 0.560±0.000 | 0.636±0.017 | +0.076±0.017 | regressed | ok |
+| bulk (n=3) | 93.0±2.0 | 52.0±2.6 | 0.637±0.012 | 0.619±0.045 | -0.018±0.054 | unchanged | ok |
+
+### 14.3 Cross-Transport Comparison
+
+| Transport | ping Δrisk | ping Verdict | bulk Δrisk | bulk Verdict |
+|---|---|---|---|---|
+| **http2** | **+0.076** | **regressed** | **-0.018** | **unchanged** |
+| tcp | insufficient | insufficient | -0.068 | improved |
+| tls | insufficient | insufficient | — | — |
+| websocket | -0.062 | improved | -0.056 | unchanged |
+
+HTTP/2 ping has the highest before packet count (581) due to HTTP/2 framing
+overhead on small ICMP packets.  The current shaping pipeline (padding,
+aggregation, jitter) reduces packet counts but does not improve fingerprint
+risk for HTTP/2 — the remaining packets have high repeated-length ratios
+and low entropy.
+
+### 14.4 Installation Note
+
+The h2 dependency must be installed **system-wide** (not `--user`) for netns
+execution because the runner invokes Python via `sudo ip netns exec`:
+
+```bash
+sudo python3 -m pip install --break-system-packages h2
+```
+
+### 14.5 Next: Phase 10D
+
+- HTTP/2-specific countermeasures: frame size randomization, multi-stream
+  strategy, SETTINGS tuning, WINDOW_UPDATE pacing
+- Real trace before/after with HTTP/2-aware shaping
+- Evaluate whether shaping brings HTTP/2 risk below tcp/websocket baselines

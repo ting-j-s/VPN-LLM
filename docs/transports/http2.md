@@ -98,17 +98,20 @@ session:
 ## Current limitations
 
 1. **Optional dependency**: Requires `pip install h2`.  Without it,
-   `connect()` raises `TransportError`.
+   `connect()` raises `TransportError`.  Must be installed system-wide
+   (via `sudo pip install --break-system-packages h2`) for netns/sudo
+   execution; user-level `pip install --user` is insufficient.
 2. **No browser emulation**: Uses bare `h2` library connection — no
    browser-like SETTINGS, WINDOW_UPDATE, or PRIORITY frame patterns.
 3. **Single stream**: Currently uses only stream ID 1.  Full multiplexing
    is not implemented.
 4. **No HPACK tuning**: Uses default `h2` HPACK settings.
-5. **Server accept not integration-tested**: The server accept path
-   compiles and passes unit tests, but has not been verified with
-   real TUN/netns traffic.
-6. **No Phase 9 trace data**: Not yet included in the before/after
-   real trace matrix.
+5. **Shaping mismatch**: Current pipeline (padding/aggregation/jitter)
+   was designed for TCP/TLS/WebSocket traffic.  HTTP/2 shows regressed
+   risk scores after shaping (idle +0.074, ping +0.076), indicating
+   HTTP/2-specific countermeasures are needed.
+6. **No WINDOW_UPDATE strategy**: Flow control updates follow default
+   h2 behavior and may generate predictable frame patterns.
 
 ## Phase 10B: HTTP/2 Matrix Integration (completed 2026-05-22)
 
@@ -122,26 +125,50 @@ Phase 10B added HTTP/2 to the Phase 9 trace matrix infrastructure:
 5. Four netns config files created: `config/{server,client}_netns_http2{,_shaping}.yaml`
 6. 44 new tests covering plan, env-check, skip semantics, config parse, patch prompts
 
-## Phase 10C: Real Trace Execution (planned)
+## Phase 10C: Real Trace Execution (completed 2026-05-22)
 
-1. Install `h2` (`pip install h2`)
-2. Run before/after traces for idle, ping, and bulk scenarios
-3. Compare HTTP/2 fingerprint characteristics against tcp, tls, and
-   websocket baselines
+Phase 10C installed h2 dependencies and ran the full Phase 9 trace matrix
+with HTTP/2 transport:
+
+1. Installed `h2`/`hpack`/`hyperframe` (v4.3.0) system-wide for sudo/netns
+2. Fixed two blocking issues:
+   - `server.py` and `client.py` argparse `--transport choices` missing `http2`
+   - Data path bug: stream 1 was never opened via HEADERS, causing
+     `NoSuchStreamError` on `send_data()`.  Fixed by adding HEADERS-based
+     stream open, internal `asyncio.Queue` for decoupling read loop from
+     `recv()`, and flow-control window management.
+3. Ran idle/ping/bulk before/after real traces (all `data_quality=ok`)
+
+### Real trace results
+
+| Scenario | Before Pkts | After Pkts | Before Risk | After Risk | Delta | Verdict |
+|---|---|---|---|---|---|---|
+| idle | 14 | 24 | 0.536 | 0.610 | +0.074 | regressed |
+| ping (n=3) | 580.7 | 39.3 | 0.560 | 0.636 | +0.076 | regressed |
+| bulk (n=3) | 93.0 | 52.0 | 0.637 | 0.619 | -0.018 | unchanged |
+
+### Cross-transport comparison
+
+| Transport | ping Δrisk | ping Verdict | bulk Δrisk | bulk Verdict |
+|---|---|---|---|---|
+| **http2** | **+0.076** | **regressed** | **-0.018** | **unchanged** |
+| tcp | insufficient | insufficient | -0.068 | improved |
+| tls | insufficient | insufficient | — | — |
+| websocket | -0.062 | improved | -0.056 | unchanged |
+
+HTTP/2 ping has the highest before packet count (581 vs 249-328 for others),
+indicating significant HTTP/2 frame overhead on small packets.  Shaping
+reduces packet counts but does not improve fingerprint risk — the current
+shaping pipeline was not designed for HTTP/2 frame patterns.
 
 ### Running HTTP/2 with Phase 9 Runner
 
-When h2 is installed:
-
 ```bash
+# Install deps (must be system-wide for sudo/netns)
+sudo python3 -m pip install --break-system-packages h2
+
 # Check environment
 python3 scripts/run_phase9_real_trace_matrix.py env-check
-
-# Plan matrix
-python3 scripts/run_phase9_real_trace_matrix.py plan \
-  --output-dir outputs/phase10c_http2_real \
-  --transports http2 \
-  --scenarios idle,ping,bulk
 
 # Real execution
 python3 scripts/run_phase9_real_trace_matrix.py run \
@@ -152,9 +179,18 @@ python3 scripts/run_phase9_real_trace_matrix.py run \
   --execute
 ```
 
-When h2 is missing, the runner produces `trace_type=dependency_missing`
-without attempting netns setup or TCP connections. All other transports
-continue to work normally.
+## Phase 10D: HTTP/2 Countermeasures (planned)
+
+1. **Frame size randomization**: Vary HTTP/2 DATA frame sizes to reduce
+   repeated-length patterns
+2. **Multi-stream strategy**: Distribute tunnel data across multiple streams
+   to increase entropy and reduce dominant-ngram fingerprint
+3. **SETTINGS randomization**: Tune initial SETTINGS to avoid predictable
+   HTTP/2 fingerprint
+4. **WINDOW_UPDATE pacing**: Control flow-window update timing to reduce
+   predictable frame patterns
+5. **HPACK table manipulation**: Introduce dynamic table churn to alter
+   header compression patterns
 
 ## Implementation notes
 
