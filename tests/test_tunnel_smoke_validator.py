@@ -196,9 +196,10 @@ class TestTaskNeedsTunnelSmoke:
     def test_test_addition_skips_smoke(self):
         assert task_needs_tunnel_smoke("test_addition") is False
 
-    def test_unknown_type_no_smoke(self):
-        assert task_needs_tunnel_smoke(None) is False
-        assert task_needs_tunnel_smoke("some_random_type") is False
+    def test_unknown_type_defaults_to_smoke(self):
+        """Default rule: every user request must pass tunnel smoke."""
+        assert task_needs_tunnel_smoke(None) is True
+        assert task_needs_tunnel_smoke("some_random_type") is True
 
     def test_runtime_contract_forces_smoke(self):
         contract = IntentContract(

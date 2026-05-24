@@ -512,20 +512,6 @@ def run_phase9_smoke(
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
-_NEEDS_TUNNEL_SMOKE_TYPES = frozenset({
-    "transport_addition",
-    "transport_change",
-    "feature_addition",
-    "mixed_feature_change",
-    "core_change",
-    "config_change",
-    "traffic_shaping",
-    "fingerprint_mitigation",
-    "llm_detection",
-    "probe_resistance",
-    "rtt_evaluation",
-})
-
 _SKIP_TUNNEL_SMOKE_TYPES = frozenset({
     "docs_update",
     "test_addition",
@@ -535,23 +521,19 @@ _SKIP_TUNNEL_SMOKE_TYPES = frozenset({
 def task_needs_tunnel_smoke(task_type: str | None, intent_contract=None) -> bool:
     """Determine whether a task type requires tunnel smoke validation.
 
-    Rules:
-    - docs_update, test_addition: skip unless contract demands it
-    - transport/shaping/core/config default: required
-    - runtime/end-to-end contracts always require it
+    Default rule: every user request must pass tunnel smoke.
+    Only docs_update and test_addition are exempt (unless their contract
+    explicitly demands runtime/end_to_end).
     """
     if intent_contract is not None:
         if getattr(intent_contract, "runtime_required", False):
             return True
         if getattr(intent_contract, "end_to_end_required", False):
             return True
-    if task_type is None:
-        return False
     if task_type in _SKIP_TUNNEL_SMOKE_TYPES:
         return False
-    if task_type in _NEEDS_TUNNEL_SMOKE_TYPES:
-        return True
-    return False
+    # Default: always verify the tunnel actually runs.
+    return True
 
 
 def run_tunnel_smoke_validation(
