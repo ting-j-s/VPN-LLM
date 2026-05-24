@@ -76,11 +76,15 @@ def detect_transport_name(request: str) -> str | None:
 
     patterns = [
         # "add/new/create/implement <name> transport/protocol"
-        r'(?:add|new|create|implement)\s+(?:a\s+)?(?:new\s+)?(\w[\w.-]*?)\s+(?:transport|protocol|外层协议)',
+        r'(?:add|new|create|implement)\s+(?:a\s+)?(?:new\s+)?([a-zA-Z][\w.-]*?)\s+(?:transport|protocol|外层协议)',
         # "<name> transport/protocol" after a verb
-        r'(?:generate|use|采用|使用|生成)\s+(?:a\s+)?(?:new\s+)?(\w[\w.-]*?)\s+(?:transport|protocol|外层协议)',
-        # Chinese: "外层协议<name>" (no spaces between Chinese chars and name)
-        r'外层协议\s*(\w[\w.-]+)',
+        r'(?:generate|use|采用|使用|生成)\s+(?:a\s+)?(?:new\s+)?([a-zA-Z][\w.-]*?)\s+(?:transport|protocol|外层协议)',
+        # Chinese: "添加/新增 <name> 外层协议/传输协议"
+        r'(?:添加|新增|加入|增加)\s*([a-zA-Z][\w.-]+)\s*(?:外层协议|传输协议|transport|protocol)',
+        # Chinese: "<name>外层协议" or "<name> 外层协议" (name before 外层协议)
+        r'([a-zA-Z][\w.-]+)\s*外层协议',
+        # Chinese: "外层协议<name>" (name after 外层协议)
+        r'外层协议\s*([a-zA-Z][\w.-]+)',
     ]
 
     for pat in patterns:
