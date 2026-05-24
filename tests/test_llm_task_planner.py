@@ -222,8 +222,8 @@ class TestLLMTaskPlannerTransportAddition:
         )
         return str(config)
 
-    def test_new_transport_with_addition_type_normalizes_to_none(self, monkeypatch, tmp_path):
-        """LLM returns target_transport=http2 + task_type=transport_addition → normalized to None."""
+    def test_new_transport_with_addition_type_keeps_target(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=http2 + task_type=transport_addition → target_transport kept."""
         config = self._setup(monkeypatch, tmp_path)
         plan_json = json.dumps({
             **_valid_plan_json(),
@@ -235,14 +235,11 @@ class TestLLMTaskPlannerTransportAddition:
         planner = _make_planner(monkeypatch, config, response_text=plan_json)
         result = planner.plan("add new http2 transport")
         assert result.task_type == "transport_addition"
-        assert result.target_transport is None
-        assert any("new_transport_name=http2" in r for r in result.requirements), (
-            f"expected new_transport_name=http2 in requirements, got {result.requirements}"
-        )
+        assert result.target_transport == "http2"
         assert any("create http2_transport.py" in r for r in result.requirements)
 
-    def test_feature_addition_with_new_transport_normalizes(self, monkeypatch, tmp_path):
-        """LLM returns target_transport=quic + task_type=feature_addition → normalized to None."""
+    def test_feature_addition_with_new_transport_keeps_target(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=quic + task_type=feature_addition → target_transport kept."""
         config = self._setup(monkeypatch, tmp_path)
         plan_json = json.dumps({
             **_valid_plan_json(),
@@ -252,11 +249,10 @@ class TestLLMTaskPlannerTransportAddition:
         })
         planner = _make_planner(monkeypatch, config, response_text=plan_json)
         result = planner.plan("add quic transport")
-        assert result.target_transport is None
-        assert any("new_transport_name=quic" in r for r in result.requirements)
+        assert result.target_transport == "quic"
 
-    def test_mixed_feature_change_with_new_transport_normalizes(self, monkeypatch, tmp_path):
-        """LLM returns target_transport=grpc + task_type=mixed_feature_change → normalized to None."""
+    def test_mixed_feature_change_with_new_transport_keeps_target(self, monkeypatch, tmp_path):
+        """LLM returns target_transport=grpc + task_type=mixed_feature_change → target_transport kept."""
         config = self._setup(monkeypatch, tmp_path)
         plan_json = json.dumps({
             **_valid_plan_json(),
@@ -266,8 +262,7 @@ class TestLLMTaskPlannerTransportAddition:
         })
         planner = _make_planner(monkeypatch, config, response_text=plan_json)
         result = planner.plan("add grpc transport and update core")
-        assert result.target_transport is None
-        assert any("new_transport_name=grpc" in r for r in result.requirements)
+        assert result.target_transport == "grpc"
 
     def test_existing_transport_with_addition_type_passes_unchanged(self, monkeypatch, tmp_path):
         """LLM returns target_transport=websocket + task_type=transport_addition → passed through as-is."""
@@ -304,8 +299,8 @@ class TestLLMTaskPlannerTransportAddition:
         with pytest.raises(LLMTaskPlannerError, match="Invalid target_transport"):
             planner.plan("use badtransport")
 
-    def test_new_transport_requirements_preserve_existing(self, monkeypatch, tmp_path):
-        """When normalizing, existing requirements are preserved alongside new_transport_name."""
+    def test_new_transport_requirements_preserved(self, monkeypatch, tmp_path):
+        """target_transport is kept for addition types alongside existing requirements."""
         config = self._setup(monkeypatch, tmp_path)
         plan_json = json.dumps({
             **_valid_plan_json(),
@@ -316,9 +311,9 @@ class TestLLMTaskPlannerTransportAddition:
         })
         planner = _make_planner(monkeypatch, config, response_text=plan_json)
         result = planner.plan("add http2 transport")
+        assert result.target_transport == "http2"
         assert "add config support" in result.requirements
         assert "add unit tests" in result.requirements
-        assert any("new_transport_name=http2" in r for r in result.requirements)
 
 
 # ---------------------------------------------------------------------------

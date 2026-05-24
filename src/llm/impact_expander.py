@@ -416,13 +416,20 @@ class ImpactExpander:
         if task_type in ("transport_addition", "feature_addition"):
             transport_name = detect_transport_name(request)
             if transport_name:
-                required = get_transport_addition_required_files(transport_name)
+                import os
+                root_dir = self._index.root_dir
+                required = get_transport_addition_required_files(transport_name, root_dir=root_dir)
 
-                # must_edit: enforce that factory.py and config.py are in scope
+                # must_edit: enforce that factory.py, config.py, and any existing
+                # transport/test/doc files are in scope
                 for f in required["must_edit"]:
                     if f in self._index.files:
                         must_edit.add(f)
                         action_sources[f] = f"task_rule:transport_addition(must_edit)"
+                    elif os.path.isfile(f):
+                        # File exists on disk but not in index — still track it
+                        must_edit.add(f)
+                        action_sources[f] = f"task_rule:transport_addition(must_edit, on_disk)"
 
                 # may_edit: add if exists, otherwise skip
                 for f in required["may_edit"]:
@@ -432,7 +439,7 @@ class ImpactExpander:
 
                 # must_create: these files don't exist yet
                 for f in required["must_create"]:
-                    if f not in self._index.files:
+                    if f not in self._index.files and not os.path.isfile(f):
                         must_create_files.add(f)
                         action_sources[f] = f"task_rule:transport_addition(must_create)"
 
@@ -442,7 +449,8 @@ class ImpactExpander:
             if c.action == "test" or self._index.files.get(c.path, FileInfo(path=c.path, file_type="other")).is_test:
                 if c.path in self._index.files:
                     test_files.add(c.path)
-                    action_sources[c.path] = f"test:candidate(action={c.action})"
+                    if c.path not in action_sources:
+                        action_sources[c.path] = f"test:candidate(action={c.action})"
         # Also include test files matching area test_patterns
         for area_key in area_keys:
             from src.llm.file_retriever import _TASK_TYPE_RULES
@@ -469,7 +477,8 @@ class ImpactExpander:
             if c.action == "doc" or self._index.files.get(c.path, FileInfo(path=c.path, file_type="other")).is_doc:
                 if c.path in self._index.files:
                     doc_files.add(c.path)
-                    action_sources[c.path] = f"doc:candidate(action={c.action})"
+                    if c.path not in action_sources:
+                        action_sources[c.path] = f"doc:candidate(action={c.action})"
         # Always include doc files from index
         for path, fi in self._index.files.items():
             if fi.is_doc:
@@ -493,15 +502,26 @@ class ImpactExpander:
 
         # Remove must_edit/must_review entries that are test or doc files
         # (they belong in test_files/doc_files, not edit/review).
+        # HOWEVER: keep files that were explicitly added by task_rules (e.g.
+        # transport_addition required files). The LLM must be allowed to edit
+        # these to produce a complete patch.
         # Also remove anything under tests/ or docs/ directories from edit/review.
         for f in list(must_edit):
             fi = self._index.files.get(f)
+            src = action_sources.get(f, "")
+            is_task_rule = src.startswith("task_rule:")
+            if is_task_rule:
+                continue
             if fi and (fi.is_test or fi.is_doc):
                 must_edit.discard(f)
             elif f.startswith("tests/") or f.startswith("docs/"):
                 must_edit.discard(f)
         for f in list(must_review):
             fi = self._index.files.get(f)
+            src = action_sources.get(f, "")
+            is_task_rule = src.startswith("task_rule:")
+            if is_task_rule:
+                continue
             if fi and (fi.is_test or fi.is_doc):
                 must_review.discard(f)
             elif f.startswith("tests/") or f.startswith("docs/"):

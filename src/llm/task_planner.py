@@ -5,6 +5,10 @@ MVP: rule-based classification, no real LLM call.
 """
 
 from dataclasses import dataclass, field
+from typing import Optional
+
+from src.llm.task_rules import analyze_implementation_level
+from src.llm.intent_contract import IntentContract, infer_intent_contract
 
 
 # Task type constants
@@ -23,6 +27,8 @@ TRANSPORT_KEYWORDS = {
     "tls": "tls",
     "ssh": "ssh",
     "mock": "mock",
+    "socks5": "socks5",
+    "socks": "socks5",
 }
 
 CORE_KEYWORDS = (
@@ -48,6 +54,14 @@ class TaskPlan:
     constraints: list[str] = field(default_factory=list)
     validation_goals: list[str] = field(default_factory=list)
     ambiguity: list[str] = field(default_factory=list)
+    # Implementation-level fields (derived from request analysis)
+    implementation_level: str = "skeleton"
+    runtime_required: bool = False
+    allow_skeleton: bool = True
+    requires_default_switch: bool = False
+    default_transport_target: str | None = None
+    # Full intent contract for user-goal validation (V2)
+    intent_contract: Optional[IntentContract] = None
 
 
 class TaskPlanner:
@@ -76,11 +90,26 @@ class TaskPlanner:
         target_transport = TaskPlanner._extract_transport(request_lower)
         affected_areas = TaskPlanner._extract_areas(request_lower, task_type, target_transport)
 
+        impl = analyze_implementation_level(request, task_type)
+
+        # Build full IntentContract for downstream intent validation
+        intent_contract = impl.get("intent_contract") or infer_intent_contract(
+            request,
+            task_type=task_type,
+            target_transport=target_transport,
+        )
+
         return TaskPlan(
             task_type=task_type,
             description=request.strip(),
             target_transport=target_transport,
             affected_areas=affected_areas,
+            implementation_level=impl["implementation_level"],
+            runtime_required=impl["runtime_required"],
+            allow_skeleton=impl["allow_skeleton"],
+            requires_default_switch=impl["requires_default_switch"],
+            default_transport_target=impl["default_transport_target"],
+            intent_contract=intent_contract,
         )
 
     @staticmethod

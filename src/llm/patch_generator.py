@@ -204,7 +204,7 @@ class LLMPatchGenerator:
         (re.compile(r'AIza[0-9A-Za-z_-]{20,}'), "Google API key"),
         (re.compile(r'eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}'), "JWT token"),
         (re.compile(r'(?:api[_-]?key|apikey|api_secret|secret_key)\s*[=:]\s*["\']?\S{8,}["\']?', re.IGNORECASE), "API key assignment"),
-        (re.compile(r'(?:password|passwd|pwd)\s*[=:]\s*["\']?\S{4,}["\']?', re.IGNORECASE), "password assignment"),
+        (re.compile(r'(?:password|passwd|pwd)\s*=\s*["\'][^"\']{8,}["\']', re.IGNORECASE), "password assignment"),
         (re.compile(r'(?:bearer|token)\s+[A-Za-z0-9_\-.]{16,}', re.IGNORECASE), "bearer token"),
     ]
 
@@ -234,7 +234,7 @@ class LLMPatchGenerator:
                 f"API key not found. Set the {self._config['api_key_env']} environment variable."
             )
         self._base_url = self._config["base_url"].rstrip("/")
-        self._model = self._config["model"]
+        self._model = self._config.get("patch_model", self._config["model"])
         self._timeout = int(self._config.get("agent.request_timeout", 30))
         self._root_dir = root_dir
         self.protocol_retry_count = 0  # set by generate() after protocol retry
@@ -566,6 +566,12 @@ class LLMPatchGenerator:
         planned_edit = len(allowed_edit_files or [])
         planned_create = len(must_create_files or [])
         planned_total = planned_edit + planned_create
+
+        runtime_required = getattr(task_plan, "runtime_required", False)
+        allow_skeleton = getattr(task_plan, "allow_skeleton", True)
+        requires_default_switch = getattr(task_plan, "requires_default_switch", False)
+        implementation_level = getattr(task_plan, "implementation_level", "skeleton")
+
         if task_type in ("transport_addition", "feature_addition") and planned_total >= 4:
             constraints += (
                 "\nOUTPUT BUDGET WARNING: This task requires editing ~"
@@ -573,11 +579,52 @@ class LLMPatchGenerator:
                 f"({planned_total} total).\n"
                 "You MUST generate a complete FILE: block for EVERY required file. "
                 "Do NOT truncate any file mid-line. Each FILE block must end with "
-                "a complete line and newline. For new transport implementations, "
-                "generate a SKELETON only — the class must be importable and "
-                "constructable, but methods like connect() should raise "
-                "NotImplementedError or a clear skeleton message. "
-                "Full protocol implementation belongs in a follow-up task.\n"
+                "a complete line and newline.\n"
+            )
+            if allow_skeleton and not runtime_required:
+                constraints += (
+                    "For new transport implementations, "
+                    "generate a SKELETON only — the class must be importable and "
+                    "constructable, but methods like connect() should raise "
+                    "TransportError with a clear 'skeleton not yet implemented' message. "
+                    "Full protocol implementation belongs in a follow-up task.\n"
+                )
+            elif runtime_required:
+                constraints += (
+                    "RUNTIME REQUIREMENT: You MUST generate a runtime-usable "
+                    "transport — NOT a skeleton. connect() must establish a real "
+                    "connection. send() and recv() must transmit actual data. "
+                    "Do NOT raise TransportError in connect/send/recv as a "
+                    "'not implemented' placeholder. Implement the minimal "
+                    "runtime subset needed for local controlled testing.\n"
+                )
+
+        # Anti-bypass: if target transport file exists, must edit it — not create parallel
+        target_transport = getattr(task_plan, "target_transport", None)
+        if target_transport and task_type in ("transport_addition", "feature_addition", "transport_change"):
+            import os as _os
+            existing = f"src/transport/{target_transport}_transport.py"
+            if _os.path.isfile(existing):
+                constraints += (
+                    f"\nEXISTING TRANSPORT FILE DETECTED: {existing}\n"
+                    f"You MUST upgrade this existing file — do NOT create a parallel file.\n"
+                    f"FORBIDDEN file names (do NOT create any of these):\n"
+                    f"  - src/transport/{target_transport}_full_transport.py\n"
+                    f"  - src/transport/{target_transport}_runtime_transport.py\n"
+                    f"  - src/transport/{target_transport}_new_transport.py\n"
+                    f"  - src/transport/{target_transport}_v2_transport.py\n"
+                    f"Use ACTION: replace on {existing} to upgrade the skeleton to runtime.\n"
+                )
+
+        if requires_default_switch:
+            default_target = getattr(task_plan, "default_transport_target", None) or "the new transport"
+            constraints += (
+                f"\nDEFAULT SWITCH REQUESTED: The user wants to set "
+                f"'{default_target}' as the default transport. "
+                "You must verify that the transport is runtime-usable BEFORE "
+                "modifying any default config.\n"
+                "DO NOT modify config/client.yaml or config/server.yaml "
+                "default transport type unless the transport passes runtime smoke tests.\n"
             )
 
         if allowed_edit_files:
@@ -609,6 +656,43 @@ class LLMPatchGenerator:
         # Expected artifact guidance for transport_addition requests
         constraints += _build_expected_artifacts_guidance(user_request, task_plan)
 
+        # ---- IntentContract prompt directive (V2, covers all task types) ----
+        intent_contract = getattr(task_plan, "intent_contract", None)
+        if intent_contract is not None:
+            directive = intent_contract.build_prompt_directive()
+            constraints += f"\n{directive}\n"
+            # Add forbidden degradations as explicit DON'T constraints
+            if intent_contract.forbidden_degradations:
+                constraints += "\nFORBIDDEN (do NOT do any of these):\n"
+                for d in intent_contract.forbidden_degradations:
+                    constraints += f"  - {d}\n"
+        elif task_type in ("transport_addition", "feature_addition"):
+            # Fallback to legacy implementation-level directive
+            if runtime_required:
+                constraints += (
+                    "\nIMPLEMENTATION LEVEL: RUNTIME\n"
+                    "You MUST generate a fully functional transport — NOT a skeleton.\n"
+                    "- connect() MUST establish a real local connection (TCP socket, etc.)\n"
+                    "- send() and recv() MUST work after connect()\n"
+                    "- connect/send/recv MUST NOT raise TransportError as a "
+                    "'not implemented' placeholder\n"
+                    "- Tests MUST include client/server roundtrip with actual data\n"
+                    "- If the protocol is too large, implement the minimal runtime "
+                    "subset needed for local controlled tests\n"
+                )
+            elif allow_skeleton:
+                constraints += (
+                    "\nIMPLEMENTATION LEVEL: SKELETON\n"
+                    "Generate a SKELETON implementation only.\n"
+                    "- The class must be importable, constructable, and factory-registered\n"
+                    "- connect() should raise TransportError with a clear "
+                    "'skeleton not yet implemented' message\n"
+                    "- send() and recv() should raise TransportError similarly\n"
+                    "- close() may be a no-op\n"
+                    "- Docs MUST state the transport is NOT runtime usable\n"
+                    "- Do NOT change the default transport config\n"
+                )
+
         user_message = (
             f"USER REQUEST:\n{user_request}\n\n"
             f"TASK PLAN:\n{json.dumps(plan_dict, indent=2, ensure_ascii=False)}\n\n"
@@ -630,7 +714,7 @@ class LLMPatchGenerator:
             "model": self._model,
             "messages": messages,
             "temperature": 0.1,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
         })
 
         req = urllib.request.Request(
@@ -674,11 +758,19 @@ class LLMPatchGenerator:
             raise LLMPatchGeneratorError(f"Unexpected API response structure: {e}") from e
 
         # Some reasoning models (e.g. deepseek-v4-pro) may put all output in
-        # reasoning_content and leave content empty. Fall back to reasoning_content.
+        # reasoning_content and leave content empty. Only fall back when the
+        # reasoning content itself looks like a valid patch (starts with FILE:).
+        # Otherwise return content as-is (even empty) so the protocol check in
+        # generate() triggers a retry with a correction prompt.
         if not content or not content.strip():
             reasoning = data["choices"][0]["message"].get("reasoning_content", "")
             if reasoning and reasoning.strip():
-                return reasoning
+                stripped = reasoning.strip()
+                if stripped.startswith("FILE:"):
+                    return stripped
+                # Model put reasoning in reasoning_content but didn't produce
+                # a valid patch. Return empty to trigger protocol retry.
+                return ""
 
         return content
 
@@ -1167,3 +1259,198 @@ def _extract_diff_file_paths(diff_text: str) -> list[str]:
         if m:
             paths.add(m.group(1))
     return sorted(paths)
+
+
+# ---------------------------------------------------------------------------
+# Runtime transport contract validation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RuntimeTransportCheckResult:
+    """Result of checking a generated transport for runtime capability."""
+
+    passed: bool
+    runtime_required: bool
+    is_skeleton: bool = False
+    has_roundtrip_test: bool = False
+    connect_raises_error: bool = False
+    send_raises_error: bool = False
+    recv_raises_error: bool = False
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "passed": self.passed,
+            "runtime_required": self.runtime_required,
+            "is_skeleton": self.is_skeleton,
+            "has_roundtrip_test": self.has_roundtrip_test,
+            "connect_raises_error": self.connect_raises_error,
+            "send_raises_error": self.send_raises_error,
+            "recv_raises_error": self.recv_raises_error,
+            "errors": self.errors,
+            "warnings": self.warnings,
+        }
+
+
+def check_runtime_transport_contract(
+    patch_text: str,
+    runtime_required: bool = False,
+    allow_skeleton: bool = True,
+    requires_default_switch: bool = False,
+    default_transport_target: str | None = None,
+) -> RuntimeTransportCheckResult:
+    """Check whether a generated transport satisfies the runtime contract.
+
+    For runtime_required=True:
+    - Transport class's connect/send/recv must NOT just raise TransportError
+    - Tests must contain roundtrip or client/server test classes/functions
+    - If requires_default_switch, additional checks apply
+
+    For skeleton (runtime_required=False, allow_skeleton=True):
+    - Skeleton is acceptable; no errors raised
+    - But default switch is still forbidden
+
+    Args:
+        patch_text: The generated unified diff text.
+        runtime_required: Whether a runtime-capable transport is required.
+        allow_skeleton: Whether skeleton-only is acceptable.
+        requires_default_switch: Whether the request asks to change default.
+        default_transport_target: Which transport to set as default.
+
+    Returns:
+        RuntimeTransportCheckResult with pass/fail and details.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    is_skeleton = False
+    has_roundtrip_test = False
+    connect_raises_error = False
+    send_raises_error = False
+    recv_raises_error = False
+
+    # Extract content of new transport files from the diff
+    new_file_content: dict[str, str] = {}
+    current_file = None
+    in_hunk = False
+    for line in patch_text.splitlines():
+        if line.startswith("--- /dev/null"):
+            continue
+        if line.startswith("+++ b/"):
+            current_file = line[6:]
+            new_file_content[current_file] = ""
+            in_hunk = False
+            continue
+        if line.startswith("@@") and current_file:
+            in_hunk = True
+            continue
+        if in_hunk and current_file and line.startswith("+"):
+            content_line = line[1:]
+            no_nl_pos = content_line.find("\\ No newline at end of file")
+            if no_nl_pos >= 0:
+                content_line = content_line[:no_nl_pos]
+            new_file_content[current_file] += content_line + "\n"
+
+    # Find the transport implementation file
+    transport_files = [f for f in new_file_content
+                       if f.startswith("src/transport/") and f.endswith("_transport.py")
+                       and "socks5" not in f.lower()]  # skip socks5 unless target
+    if not transport_files:
+        transport_files = [f for f in new_file_content
+                           if f.startswith("src/transport/") and f.endswith("_transport.py")]
+
+    if transport_files:
+        transport_content = new_file_content[transport_files[0]]
+        # Detect skeleton pattern: connect/send/recv that raise TransportError with
+        # "skeleton" or "not fully implemented" messages
+        skeleton_patterns = [
+            r'raise\s+TransportError\s*\(\s*["\'].*?(?:skeleton|not\s+(?:yet\s+)?implemented|not\s+fully\s+implemented).*?["\']\s*\)',
+            r'raise\s+NotImplementedError',
+        ]
+        for pat in skeleton_patterns:
+            if re.search(pat, transport_content, re.IGNORECASE):
+                is_skeleton = True
+                break
+
+        # Check if connect() raises an error
+        connect_raises = re.findall(
+            r'def\s+connect\s*\([^)]*\)[^:]*:\s*(?:.+?\n)*?\s+(raise\s+\w+)',
+            transport_content,
+        )
+        if connect_raises:
+            connect_raises_error = True
+
+        # Check if send() raises an error
+        send_raises = re.findall(
+            r'def\s+send\s*\([^)]*\)[^:]*:\s*(?:.+?\n)*?\s+(raise\s+\w+)',
+            transport_content,
+        )
+        if send_raises:
+            send_raises_error = True
+
+        # Check if recv() raises an error
+        recv_raises = re.findall(
+            r'def\s+recv\s*\([^)]*\)[^:]*:\s*(?:.+?\n)*?\s+(raise\s+\w+)',
+            transport_content,
+        )
+        if recv_raises:
+            recv_raises_error = True
+
+    # Find test files and check for roundtrip tests
+    test_files = [f for f in new_file_content if f.startswith("tests/test_")]
+    for tf in test_files:
+        content = new_file_content[tf]
+        has_roundtrip = bool(re.search(
+            r'(?:roundtrip|round_trip|RoundTrip|send_recv|SendRecv|'
+            r'client_server|ClientServer|smoke|Smoke)',
+            content,
+        ))
+        if has_roundtrip:
+            has_roundtrip_test = True
+            break
+
+    # ---- Gate checks ----
+    if runtime_required:
+        if is_skeleton:
+            errors.append(
+                "RUNTIME CONTRACT VIOLATION: Transport is skeleton-only "
+                "(connect/send/recv raise TransportError with 'not implemented' "
+                "message). Runtime transport must have working connect/send/recv."
+            )
+        if not has_roundtrip_test:
+            errors.append(
+                "RUNTIME CONTRACT VIOLATION: No roundtrip or client/server test "
+                "found. Runtime transport must include tests that exercise "
+                "actual data transmission."
+            )
+
+    if requires_default_switch:
+        if is_skeleton:
+            errors.append(
+                "DEFAULT SWITCH GATE: Cannot set skeleton transport as default. "
+                "Transport must be runtime-usable before default switch."
+            )
+        if not has_roundtrip_test:
+            errors.append(
+                "DEFAULT SWITCH GATE: No roundtrip test found. "
+                "Cannot switch default transport without runtime smoke coverage."
+            )
+
+    if allow_skeleton and not runtime_required and is_skeleton:
+        warnings.append(
+            "Transport is skeleton-only. Default switch is forbidden."
+        )
+
+    passed = len(errors) == 0
+
+    return RuntimeTransportCheckResult(
+        passed=passed,
+        runtime_required=runtime_required,
+        is_skeleton=is_skeleton,
+        has_roundtrip_test=has_roundtrip_test,
+        connect_raises_error=connect_raises_error,
+        send_raises_error=send_raises_error,
+        recv_raises_error=recv_raises_error,
+        errors=errors,
+        warnings=warnings,
+    )

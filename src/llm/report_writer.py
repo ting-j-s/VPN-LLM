@@ -28,6 +28,8 @@ def write_report(
     semantic_retry_count: int = 0,
     semantic_retry_used: bool = False,
     patch_generation_error: str | None = None,
+    intent_result=None,
+    tunnel_smoke_result=None,
 ) -> str:
     """Generate a Markdown validation report.
 
@@ -56,6 +58,7 @@ def write_report(
         Markdown report string.
     """
     risk_level = getattr(plan, "risk_level", None)
+    intent_contract = getattr(plan, "intent_contract", None)
 
     lines = []
     lines.append("# LLM Task Report")
@@ -69,7 +72,53 @@ def write_report(
     lines.append(f"- **Target Transport**: `{plan.target_transport or 'N/A'}`")
     if risk_level:
         lines.append(f"- **Risk Level**: `{risk_level}`")
+    impl_level = getattr(plan, "implementation_level", None)
+    if impl_level:
+        lines.append(f"- **Implementation Level**: `{impl_level}`")
     lines.append("")
+
+    # ---- IntentContract summary ----
+    if intent_contract is not None:
+        lines.append("## Intent Contract")
+        lines.append("")
+        lines.append(f"- **Implementation Level**: `{intent_contract.implementation_level}`")
+        lines.append(f"- **Runtime Required**: {intent_contract.runtime_required}")
+        lines.append(f"- **Allow Stub**: {intent_contract.allow_stub}")
+        lines.append(f"- **Requires Default Change**: {intent_contract.requires_default_change}")
+        lines.append(f"- **Requires Tests**: {intent_contract.requires_tests}")
+        lines.append(f"- **Requires Docs**: {intent_contract.requires_docs}")
+        lines.append(f"- **Requires Config Update**: {intent_contract.requires_config_update}")
+        lines.append(f"- **Requires CLI Update**: {intent_contract.requires_cli_update}")
+        lines.append(f"- **Requires Trace/Evaluation**: {intent_contract.requires_trace_or_evaluation}")
+        lines.append(f"- **Requires No Behavior Change**: {intent_contract.requires_no_behavior_change}")
+        lines.append(f"- **End-to-End Required**: {intent_contract.end_to_end_required}")
+        lines.append(f"- **Must Pass Without Warnings**: {intent_contract.must_pass_without_warnings}")
+        if intent_contract.runtime_wiring_required:
+            lines.append(f"- **Runtime Wiring Required**: Yes")
+        if intent_contract.expected_integration_points:
+            lines.append("- **Expected Integration Points**:")
+            for pt in intent_contract.expected_integration_points:
+                lines.append(f"  - `{pt}`")
+        if intent_contract.forbidden_degradations:
+            lines.append("- **Forbidden Degradations**:")
+            for d in intent_contract.forbidden_degradations:
+                lines.append(f"  - {d}")
+        lines.append("")
+
+        # Acceptance criteria table
+        if intent_contract.acceptance_criteria:
+            lines.append("### Acceptance Criteria")
+            lines.append("")
+            lines.append("| # | Criterion | Category | Required | Validation Method |")
+            lines.append("|---|---|---|---|---|")
+            for i, ac in enumerate(intent_contract.acceptance_criteria, 1):
+                req = "Yes" if ac.required else "No"
+                lines.append(
+                    f"| {i} | {ac.name} | {ac.category} | {req} | "
+                    f"{ac.validation_method[:60]} |"
+                )
+            lines.append("")
+
     lines.append("## Planned Changes")
     lines.append("")
     if plan.affected_areas:
@@ -215,6 +264,81 @@ def write_report(
         for w in artifact_coverage_warnings:
             lines.append(f"- {w}")
         lines.append("")
+
+    # ---- User Intent Validation (V2) ----
+    if intent_result is not None:
+        lines.append("## User Intent Validation")
+        lines.append("")
+        lines.append(f"- **Patch Integrity**: `{intent_result.patch_integrity_status}`")
+        lines.append(f"- **Functional Validation**: `{intent_result.functional_validation_status}`")
+        lines.append(f"- **User Intent**: `{intent_result.user_intent_status}`")
+        lines.append(f"- **Final Task Status**: `{intent_result.final_task_status}`")
+        if intent_result.was_downgraded:
+            lines.append(f"- **Downgrade Detected**: Yes")
+            lines.append(f"  - Detail: {intent_result.downgrade_detail}")
+            lines.append(f"  - Downgrade Allowed: {intent_result.downgrade_allowed}")
+        lines.append("")
+
+        if intent_result.unmet_acceptance_criteria:
+            lines.append("### Unmet Acceptance Criteria")
+            lines.append("")
+            for uc in intent_result.unmet_acceptance_criteria:
+                lines.append(f"- {uc}")
+            lines.append("")
+
+        if intent_result.evidence:
+            lines.append("### Evidence")
+            lines.append("")
+            lines.append("| Criterion | Satisfied | Evidence |")
+            lines.append("|---|---|---|")
+            for e in intent_result.evidence:
+                status = "PASS" if e.satisfied else "FAIL"
+                lines.append(f"| {e.criterion_name} | {status} | {e.evidence[:80]} |")
+            lines.append("")
+
+    # ---- End-to-End Tunnel Validation ----
+    if tunnel_smoke_result is not None and (
+        tunnel_smoke_result.mock_tun_smoke is not None
+        or tunnel_smoke_result.phase9_smoke is not None
+    ):
+        lines.append("## End-to-End Tunnel Validation")
+        lines.append("")
+
+        # Mock-TUN smoke
+        if tunnel_smoke_result.mock_tun_smoke is not None:
+            mock = tunnel_smoke_result.mock_tun_smoke
+            status_icon = "PASS" if mock.success else "FAIL"
+            lines.append(f"- **Mock-TUN Smoke**: {status_icon}")
+            lines.append(f"  - Transport: `{mock.transport}`")
+            lines.append(f"  - Duration: {mock.duration_sec}s")
+            lines.append(f"  - Log Dir: `{mock.log_dir}`")
+            if mock.error:
+                lines.append(f"  - Error: {mock.error}")
+            if mock.server_errors:
+                lines.append(f"  - Server Errors: {len(mock.server_errors)}")
+            if mock.client_errors:
+                lines.append(f"  - Client Errors: {len(mock.client_errors)}")
+            lines.append("")
+
+        # Phase 9 real-TUN/netns
+        if tunnel_smoke_result.phase9_smoke is not None:
+            p9 = tunnel_smoke_result.phase9_smoke
+            status_icon = "PASS" if tunnel_smoke_result.phase9_passed else "FAIL"
+            lines.append(f"- **Phase 9 Real Trace**: {status_icon}")
+            if "output_dir" in p9:
+                lines.append(f"  - Output Dir: `{p9['output_dir']}`")
+            if "error" in p9 and p9["error"]:
+                lines.append(f"  - Error: {p9['error']}")
+            if "results_json" in p9:
+                rj = p9["results_json"]
+                lines.append(f"  - Total: {rj.get('total', '?')}")
+                lines.append(f"  - Failed: {rj.get('failed', '?')}")
+            lines.append("")
+        elif tunnel_smoke_result.phase9_skipped:
+            lines.append(f"- **Phase 9 Real Trace**: SKIPPED")
+            lines.append(f"  - Reason: {tunnel_smoke_result.phase9_skip_reason[:200]}")
+            lines.append(f"  - Real netns available: {tunnel_smoke_result.real_netns_available}")
+            lines.append("")
 
     # Failure summary — separate pre-apply from post-apply
     pre_apply_checks = [

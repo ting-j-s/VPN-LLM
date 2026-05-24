@@ -16,6 +16,8 @@ import urllib.error
 import yaml
 
 from src.llm.safety_guard import SafetyGuard, SafetyError
+from src.llm.task_rules import analyze_implementation_level
+from src.llm.intent_contract import IntentContract, infer_intent_contract
 
 
 def _verbose_print(msg: str) -> None:
@@ -44,7 +46,7 @@ VALID_TASK_TYPES = frozenset({
     "unknown",
 })
 
-VALID_TRANSPORTS = frozenset({"tcp", "tls", "ssh", "websocket", "mock"})
+VALID_TRANSPORTS = frozenset({"tcp", "tls", "ssh", "websocket", "mock", "socks5"})
 
 VALID_RISK_LEVELS = frozenset({"low", "medium", "high"})
 
@@ -84,6 +86,12 @@ class LLMTaskPlan:
         constraints: list[str] | None = None,
         validation_goals: list[str] | None = None,
         ambiguity: list[str] | None = None,
+        implementation_level: str = "skeleton",
+        runtime_required: bool = False,
+        allow_skeleton: bool = True,
+        requires_default_switch: bool = False,
+        default_transport_target: str | None = None,
+        intent_contract: IntentContract | None = None,
     ):
         self.task_type = task_type
         self.target_transport = target_transport
@@ -95,6 +103,12 @@ class LLMTaskPlan:
         self.constraints = constraints or []
         self.validation_goals = validation_goals or []
         self.ambiguity = ambiguity or []
+        self.implementation_level = implementation_level
+        self.runtime_required = runtime_required
+        self.allow_skeleton = allow_skeleton
+        self.requires_default_switch = requires_default_switch
+        self.default_transport_target = default_transport_target
+        self.intent_contract = intent_contract
 
     @property
     def affected_areas(self) -> list[str]:
@@ -118,6 +132,12 @@ class LLMTaskPlan:
             "constraints": self.constraints,
             "validation_goals": self.validation_goals,
             "ambiguity": self.ambiguity,
+            "implementation_level": self.implementation_level,
+            "runtime_required": self.runtime_required,
+            "allow_skeleton": self.allow_skeleton,
+            "requires_default_switch": self.requires_default_switch,
+            "default_transport_target": self.default_transport_target,
+            "intent_contract": self.intent_contract.to_dict() if self.intent_contract else None,
         }
 
 
@@ -139,10 +159,11 @@ class LLMTaskPlanner:
         "- task_type: one of transport_change, transport_addition, config_change, test_addition, docs_update,"
         " core_change, feature_addition, mixed_feature_change, bugfix, refactor,"
         " fingerprint_mitigation, traffic_shaping, llm_detection, probe_resistance, rtt_evaluation, unknown\n"
-        "- target_transport: ONLY for EXISTING transports (tcp, tls, ssh, websocket, mock). "
-        "For requests that ADD a NEW transport (e.g. http2, quic, grpc), target_transport MUST be null "
-        "and task_type MUST be transport_addition or feature_addition. "
-        "The new transport name belongs in requirements (e.g. 'new_transport_name=http2').\n"
+        "- target_transport: The transport name the user wants to work with. "
+        "For transport_addition tasks, set target_transport to the NEW transport name "
+        "(e.g. 'socks5', 'http2', 'quic'). For transport_change tasks, set it to the "
+        "EXISTING transport being changed (tcp, tls, ssh, websocket, mock). "
+        "Set to null only when no specific transport is mentioned.\n"
         "- summary: one-sentence summary of what the user wants\n"
         "- candidate_files: list of file paths that MIGHT need changes (hints only — local index determines final selection)\n"
         "- validation_commands: list of shell commands to validate the result (empty list if unknown)\n"
@@ -188,6 +209,15 @@ class LLMTaskPlanner:
         parsed = self._parse_json(raw)
         validated = self._validate(parsed)
         validated = self._normalize_task_type(request, validated)
+
+        impl = analyze_implementation_level(request, validated.get("task_type", ""))
+
+        intent_contract = impl.get("intent_contract") or infer_intent_contract(
+            request,
+            task_type=validated.get("task_type", ""),
+            target_transport=validated.get("target_transport"),
+        )
+
         return LLMTaskPlan(
             task_type=validated["task_type"],
             target_transport=validated["target_transport"],
@@ -199,6 +229,12 @@ class LLMTaskPlanner:
             constraints=validated.get("constraints", []),
             validation_goals=validated.get("validation_goals", []),
             ambiguity=validated.get("ambiguity", []),
+            implementation_level=impl["implementation_level"],
+            runtime_required=impl["runtime_required"],
+            allow_skeleton=impl["allow_skeleton"],
+            requires_default_switch=impl["requires_default_switch"],
+            default_transport_target=impl["default_transport_target"],
+            intent_contract=intent_contract,
         )
 
     # ------------------------------------------------------------------
@@ -334,20 +370,19 @@ class LLMTaskPlanner:
                 f"Invalid task_type '{task_type}'. Must be one of: {sorted(VALID_TASK_TYPES)}"
             )
 
-        # 3. target_transport whitelist (null is acceptable)
+        # 3. target_transport validation
         transport = parsed["target_transport"]
         _addition_types = {"transport_addition", "feature_addition", "mixed_feature_change"}
         if transport is not None:
-            if not isinstance(transport, str) or transport not in VALID_TRANSPORTS:
-                if task_type in _addition_types:
-                    requirements_list = list(parsed.get("requirements", []))
-                    requirements_list.append(f"new_transport_name={transport}")
-                    parsed["requirements"] = requirements_list
-                    transport = None
-                else:
-                    raise LLMTaskPlannerError(
-                        f"Invalid target_transport '{transport}'. Must be one of: {sorted(VALID_TRANSPORTS)} or null"
-                    )
+            if not isinstance(transport, str):
+                raise LLMTaskPlannerError(
+                    f"target_transport must be a string or null, got {type(transport).__name__}"
+                )
+            # For transport_addition, allow new transport names not yet in VALID_TRANSPORTS
+            if transport not in VALID_TRANSPORTS and task_type not in _addition_types:
+                raise LLMTaskPlannerError(
+                    f"Invalid target_transport '{transport}'. Must be one of: {sorted(VALID_TRANSPORTS)} or null"
+                )
 
         # 4. summary must be a non-empty string
         summary = parsed.get("summary", "")

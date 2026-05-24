@@ -323,6 +323,11 @@ def main():
     print(f"Task type: {plan.task_type}")
     print(f"Target transport: {plan.target_transport or 'N/A'}")
     print(f"Affected areas: {', '.join(plan.affected_areas) if plan.affected_areas else 'N/A'}")
+    impl_level = getattr(plan, "implementation_level", "skeleton")
+    runtime_req = getattr(plan, "runtime_required", False)
+    default_sw = getattr(plan, "requires_default_switch", False)
+    print(f"Implementation level: {impl_level} (runtime_required={runtime_req}, "
+          f"requires_default_switch={default_sw})")
     if planner_type == "llm_based":
         print(f"Risk level: {plan.risk_level}")
         print(f"Summary: {plan.summary}")
@@ -529,6 +534,8 @@ def main():
     semantic_retry_count = 0
     semantic_retry_used = False
     patch_generation_error = None
+    intent_result = None
+    tunnel_smoke_result = None
 
     if args.generate_patch:
         from src.llm.patch_generator import LLMPatchGeneratorError
@@ -656,12 +663,112 @@ def main():
                 json.dumps(completeness.to_dict(), indent=2),
             )
 
-            # ---- Retry prompt generation on completeness failure ----
-            if not completeness.passed:
+            # ---- Runtime transport contract validation ----
+            from src.llm.patch_generator import check_runtime_transport_contract
+            runtime_required = getattr(plan, "runtime_required", False)
+            allow_skeleton = getattr(plan, "allow_skeleton", True)
+            requires_default_switch = getattr(plan, "requires_default_switch", False)
+            default_target = getattr(plan, "default_transport_target", None)
+
+            runtime_check = check_runtime_transport_contract(
+                patch_text,
+                runtime_required=runtime_required,
+                allow_skeleton=allow_skeleton,
+                requires_default_switch=requires_default_switch,
+                default_transport_target=default_target,
+            )
+            print(f"Runtime contract check: {'PASS' if runtime_check.passed else 'FAIL'}")
+            if runtime_check.errors:
+                for e in runtime_check.errors:
+                    print(f"  ERROR: {e}")
+            if runtime_check.warnings:
+                for w in runtime_check.warnings:
+                    print(f"  WARNING: {w}")
+
+            # Save runtime check result
+            record_mgr._write_file(
+                task_id, "runtime_contract_check.json",
+                json.dumps(runtime_check.to_dict(), indent=2),
+            )
+
+            # ---- Tunnel Smoke Validation ----
+            from src.llm.tunnel_smoke_validator import (
+                run_tunnel_smoke_validation,
+            )
+            print()
+            print("=== Tunnel Smoke Validation ===")
+            task_type = getattr(plan, "task_type", None)
+            target_transport = getattr(plan, "target_transport", None)
+            intent_contract = getattr(plan, "intent_contract", None)
+            smoke_dir = os.path.join(task_dir, "tunnel_smoke")
+            tunnel_smoke_result = run_tunnel_smoke_validation(
+                task_type=task_type,
+                target_transport=target_transport,
+                intent_contract=intent_contract,
+                output_dir=smoke_dir,
+            )
+            if tunnel_smoke_result.mock_tun_smoke is not None:
+                ms = tunnel_smoke_result.mock_tun_smoke
+                print(f"Mock-TUN smoke: {ms.status} (transport={ms.transport}, {ms.duration_sec}s)")
+                if ms.error:
+                    print(f"  Error: {ms.error}")
+            if tunnel_smoke_result.phase9_passed:
+                print("Phase 9 real trace: PASS")
+            elif tunnel_smoke_result.phase9_skipped:
+                print(f"Phase 9 real trace: SKIPPED ({tunnel_smoke_result.phase9_skip_reason[:100]})")
+            elif tunnel_smoke_result.phase9_smoke is not None:
+                print(f"Phase 9 real trace: FAIL ({tunnel_smoke_result.phase9_smoke.get('error', 'unknown')[:100]})")
+
+            # Save tunnel smoke result
+            record_mgr._write_file(
+                task_id, "tunnel_smoke_result.json",
+                json.dumps(tunnel_smoke_result.to_dict(), indent=2, default=str),
+            )
+
+            # ---- User Intent Validation (V2) ----
+            from src.llm.user_intent_validator import UserIntentValidator
+
+            intent_validator = UserIntentValidator()
+            intent_result = intent_validator.validate(
+                patch_text=patch_text,
+                intent_contract=intent_contract,
+                patch_file_paths=patch_file_paths,
+                completeness_result=completeness,
+                runtime_check_result=runtime_check,
+                compile_ok=compile_result.success,
+                tests_ok=full_result.success,
+                git_apply_check_ok=(
+                    git_apply_check_result.success
+                    if git_apply_check_result is not None else None
+                ),
+                tunnel_smoke_result=tunnel_smoke_result,
+            )
+            print(f"User intent validation: {intent_result.user_intent_status}")
+            print(f"  Patch integrity: {intent_result.patch_integrity_status}")
+            print(f"  Functional: {intent_result.functional_validation_status}")
+            print(f"  Final status: {intent_result.final_task_status}")
+            if intent_result.was_downgraded:
+                print(f"  DOWNGRADE DETECTED: {intent_result.downgrade_detail}")
+            if intent_result.unmet_acceptance_criteria:
+                for uc in intent_result.unmet_acceptance_criteria:
+                    print(f"  UNMET: {uc}")
+
+            # Save intent validation result
+            record_mgr._write_file(
+                task_id, "user_intent_validation.json",
+                json.dumps(intent_result.to_dict(), indent=2),
+            )
+
+            # ---- Retry prompt generation on completeness, runtime, or intent failure ----
+            completeness_or_runtime_failed = (
+                not completeness.passed or not runtime_check.passed
+                or intent_result.user_intent_status == "failed"
+            )
+            if completeness_or_runtime_failed:
                 retry_lines = ["# Patch Generation Retry Prompt", ""]
                 retry_lines.append(
-                    "The previously generated patch was INCOMPLETE. "
-                    "Regenerate with the following fixes:"
+                    "The previously generated patch was INCOMPLETE or does not "
+                    "meet runtime requirements. Regenerate with the following fixes:"
                 )
                 retry_lines.append("")
                 if completeness.missing_files:
@@ -679,6 +786,20 @@ def main():
                     for f in completeness.syntax_errors:
                         retry_lines.append(f"- `{f}`")
                     retry_lines.append("")
+                if runtime_check.errors:
+                    retry_lines.append("## Runtime Contract Violations (MUST be fixed)")
+                    for e in runtime_check.errors:
+                        retry_lines.append(f"- {e}")
+                    retry_lines.append("")
+                if intent_result.unmet_acceptance_criteria:
+                    retry_lines.append("## Intent Contract Violations (MUST be fixed)")
+                    for uc in intent_result.unmet_acceptance_criteria:
+                        retry_lines.append(f"- {uc}")
+                    retry_lines.append("")
+                if intent_result.was_downgraded and not intent_result.downgrade_allowed:
+                    retry_lines.append("## Downgrade Detected (MUST be fixed)")
+                    retry_lines.append(f"- {intent_result.downgrade_detail}")
+                    retry_lines.append("")
                 if completeness.warnings:
                     retry_lines.append("## Additional Warnings")
                     for w in completeness.warnings:
@@ -689,15 +810,22 @@ def main():
                 retry_lines.append("")
                 task_type = plan.task_type if hasattr(plan, "task_type") else ""
                 if task_type in ("transport_addition", "feature_addition"):
-                    retry_lines.append(
-                        "- Generate a SKELETON implementation only. "
-                        "The class must be importable and constructable, but "
-                        "methods like connect() should raise NotImplementedError "
-                        "or a clear 'skeleton not yet implemented' message."
-                    )
-                    retry_lines.append(
-                        "- Full protocol implementation belongs in a follow-up task."
-                    )
+                    if runtime_required:
+                        retry_lines.append(
+                            "- Generate a RUNTIME transport — NOT a skeleton. "
+                            "connect() must work. send() and recv() must transmit data. "
+                            "Include client/server roundtrip tests."
+                        )
+                    else:
+                        retry_lines.append(
+                            "- Generate a SKELETON implementation only. "
+                            "The class must be importable and constructable, but "
+                            "methods like connect() should raise TransportError "
+                            "with a clear 'skeleton not yet implemented' message."
+                        )
+                        retry_lines.append(
+                            "- Full protocol implementation belongs in a follow-up task."
+                        )
                 retry_lines.append(
                     "- Output a complete FILE: block for EVERY required file."
                 )
@@ -735,8 +863,14 @@ def main():
                 if git_apply_check_result.stderr:
                     print(f"  {git_apply_check_result.stderr.strip()[:500]}")
 
+            # ---- Default switch gate ----
+            if requires_default_switch and runtime_check.is_skeleton:
+                print()
+                print(">>> DEFAULT SWITCH BLOCKED: Cannot set skeleton transport as default. <<<")
+                print(">>> The transport must be runtime-usable before switching defaults. <<<")
+
             print()
-            if not completeness.passed:
+            if not completeness.passed or not runtime_check.passed:
                 print(">>> PATCH IS INCOMPLETE. Review retry_prompt.txt and re-generate. <<<")
             else:
                 print(">>> PATCH WAS NOT APPLIED. Review patch.diff manually before applying. <<<")
@@ -985,6 +1119,8 @@ def main():
         semantic_retry_count=semantic_retry_count,
         semantic_retry_used=semantic_retry_used,
         patch_generation_error=patch_generation_error,
+        intent_result=intent_result if args.generate_patch else None,
+        tunnel_smoke_result=tunnel_smoke_result,
     )
 
     # 8. Save all artifacts
@@ -1006,6 +1142,11 @@ def main():
         all_pass = all_pass and git_apply_check_result.success
     if patch_generation_error is not None:
         all_pass = False
+    if tunnel_smoke_result is not None and tunnel_smoke_result.mock_tun_smoke is not None:
+        if not tunnel_smoke_result.mock_tun_smoke.success:
+            intent_contract = getattr(plan, "intent_contract", None)
+            if intent_contract is not None and (intent_contract.runtime_required or intent_contract.end_to_end_required):
+                all_pass = False
     if apply_result is not None:
         all_pass = all_pass and apply_result.success
         if post_apply_validation:

@@ -2,7 +2,7 @@
 
 Placeholder implementation for future SOCKS5-based transport.
 The class is importable, constructable, and accepts configuration,
-but all network methods raise NotImplementedError.
+but all network methods raise TransportError.
 """
 
 from typing import Optional
@@ -21,7 +21,7 @@ class Socks5Transport(Transport):
     .. note::
        This is a **skeleton** placeholder.  The transport does not
        implement any real connectivity.  Calling ``connect()`` raises
-       ``NotImplementedError``.
+       ``TransportError``.
     """
 
     def __init__(self):
@@ -31,7 +31,7 @@ class Socks5Transport(Transport):
         """Establish SOCKS5 connection (not implemented).
 
         Raises:
-            NotImplementedError: Always, because this is a skeleton.
+            TransportError: Always, because this is a skeleton.
         """
         raise TransportError("SOCKS5 transport skeleton is not fully implemented yet")
 
@@ -42,7 +42,7 @@ class Socks5Transport(Transport):
             data: Bytes to send.
 
         Raises:
-            NotImplementedError: Always, because this is a skeleton.
+            TransportError: Always, because this is a skeleton.
         """
         raise TransportError("SOCKS5 transport skeleton is not fully implemented yet")
 
@@ -56,7 +56,7 @@ class Socks5Transport(Transport):
             Never returns normally.
 
         Raises:
-            NotImplementedError: Always, because this is a skeleton.
+            TransportError: Always, because this is a skeleton.
         """
         raise TransportError("SOCKS5 transport skeleton is not fully implemented yet")
 

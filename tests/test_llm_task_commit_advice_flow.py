@@ -125,6 +125,17 @@ def _mock_validation_methods(monkeypatch):
         lambda self: _fake_success("git status"),
     )
 
+    from src.llm.tunnel_smoke_validator import TunnelSmokeResult, TunnelSmokeValidation
+    _fake_tunnel_smoke = TunnelSmokeValidation(
+        mock_tun_smoke=TunnelSmokeResult(
+            transport="tcp", status="pass", duration_sec=0.01, log_dir="/fake",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.llm.tunnel_smoke_validator.run_tunnel_smoke_validation",
+        lambda **kwargs: _fake_tunnel_smoke,
+    )
+
 
 def _run_main(monkeypatch, repo, extra_args, record_dir):
     """Call scripts.llm_task.main() with mocked argv and chdir to repo."""
