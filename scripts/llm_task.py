@@ -52,6 +52,127 @@ _EXTREME_RISK_KEYWORDS = [
 ]
 
 
+def _build_stage_retry_prompt(
+    stage_name: str,
+    stage_desc: str,
+    error: str,
+    target_files_context: str,
+    allowed_files: list[str],
+    forbidden_files: list[str],
+) -> str:
+    """Build a stage-specific retry prompt with diagnostics.
+
+    Includes the error that occurred, target file content, and
+    recommended strategies to avoid the same error.
+    """
+    lines = [
+        "=== STAGE RETRY PROMPT ===",
+        f"This is a RETRY for stage '{stage_name}': {stage_desc}",
+        "",
+        "PREVIOUS ATTEMPT ERROR:",
+        f"  {error[:800]}",
+        "",
+    ]
+
+    # Diagnose specific error types
+    error_lower = error.lower()
+    if "find string not found" in error_lower or "find string matches" in error_lower:
+        lines.append("FIND/REPLACE DIAGNOSTIC:")
+        lines.append("  The FIND anchor did not match the target file content.")
+        lines.append("  Possible causes:")
+        lines.append("    1. The target file content changed between attempts.")
+        lines.append("    2. Whitespace or indentation mismatch in FIND block.")
+        lines.append("    3. The LLM guessed the FIND content without seeing the file.")
+        lines.append("  RECOMMENDED FIX:")
+        lines.append("    - Use the EXACT file content provided below for FIND blocks.")
+        lines.append("    - Prefer appending new content at end of file rather than")
+        lines.append("      replacing interior sections.")
+        lines.append("    - For small files, use whole-file replace with full content.")
+    elif "delimiter leakage" in error_lower:
+        lines.append("DELIMITER LEAKAGE DIAGNOSTIC:")
+        lines.append("  The LLM output contained raw <<< or >>> delimiters.")
+        lines.append("  REMOVE all bare <<< >>> <<<FIND <<<REPLACE <<<CONTENT lines")
+        lines.append("  from your generated file content.")
+    elif "file already exists" in error_lower or "action:create" in error_lower:
+        lines.append("FILE EXISTS DIAGNOSTIC:")
+        lines.append("  You used ACTION: create on a file that already exists.")
+        lines.append("  Use ACTION: replace instead with a FIND block.")
+        lines.append("  Target file content is provided below — use it for exact matching.")
+
+    lines.append("")
+    lines.append("ALLOWED FILES (this stage):")
+    for f in allowed_files:
+        lines.append(f"  - {f}")
+
+    lines.append("")
+    lines.append("FORBIDDEN FILES (DO NOT touch):")
+    for f in forbidden_files:
+        lines.append(f"  - {f}")
+
+    lines.append("")
+    lines.append("STAGE BOUNDARY RULES:")
+    lines.append("  - ONLY generate files listed under ALLOWED FILES.")
+    lines.append("  - Do NOT modify files from previous stages (they are already correct).")
+    lines.append("  - Do NOT modify files from future stages.")
+    lines.append("  - This retry is ONLY for this stage. Previous stages succeeded.")
+
+    if target_files_context:
+        lines.append("")
+        lines.append(target_files_context)
+
+    return "\n".join(lines)
+
+
+def _build_stage_constraint_text(stage_name: str, target_transport: str,
+                                 stage_context=None) -> str:
+    """Build stage-specific constraint text for the LLM prompt.
+
+    Includes StageContext target file content when available for
+    tests_docs_config and integration_wiring stages.
+    """
+    from src.llm.task_modules import build_stage_context_prompt_section
+
+    t = target_transport
+    base_text = ""
+    if stage_name == "runtime_core":
+        base_text = (
+            f"ONLY modify src/transport/{t}_transport.py in this stage.\n"
+            "Do NOT touch factory.py, config.py, tests/, docs/, or config/examples/.\n"
+            f"Do NOT create src/transport/{t}_full_transport.py or any bypass file.\n"
+            "Implement runtime methods: connect(), send(), recv(), close(), is_connected().\n"
+            "Keep output small and complete. Focus on the transport protocol only.\n"
+            "Do NOT generate any other files. This stage is for the transport file ONLY."
+        )
+    elif stage_name == "integration_wiring":
+        base_text = (
+            "ONLY modify factory.py, config.py, and create config example.\n"
+            f"Do NOT rewrite the transport implementation in src/transport/{t}_transport.py.\n"
+            f"Wire the EXISTING runtime transport class into create_transport(type=\"{t}\").\n"
+            "Add config fields for this transport's options."
+        )
+    elif stage_name == "tests_docs_config":
+        base_text = (
+            "ONLY modify tests/ and docs/ for this transport.\n"
+            f"Do NOT modify src/transport/{t}_transport.py, factory.py, or config.py.\n"
+            "Add roundtrip or client/server tests that exercise actual data transmission.\n"
+            "Update docs to reflect runtime status, usage, and limitations.\n\n"
+            "IMPORTANT: Prefer ACTION: append for tests/docs files.\n"
+            "Only use ACTION: replace if you have the EXACT content provided below.\n"
+            "If the test file already exists, add a new test class at the END of the file\n"
+            "using ACTION: replace with a FIND block that matches the last lines of the file.\n"
+            "For the docs file, append new sections to the end.\n"
+            "If you cannot find a reliable FIND anchor, use whole-file replace\n"
+            "with the full file content provided below (test/doc files are small)."
+        )
+
+    if stage_context is not None:
+        context_section = build_stage_context_prompt_section(stage_context)
+        if context_section:
+            base_text = base_text + "\n\n" + context_section
+
+    return base_text
+
+
 def _is_extreme_risk(request: str) -> bool:
     """Check if a request involves extreme-risk operations."""
     request_lower = request.lower()
@@ -285,6 +406,18 @@ def main():
         "--verbose", action="store_true",
         help="Print LLM API request/response details (prompt, response content) to stderr."
     )
+    parser.add_argument(
+        "--staged-generation", action="store_true",
+        help="Enable staged (multi-phase) patch generation for transport_runtime tasks."
+    )
+    parser.add_argument(
+        "--max-stage-retries", type=int, default=1,
+        help="Max retries per stage when staged generation is enabled (default: 1)."
+    )
+    parser.add_argument(
+        "--disable-stage-retry", action="store_true",
+        help="Disable per-stage retry (equivalent to --max-stage-retries 0)."
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -332,6 +465,33 @@ def main():
         print(f"Risk level: {plan.risk_level}")
         print(f"Summary: {plan.summary}")
     print()
+
+    # ---- Phase LLM-M1: Task Module Resolution ----
+    intent_contract = getattr(plan, "intent_contract", None)
+    if intent_contract is None:
+        from src.llm.intent_contract import infer_intent_contract
+        intent_contract = infer_intent_contract(
+            args.request,
+            task_type=plan.task_type,
+            target_transport=plan.target_transport,
+        )
+        plan.intent_contract = intent_contract
+
+    from src.llm.task_modules import resolve_task_module
+    module_resolution = resolve_task_module(intent_contract)
+    intent_contract.selected_module = module_resolution.selected_module
+    intent_contract.module_resolution = module_resolution.to_dict()
+    print(f"Task Module: {module_resolution.selected_module} (confidence={module_resolution.confidence:.2f})")
+    print(f"  Reason: {module_resolution.reason}")
+    if module_resolution.required_files:
+        print(f"  Required files: {len(module_resolution.required_files)}")
+    if module_resolution.forbidden_files:
+        print(f"  Forbidden files: {len(module_resolution.forbidden_files)}")
+    if module_resolution.staged_generation_required:
+        print(f"  Staged: yes ({len(module_resolution.stages)} stages)")
+    if module_resolution.warnings:
+        for w in module_resolution.warnings:
+            print(f"  WARNING: {w}")
 
     if plan.task_type == TASK_UNKNOWN:
         print("Warning: could not classify request. Proceeding with validation only.")
@@ -594,39 +754,212 @@ def main():
 
         task_dir = record_mgr.get_task_dir(task_id) if record_mgr else None
 
-        try:
-            patch_text = patch_gen.generate(
-                args.request, plan, repo_context,
-                allowed_edit_files=allowed_edit_files,
-                allowed_create_paths=allowed_create_paths,
-                allowed_create_patterns=allowed_create_patterns,
-                must_create_files=must_create_files,
-                task_dir=task_dir,
-            )
-            print("Patch generated successfully")
-            protocol_retry_count = patch_gen.protocol_retry_count
-            protocol_retry_used = patch_gen.protocol_retry_used
-            semantic_retry_count = patch_gen.semantic_retry_count
-            semantic_retry_used = patch_gen.semantic_retry_used
-            if protocol_retry_used:
-                print(f"  (protocol retry: {protocol_retry_count} attempt(s), first attempt malformed)")
-            if semantic_retry_used:
-                print(f"  (semantic retry: {semantic_retry_count} attempt(s), validation error corrected)")
-        except LLMPatchGeneratorError as e:
-            print(f"Patch generation failed: {e}")
-            patch_generation_error = str(e)
-            protocol_retry_count = getattr(patch_gen, 'protocol_retry_count', 0)
-            protocol_retry_used = getattr(patch_gen, 'protocol_retry_used', False)
-            semantic_retry_count = getattr(patch_gen, 'semantic_retry_count', 0)
-            semantic_retry_used = getattr(patch_gen, 'semantic_retry_used', False)
-            if task_dir:
-                for fn in ["llm_patch_raw_attempt1.txt", "llm_patch_raw_attempt2.txt",
-                           "llm_patch_raw.txt"]:
-                    raw_path = os.path.join(task_dir, fn)
-                    if os.path.isfile(raw_path):
-                        print(f"Raw LLM output saved to: {raw_path}")
-            # Continue to write report with failure info; exit later
-            patch_text = None
+        # ---- Staged generation (Phase LLM-M1.1) ----
+        staged_results: list[dict] = []
+        staged_generation = (
+            args.staged_generation
+            and module_resolution is not None
+            and module_resolution.staged_generation_required
+            and len(module_resolution.stages) > 0
+        )
+
+        if staged_generation:
+            from src.llm.task_modules import build_stage_context
+
+            print("  Staged generation enabled — splitting into sub-stages:")
+            target = plan.target_transport or ""
+            merged_patches: list[str] = []
+            stage_patches: list[str] = []
+
+            max_retries = 0 if args.disable_stage_retry else args.max_stage_retries
+
+            for stage in module_resolution.stages:
+                stage_name = stage.stage_name
+                stage_desc = stage.description if hasattr(stage, "description") else ""
+                print(f"    [{stage_name}] {stage_desc}")
+
+                # Build stage-specific allowed/edit/create lists
+                stage_allowed_edit = [
+                    p.format(name=target) if "{name}" in p else p
+                    for p in getattr(stage, "allowed_edit_patterns", [])
+                ]
+                stage_allowed_create = [
+                    p.format(name=target) if "{name}" in p else p
+                    for p in getattr(stage, "allowed_create_patterns", [])
+                ]
+                stage_required_edit = [
+                    p.format(name=target) if "{name}" in p else p
+                    for p in getattr(stage, "required_edit_patterns", [])
+                ]
+                stage_required_create = [
+                    p.format(name=target) if "{name}" in p else p
+                    for p in getattr(stage, "required_create_patterns", [])
+                ]
+                stage_forbidden = [
+                    p.format(name=target) if "{name}" in p else p
+                    for p in getattr(stage, "forbidden_patterns", [])
+                ]
+
+                # Build stage context with target file content
+                stage_ctx = build_stage_context(stage, target)
+
+                # Build stage_info dict for PatchGenerator
+                stage_info = {
+                    "stage_name": stage_name,
+                    "description": stage_desc,
+                    "prompt_section": (
+                        f"STAGE: {stage_name} — {stage_desc}\n\n"
+                        "THIS IS A STAGED GENERATION TASK.\n"
+                        f"You are generating ONLY the files for stage '{stage_name}'.\n"
+                        "Do NOT generate files from other stages.\n"
+                    ),
+                    "constraint_text": _build_stage_constraint_text(
+                        stage_name, target, stage_context=stage_ctx),
+                    "allowed_edit_files": stage_allowed_edit or None,
+                    "allowed_create_paths": stage_allowed_create or None,
+                    "required_edit_files": stage_required_edit or None,
+                    "required_create_files": stage_required_create or None,
+                    "forbidden_files": stage_forbidden or None,
+                    "max_output_files": getattr(stage, "max_output_files", 4),
+                    "stage_context": stage_ctx,
+                }
+
+                # For final_validation stage, skip LLM call
+                if stage_name == "final_validation":
+                    print(f"    [{stage_name}] skipped (validation-only stage)")
+                    staged_results.append({
+                        "stage_name": stage_name,
+                        "status": "skipped",
+                        "patch_files": [],
+                        "error": None,
+                        "retry_used": False,
+                        "attempts": 0,
+                    })
+                    continue
+
+                # Per-stage retry loop
+                stage_attempt = 0
+                stage_passed = False
+                last_error = None
+
+                while stage_attempt <= max_retries:
+                    stage_attempt += 1
+                    try:
+                        stage_patch = patch_gen.generate(
+                            args.request, plan, repo_context,
+                            allowed_edit_files=(stage_allowed_edit or None),
+                            allowed_create_paths=(stage_allowed_create or None),
+                            allowed_create_patterns=None,
+                            must_create_files=(stage_required_create or None),
+                            task_dir=task_dir,
+                            stage_info=stage_info,
+                        )
+                        # Parse files from stage patch
+                        from src.llm.patch_generator import LLMPatchGenerator as PG2
+                        stage_files = PG2._parse_file_paths(stage_patch)
+                        merged_patches.append(stage_patch)
+                        stage_patches.append(stage_patch)
+                        print(f"    [{stage_name}] generated {len(stage_files)} file(s): "
+                              f"{', '.join(stage_files)}"
+                              + (f" (retry {stage_attempt - 1}/{max_retries})" if stage_attempt > 1 else ""))
+                        staged_results.append({
+                            "stage_name": stage_name,
+                            "status": "passed",
+                            "patch_files": stage_files,
+                            "error": None,
+                            "retry_used": stage_attempt > 1,
+                            "attempts": stage_attempt,
+                        })
+                        stage_passed = True
+                        break
+                    except LLMPatchGeneratorError as e:
+                        last_error = str(e)
+                        if stage_attempt <= max_retries:
+                            print(f"    [{stage_name}] attempt {stage_attempt} FAILED: {e}")
+                            print(f"    [{stage_name}] retrying (attempts left: {max_retries - stage_attempt})")
+
+                            # Build richer retry prompt with diagnostics
+                            from src.llm.task_modules import build_stage_context_prompt_section
+                            retry_context = build_stage_context_prompt_section(stage_ctx)
+                            retry_diag = _build_stage_retry_prompt(
+                                stage_name=stage_name,
+                                stage_desc=stage_desc,
+                                error=str(e),
+                                target_files_context=retry_context,
+                                allowed_files=stage_allowed_edit + stage_allowed_create,
+                                forbidden_files=stage_forbidden,
+                            )
+                            # Inject retry diagnostics into stage_info
+                            stage_info["constraint_text"] = (
+                                stage_info["constraint_text"] + "\n\n" + retry_diag
+                            )
+                            stage_info["prompt_section"] = (
+                                stage_info["prompt_section"]
+                                + "\n\nRETRY — PREVIOUS ATTEMPT FAILED:\n"
+                                + str(e)[:1000]
+                                + "\n\n" + retry_diag
+                            )
+
+                if not stage_passed:
+                    print(f"    [{stage_name}] FAILED after {stage_attempt} attempt(s): {last_error}")
+                    staged_results.append({
+                        "stage_name": stage_name,
+                        "status": "failed",
+                        "patch_files": [],
+                        "error": last_error,
+                        "retry_used": stage_attempt > 1,
+                        "attempts": stage_attempt,
+                    })
+                    break
+
+            # Merge all stage patches
+            if merged_patches:
+                patch_text = "\n".join(merged_patches)
+                print(f"  Staged generation complete: {len(staged_results)} stage(s), "
+                      f"{len(merged_patches)} patch(es)")
+            else:
+                patch_text = None
+                patch_generation_error = (
+                    f"Staged generation failed at stage "
+                    f"'{staged_results[-1]['stage_name'] if staged_results else 'unknown'}': "
+                    f"{staged_results[-1].get('error') if staged_results else 'unknown'}"
+                )
+                print(f"  Staged generation failed: {patch_generation_error}")
+        else:
+            try:
+                patch_text = patch_gen.generate(
+                    args.request, plan, repo_context,
+                    allowed_edit_files=allowed_edit_files,
+                    allowed_create_paths=allowed_create_paths,
+                    allowed_create_patterns=allowed_create_patterns,
+                    must_create_files=must_create_files,
+                    task_dir=task_dir,
+                    module_resolution=module_resolution,
+                )
+                print("Patch generated successfully")
+                protocol_retry_count = patch_gen.protocol_retry_count
+                protocol_retry_used = patch_gen.protocol_retry_used
+                semantic_retry_count = patch_gen.semantic_retry_count
+                semantic_retry_used = patch_gen.semantic_retry_used
+                if protocol_retry_used:
+                    print(f"  (protocol retry: {protocol_retry_count} attempt(s), first attempt malformed)")
+                if semantic_retry_used:
+                    print(f"  (semantic retry: {semantic_retry_count} attempt(s), validation error corrected)")
+            except LLMPatchGeneratorError as e:
+                print(f"Patch generation failed: {e}")
+                patch_generation_error = str(e)
+                protocol_retry_count = getattr(patch_gen, 'protocol_retry_count', 0)
+                protocol_retry_used = getattr(patch_gen, 'protocol_retry_used', False)
+                semantic_retry_count = getattr(patch_gen, 'semantic_retry_count', 0)
+                semantic_retry_used = getattr(patch_gen, 'semantic_retry_used', False)
+                if task_dir:
+                    for fn in ["llm_patch_raw_attempt1.txt", "llm_patch_raw_attempt2.txt",
+                               "llm_patch_raw.txt"]:
+                        raw_path = os.path.join(task_dir, fn)
+                        if os.path.isfile(raw_path):
+                            print(f"Raw LLM output saved to: {raw_path}")
+                # Continue to write report with failure info; exit later
+                patch_text = None
 
         if patch_text is not None:
             # Save patch.diff

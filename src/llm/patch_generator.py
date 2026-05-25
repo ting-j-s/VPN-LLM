@@ -123,6 +123,87 @@ def _build_expected_artifacts_guidance(user_request: str, task_plan) -> str:
     return "\n".join(lines)
 
 
+def _check_delimiter_leakage(filepath: str, find_str: str, content: str,
+                              action: str) -> None:
+    """Check that FIND/REPLACE delimiter lines don't leak into file content.
+
+    The LLM must not write bare <<< or >>> lines into file content —
+    those are reserved for FIND/REPLACE block delimiters.
+    """
+    for line_no, line in enumerate(content.split("\n"), 1):
+        stripped = line.strip()
+        if stripped in ("<<<", ">>>", "<<<FIND", "<<<REPLACE", "<<<CONTENT"):
+            raise LLMPatchGeneratorError(
+                f"FIND/REPLACE delimiter leakage in {filepath} line {line_no}: "
+                f"'{stripped}' found in {action} content. "
+                "The LLM wrote a FIND/REPLACE delimiter into the file content. "
+                "Remove these lines from the generated code."
+            )
+
+
+def _build_module_contract_prompt_section(resolution, transport_name: str = "") -> str:
+    """Build a prompt section describing the module contract constraints.
+
+    Injected into the LLM prompt so the model understands which files it
+    may/must/forbidden edit, and what evidence is required.
+    """
+    if resolution is None:
+        return ""
+
+    lines = [
+        "TASK MODULE CONTRACT",
+        f"Module: {resolution.selected_module}",
+        "",
+    ]
+
+    if resolution.allowed_files:
+        lines.append("ALLOWED files (you MAY edit):")
+        for f in resolution.allowed_files:
+            resolved = f.replace("{name}", transport_name) if transport_name else f
+            lines.append(f"  - {resolved}")
+        lines.append("")
+
+    if resolution.required_files:
+        lines.append("REQUIRED files (you MUST include):")
+        for f in resolution.required_files:
+            resolved = f.replace("{name}", transport_name) if transport_name else f
+            lines.append(f"  - {resolved}")
+        lines.append("")
+
+    if resolution.forbidden_files:
+        lines.append("FORBIDDEN files (DO NOT create or edit):")
+        for f in resolution.forbidden_files:
+            resolved = f.replace("{name}", transport_name) if transport_name else f
+            lines.append(f"  - {resolved}")
+        lines.append("")
+
+    if resolution.required_evidence:
+        lines.append("REQUIRED EVIDENCE (must be present in patch):")
+        for ev in resolution.required_evidence:
+            lines.append(f"  - {ev}")
+        lines.append("")
+
+    if resolution.warnings:
+        lines.append("WARNINGS:")
+        for w in resolution.warnings:
+            lines.append(f"  - {w}")
+        lines.append("")
+
+    # Add special constraint text based on module
+    if resolution.selected_module == "transport_runtime":
+        lines.append(
+            "Upgrade the existing skeleton transport file with real runtime "
+            "implementation. Do NOT create a new separate bypass file "
+            "(e.g. {name}_full_transport.py, {name}_new_transport.py)."
+        )
+        lines.append("Tunnel smoke is mandatory for this task type.")
+    elif resolution.selected_module == "docs_only":
+        lines.append("ONLY edit documentation files (*.md, docs/).")
+        lines.append("Do NOT change src/ or tests/ files.")
+
+    return "\n".join(lines)
+
+
 class LLMPatchGenerator:
     """Generate a unified diff via LLM, with strict safety validation.
 
@@ -298,7 +379,9 @@ class LLMPatchGenerator:
                  allowed_create_paths: list[str] | None = None,
                  allowed_create_patterns: list[str] | None = None,
                  must_create_files: list[str] | None = None,
-                 task_dir: str | None = None) -> str:
+                 task_dir: str | None = None,
+                 module_resolution=None,
+                 stage_info: dict | None = None) -> str:
         """Generate a unified diff for the given request and plan.
 
         Args:
@@ -314,6 +397,11 @@ class LLMPatchGenerator:
             task_dir: If provided, raw LLM output is saved to
                 task_dir/llm_patch_raw.txt when generation fails
                 (for debugging/review).
+            stage_info: If provided, stage-specific constraints for staged
+                generation. Dict with keys: stage_name, description,
+                prompt_section, constraint_text, allowed_edit_files,
+                allowed_create_paths, required_edit_files,
+                required_create_files, forbidden_files, max_output_files.
 
         Returns the raw patch text after passing all safety checks.
 
@@ -335,7 +423,8 @@ class LLMPatchGenerator:
                                 allowed_edit_files, allowed_create_paths,
                                 allowed_create_patterns,
                                 must_create_files=must_create_files,
-                                extra_messages=extra_messages)
+                                extra_messages=extra_messages,
+                                stage_info=stage_info)
 
             # Phase 1: Strict protocol — response must start with FILE:
             if not raw.strip().startswith("FILE:"):
@@ -433,6 +522,9 @@ class LLMPatchGenerator:
                         f"Allowed: {allowed_edit_files}"
                     )
                 self._verify_find_uniqueness(filepath, find_str)
+            # Check for FIND/REPLACE delimiter leakage in output content
+            _check_delimiter_leakage(filepath, find_str if action == "replace" else "",
+                                      replace_str, action)
 
     def _verify_find_uniqueness(self, filepath: str, find_str: str) -> None:
         """Verify the FIND string appears exactly once in the target file.
@@ -548,7 +640,8 @@ class LLMPatchGenerator:
                   allowed_create_paths: list[str] | None = None,
                   allowed_create_patterns: list[str] | None = None,
                   must_create_files: list[str] | None = None,
-                  extra_messages: list[dict] | None = None) -> str:
+                  extra_messages: list[dict] | None = None,
+                  stage_info: dict | None = None) -> str:
         planner_type = "llm_based" if hasattr(task_plan, "summary") else "rule_based"
         plan_summary = getattr(task_plan, "summary", "") or getattr(task_plan, "description", "")
         plan_dict = {
@@ -691,6 +784,48 @@ class LLMPatchGenerator:
                     "- close() may be a no-op\n"
                     "- Docs MUST state the transport is NOT runtime usable\n"
                     "- Do NOT change the default transport config\n"
+                )
+
+        # ---- Stage-specific constraints (overrides general constraints) ----
+        if stage_info is not None:
+            stage_section = stage_info.get("prompt_section", "")
+            stage_constraint_text = stage_info.get("constraint_text", "")
+            constraints += f"\n{stage_section}\n{stage_constraint_text}\n"
+            constraints += f"\nSTAGE OUTPUT LIMIT: Generate at most "
+            constraints += f"{stage_info.get('max_output_files', 4)} file(s) in this stage.\n"
+            constraints += "Do NOT generate files outside this stage's allowed patterns.\n"
+
+            # Replace file constraints with stage-specific ones
+            stage_allowed_edit = stage_info.get("allowed_edit_files", [])
+            stage_allowed_create = stage_info.get("allowed_create_paths", [])
+            stage_required_edit = stage_info.get("required_edit_files", [])
+            stage_required_create = stage_info.get("required_create_files", [])
+            stage_forbidden = stage_info.get("forbidden_files", [])
+
+            if stage_allowed_edit:
+                constraints += (
+                    f"\nSTAGE ALLOWED EDIT FILES (ONLY these in this stage):\n"
+                    + "\n".join(f"  - {f}" for f in stage_allowed_edit)
+                )
+            if stage_allowed_create:
+                constraints += (
+                    f"\nSTAGE ALLOWED CREATE PATHS:\n"
+                    + "\n".join(f"  - {f}" for f in stage_allowed_create)
+                )
+            if stage_required_edit:
+                constraints += (
+                    f"\nSTAGE REQUIRED EDIT FILES:\n"
+                    + "\n".join(f"  - {f}" for f in stage_required_edit)
+                )
+            if stage_required_create:
+                constraints += (
+                    f"\nSTAGE REQUIRED CREATE FILES:\n"
+                    + "\n".join(f"  - {f}" for f in stage_required_create)
+                )
+            if stage_forbidden:
+                constraints += (
+                    f"\nSTAGE FORBIDDEN FILES (do NOT touch):\n"
+                    + "\n".join(f"  - {f}" for f in stage_forbidden)
                 )
 
         user_message = (
@@ -858,6 +993,9 @@ class LLMPatchGenerator:
                 replace_str = ""
                 if replace_match:
                     replace_str = replace_match.group(1)
+                    # Strip trailing closing delimiters the LLM may incorrectly add
+                    # (LLMs often close replace blocks with <<<REPLACE or >>>)
+                    replace_str = re.sub(r'\n(?:<<<REPLACE|>>>)\s*$', '', replace_str)
                     # Validate: REPLACE must not contain FIND or CONTENT delimiters
                     LLMPatchGenerator._validate_find_replace_content(
                         filepath, replace_str, "REPLACE",

@@ -91,6 +91,9 @@ class IntentContract:
     runtime_wiring_required: bool = False
     default_switch_gate_required: bool = False
     required_evidence: list[str] = field(default_factory=list)
+    # Phase LLM-M1: TaskModuleContract resolution
+    selected_module: str | None = None
+    module_resolution: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +123,8 @@ class IntentContract:
             "runtime_wiring_required": self.runtime_wiring_required,
             "default_switch_gate_required": self.default_switch_gate_required,
             "required_evidence": self.required_evidence,
+            "selected_module": self.selected_module,
+            "module_resolution": self.module_resolution,
         }
 
     # ------------------------------------------------------------------
@@ -869,13 +874,15 @@ def _build_manual_hints(contract: IntentContract) -> list[str]:
 def analyze_implementation_level_v2(
     request: str,
     task_type: str = "",
+    target_transport: str | None = None,
 ) -> dict:
     """V2 replacement for task_rules.analyze_implementation_level.
 
     Returns a dict compatible with the old interface, plus the full
     IntentContract so callers can access the richer data.
     """
-    contract = infer_intent_contract(request, task_type=task_type)
+    contract = infer_intent_contract(request, task_type=task_type,
+                                      target_transport=target_transport)
     target = _detect_default_target(request.lower())
 
     return {

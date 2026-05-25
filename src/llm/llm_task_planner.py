@@ -210,7 +210,8 @@ class LLMTaskPlanner:
         validated = self._validate(parsed)
         validated = self._normalize_task_type(request, validated)
 
-        impl = analyze_implementation_level(request, validated.get("task_type", ""))
+        impl = analyze_implementation_level(request, validated.get("task_type", ""),
+                                             target_transport=validated.get("target_transport"))
 
         intent_contract = impl.get("intent_contract") or infer_intent_contract(
             request,

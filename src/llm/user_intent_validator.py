@@ -51,6 +51,13 @@ class UserIntentValidationResult:
     downgrade_allowed: bool = True
     downgrade_detail: str = ""
 
+    # --- Module boundary validation ---
+    module_boundary_status: str = "not_run"  # passed / failed / not_run
+    forbidden_file_changes: list[str] = field(default_factory=list)
+    missing_required_files: list[str] = field(default_factory=list)
+    missing_required_evidence: list[str] = field(default_factory=list)
+    module_completion_allowed: bool = True
+
     # --- Final task status ---
     final_task_status: str = "not_evaluated"
     # One of: completed, completed_with_warnings, intent_not_satisfied,
@@ -72,6 +79,11 @@ class UserIntentValidationResult:
             "was_downgraded": self.was_downgraded,
             "downgrade_allowed": self.downgrade_allowed,
             "downgrade_detail": self.downgrade_detail,
+            "module_boundary_status": self.module_boundary_status,
+            "forbidden_file_changes": self.forbidden_file_changes,
+            "missing_required_files": self.missing_required_files,
+            "missing_required_evidence": self.missing_required_evidence,
+            "module_completion_allowed": self.module_completion_allowed,
             "final_task_status": self.final_task_status,
         }
 
@@ -112,6 +124,7 @@ class UserIntentValidator:
         tests_ok: bool = True,
         git_apply_check_ok: bool | None = None,
         tunnel_smoke_result=None,
+        module_resolution=None,
     ) -> UserIntentValidationResult:
         """Validate the patch against the user's IntentContract.
 
@@ -158,6 +171,25 @@ class UserIntentValidator:
 
         patch_paths = patch_file_paths or []
         result = UserIntentValidationResult()
+
+        # ---- Layer 0: Module boundary validation ----
+        if module_resolution is not None:
+            from src.llm.task_modules import check_module_boundary
+            boundary = check_module_boundary(module_resolution, patch_paths)
+            result.module_boundary_status = boundary["module_boundary_status"]
+            result.forbidden_file_changes = boundary["forbidden_file_changes"]
+            result.missing_required_files = boundary["missing_required_files"]
+            result.missing_required_evidence = boundary["missing_required_evidence"]
+            result.module_completion_allowed = boundary["module_completion_allowed"]
+
+            if boundary["forbidden_file_changes"]:
+                result.errors.append(
+                    f"Forbidden files modified: {boundary['forbidden_file_changes']}"
+                )
+            if boundary["missing_required_files"]:
+                result.errors.append(
+                    f"Required files missing: {boundary['missing_required_files']}"
+                )
 
         # ---- Layer 1: Patch integrity ----
         integrity_ok = self._check_patch_integrity(

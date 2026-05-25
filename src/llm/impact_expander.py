@@ -36,6 +36,7 @@ class FileSelection:
     doc_files: list[str] = field(default_factory=list)
     allowed_create_paths: list[str] = field(default_factory=list)
     allowed_create_patterns: list[str] = field(default_factory=list)
+    forbidden_files: list[str] = field(default_factory=list)
     candidates: list[CandidateFile] = field(default_factory=list)
     rejected_hints: list[str] = field(default_factory=list)
     action_sources: dict[str, str] = field(default_factory=dict)
@@ -66,6 +67,7 @@ class FileSelection:
             "doc_files": self.doc_files,
             "allowed_create_paths": self.allowed_create_paths,
             "allowed_create_patterns": self.allowed_create_patterns,
+            "forbidden_files": self.forbidden_files,
             "candidates": [c.to_dict() for c in self.candidates],
             "rejected_hints": self.rejected_hints,
             "action_sources": self.action_sources,
@@ -315,6 +317,7 @@ class ImpactExpander:
         plan=None,
         candidates: list[CandidateFile] | None = None,
         affected_areas: list[str] | None = None,
+        module_resolution=None,
     ) -> FileSelection:
         """Expand candidates into a FileSelection.
 
@@ -527,6 +530,24 @@ class ImpactExpander:
             elif f.startswith("tests/") or f.startswith("docs/"):
                 must_review.discard(f)
 
+        # ---- Phase LLM-M1: Module contract enforcement ----
+        forbidden_files: set[str] = set()
+        if module_resolution is not None:
+            import os as _os2
+            for f in module_resolution.required_files:
+                full = _os2.path.join(self._index.root_dir, f)
+                if _os2.path.isfile(full):
+                    must_edit.add(f)
+                    action_sources[f] = f"module_contract:{module_resolution.selected_module}(required_edit)"
+                else:
+                    must_create_files.add(f)
+                    action_sources[f] = f"module_contract:{module_resolution.selected_module}(required_create)"
+            for f in module_resolution.forbidden_files:
+                forbidden_files.add(f)
+            if module_resolution.allowed_files:
+                for pat in module_resolution.allowed_files:
+                    allowed_create_patterns.add(pat)
+
         # Build result
         selection.must_edit_files = sorted(must_edit)
         selection.must_create_files = sorted(must_create_files)
@@ -535,6 +556,7 @@ class ImpactExpander:
         selection.doc_files = sorted(doc_files)
         selection.allowed_create_paths = sorted(allowed_create)
         selection.allowed_create_patterns = sorted(allowed_create_patterns)
+        selection.forbidden_files = sorted(forbidden_files)
         selection.rejected_hints = rejected_hints
         selection.action_sources = {k: action_sources[k] for k in sorted(action_sources)}
 

@@ -104,7 +104,8 @@ def detect_transport_name(request: str) -> str | None:
 # Implementation level detection (skeleton vs runtime)
 # ---------------------------------------------------------------------------
 
-def analyze_implementation_level(request: str, task_type: str = "") -> dict:
+def analyze_implementation_level(request: str, task_type: str = "",
+                                 target_transport: str | None = None) -> dict:
     """Determine implementation level from request text.
 
     Delegates to intent_contract.infer_intent_contract() for richer
@@ -115,7 +116,8 @@ def analyze_implementation_level(request: str, task_type: str = "") -> dict:
     under the ``intent_contract`` key for callers that want richer data.
     """
     from src.llm.intent_contract import analyze_implementation_level_v2
-    return analyze_implementation_level_v2(request, task_type=task_type)
+    return analyze_implementation_level_v2(request, task_type=task_type,
+                                           target_transport=target_transport)
 
 
 # ---------------------------------------------------------------------------
