@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 # Ensure the project root is on the Python path
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -559,8 +560,14 @@ def main():
         help="Path to LLM agent config (default: config/llm_agent.yaml)"
     )
     parser.add_argument(
+        "--patch-context-file", default=None,
+        help="Path to additional context file (e.g. patch_loop output) injected "
+             "only into the Patch Generation stage. Does not affect planning, "
+             "module resolution, or file selection."
+    )
+    parser.add_argument(
         "--generate-patch", action="store_true",
-        help="Generate unified diff via LLM (dry-run: saved to patch.diff, NOT applied). Requires --use-llm-planner."
+        help="Generate unified diff via LLM (dry-run: saved to patch.diff, NOT applied)."
     )
     parser.add_argument(
         "--apply-patch", action="store_true",
@@ -619,10 +626,6 @@ def main():
     if args.verbose:
         os.environ["VPN_LLM_VERBOSE"] = "1"
 
-    if args.generate_patch and not args.use_llm_planner:
-        print("Error: --generate-patch requires --use-llm-planner")
-        sys.exit(1)
-
     if args.apply_patch and not args.generate_patch:
         print("Error: --apply-patch requires --generate-patch")
         sys.exit(1)
@@ -638,7 +641,24 @@ def main():
     print(f"Request: {args.request}")
     print()
 
-    # 1. Plan — rule-based or LLM-based
+    # Read patch-context-file if provided (injected ONLY at Patch Generation stage)
+    patch_context = ""
+    if args.patch_context_file:
+        try:
+            patch_context = Path(args.patch_context_file).read_text(encoding="utf-8")
+            print(f"Patch context loaded: {args.patch_context_file} ({len(patch_context)} chars)")
+        except Exception as e:
+            print(f"Warning: Failed to read patch-context-file: {e}")
+
+    effective_request = args.request
+    if patch_context.strip():
+        effective_request = (
+            f"{args.request}\n\n"
+            f"--- Additional Detection Context ---\n"
+            f"{patch_context}"
+        )
+
+    # 1. Plan — rule-based or LLM-based (uses original args.request, NOT effective_request)
     planner_type = "llm_based" if args.use_llm_planner else "rule_based"
     print(f"Planner: {planner_type}")
 
@@ -1122,7 +1142,7 @@ def main():
                     stage_attempt += 1
                     try:
                         stage_patch = patch_gen.generate(
-                            args.request, plan, repo_context,
+                            effective_request, plan, repo_context,
                             allowed_edit_files=(stage_allowed_edit or None),
                             allowed_create_paths=(stage_allowed_create or None),
                             allowed_create_patterns=None,
@@ -1238,7 +1258,7 @@ def main():
         else:
             try:
                 patch_text = patch_gen.generate(
-                    args.request, plan, repo_context,
+                    effective_request, plan, repo_context,
                     allowed_edit_files=allowed_edit_files,
                     allowed_create_paths=allowed_create_paths,
                     allowed_create_patterns=allowed_create_patterns,

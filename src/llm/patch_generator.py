@@ -308,9 +308,9 @@ class LLMPatchGenerator:
         "  (ports, IPs, comments, etc.) unless the request explicitly asks for them.\n"
         "- Preserve the exact indentation of the surrounding code. New lines in REPLACE\n"
         "  must use the same indentation characters (spaces/tabs) as the lines they replace.\n"
-        "- You may ONLY edit files listed in 'allowed_edit_files' (if provided).\n"
-        "- You may ONLY create files under paths listed in 'allowed_create_paths'.\n"
-        "- Do NOT modify .env, .git/, .claude/, *.key, *.pem, or config/llm_agent.yaml\n"
+        "- You may ONLY edit files explicitly listed in ALLOWED EDIT FILES.\n"
+        "  Editing any file NOT in this list causes your ENTIRE patch to be REJECTED.\n"
+        "- You may ONLY create files under paths listed in ALLOWED CREATE DIRECTORIES.\n"
         "- Do NOT include any API keys, private keys, tokens, or passwords\n"
         "- If you cannot generate a safe patch, output nothing.\n"
     )
@@ -405,8 +405,13 @@ class LLMPatchGenerator:
             "Read the file carefully and write an exact FIND.\n"
             "- If the error says 'FIND string matches N times':\n"
             "  Your FIND is not unique. Make it more specific.\n"
+            "- If the error says 'not in allowed_edit_files':\n"
+            "  You tried to edit a file that is NOT in the ALLOWED EDIT FILES list. "
+            "Remove that FILE: block entirely. Do NOT try a different path for it. "
+            "Only edit the files explicitly listed in ALLOWED EDIT FILES.\n"
             "- If the error says 'not under allowed_create_paths' or 'not allowed':\n"
-            "  The file path is not permitted. Choose a different path.\n\n"
+            "  The file path is not permitted. Choose a different path "
+            "that starts with one of the ALLOWED CREATE DIRECTORIES.\n\n"
             "CRITICAL: Output ONLY edit blocks. Start with 'FILE: <path>'. "
             "No explanations or prose. Use ACTION: replace for existing files.\n\n"
             "Generate the corrected edit instructions now."
@@ -518,7 +523,18 @@ class LLMPatchGenerator:
                     ]
                     continue
 
-                # Semantic retries exhausted or no attempts left — raise
+                # Semantic retries exhausted or no attempts left
+                # Try degradation: filter out disallowed edits before giving up
+                degraded = self._try_degrade(edits, str(e), allowed_edit_files,
+                                             allowed_create_paths, allowed_create_patterns)
+                if degraded is not None:
+                    diff_text = self._generate_diff(degraded)
+                    self._scan_for_secrets(diff_text)
+                    logger.warning(
+                        "Patch degraded: %d edit(s) dropped due to validation error: %s",
+                        len(edits) - len(degraded), str(e)[:200]
+                    )
+                    return diff_text
                 raise
 
         # Should never reach here — loop should raise or return
@@ -564,6 +580,53 @@ class LLMPatchGenerator:
             # Check for FIND/REPLACE delimiter leakage in output content
             _check_delimiter_leakage(filepath, find_str if action == "replace" else "",
                                       replace_str, action)
+
+    @staticmethod
+    def _try_degrade(edits: list[tuple[str, str, str, str]],
+                     error_msg: str,
+                     allowed_edit_files: list[str] | None,
+                     allowed_create_paths: list[str] | None,
+                     allowed_create_patterns: list[str] | None) -> list[tuple[str, str, str, str]] | None:
+        """Try to salvage a patch by dropping edits that violate constraints.
+
+        Only degrades for recoverable errors (allowed_edit_files /
+        allowed_create_paths violations).  FIND-not-found and other
+        correctness errors are NOT degraded — those need a retry.
+
+        Returns filtered edit list, or None if degradation is not applicable.
+        """
+        if "not in allowed_edit_files" not in error_msg and \
+           "not under allowed_create_paths" not in error_msg:
+            return None
+
+        allowed_edit_set = set(allowed_edit_files or [])
+        filtered: list[tuple[str, str, str, str]] = []
+        dropped = 0
+
+        for filepath, action, find_str, replace_str in edits:
+            if action == "create":
+                if allowed_create_paths is not None:
+                    normalized = filepath.replace("\\", "/")
+                    ok = any(
+                        normalized.startswith(p.rstrip("/") + "/") or
+                        normalized == p.rstrip("/")
+                        for p in allowed_create_paths
+                    )
+                    if not ok:
+                        dropped += 1
+                        continue
+                filtered.append((filepath, action, find_str, replace_str))
+            else:
+                if allowed_edit_files is not None and filepath not in allowed_edit_set:
+                    dropped += 1
+                    continue
+                filtered.append((filepath, action, find_str, replace_str))
+
+        if dropped == 0:
+            return None  # nothing to filter — error must be something else
+        if not filtered:
+            return None  # all edits were bad — not salvageable
+        return filtered
 
     def _verify_find_uniqueness(self, filepath: str, find_str: str) -> None:
         """Verify the FIND string appears exactly once in the target file.
@@ -891,6 +954,9 @@ class LLMPatchGenerator:
             f"TASK PLAN:\n{json.dumps(plan_dict, indent=2, ensure_ascii=False)}\n\n"
             f"REPOSITORY CONTEXT:\n{repository_context}\n"
             f"{constraints}\n\n"
+            "CRITICAL: You may ONLY edit files listed in ALLOWED EDIT FILES above. "
+            "Any edit to a file outside that list will cause your entire patch to be REJECTED. "
+            "If you need to create a new file, it MUST be under an ALLOWED CREATE DIRECTORY.\n\n"
             "Generate the edit instructions that implement these changes. "
             "Output ONLY edit blocks. Start immediately with 'FILE: <path>'. "
             "No prose before or after edit blocks. No markdown fences. No reasoning."
