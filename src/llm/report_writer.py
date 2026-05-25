@@ -322,6 +322,15 @@ def write_report(
                 lines.append("- **Selected Countermeasure Templates**:")
                 for t in intent_result.selected_countermeasure_templates:
                     lines.append(f"  - `{t}`")
+            # Structured evidence
+            if intent_result.touched_countermeasure_files:
+                lines.append("- **Touched Countermeasure Files**:")
+                for f in intent_result.touched_countermeasure_files:
+                    lines.append(f"  - `{f}`")
+            lines.append(f"- **Config Flag Added**: `{intent_result.config_flag_added}`")
+            lines.append(f"- **Default-Off Test Present**: `{intent_result.default_off_test_present}`")
+            lines.append(f"- **Enabled Behavior Test Present**: `{intent_result.enabled_behavior_test_present}`")
+            lines.append(f"- **Before/After Evidence Present**: `{intent_result.before_after_evidence_present}`")
             if intent_result.missing_validation_evidence:
                 lines.append("- **Missing Validation Evidence**:")
                 for f in intent_result.missing_validation_evidence:

@@ -81,6 +81,14 @@ class UserIntentValidationResult:
     selected_metrics: list[str] = field(default_factory=list)
     selected_countermeasure_templates: list[str] = field(default_factory=list)
 
+    # M2 structured evidence (detection_countermeasure)
+    touched_countermeasure_files: list[str] = field(default_factory=list)
+    config_flag_added: bool = False
+    default_off_test_present: bool = False
+    enabled_behavior_test_present: bool = False
+    before_after_evidence_present: bool = False
+    tunnel_smoke_present: bool = False
+
     # --- Final task status ---
     final_task_status: str = "not_evaluated"
     # One of: completed, completed_with_warnings, intent_not_satisfied,
@@ -122,6 +130,12 @@ class UserIntentValidationResult:
             "missing_validation_evidence": self.missing_validation_evidence,
             "selected_metrics": self.selected_metrics,
             "selected_countermeasure_templates": self.selected_countermeasure_templates,
+            "touched_countermeasure_files": self.touched_countermeasure_files,
+            "config_flag_added": self.config_flag_added,
+            "default_off_test_present": self.default_off_test_present,
+            "enabled_behavior_test_present": self.enabled_behavior_test_present,
+            "before_after_evidence_present": self.before_after_evidence_present,
+            "tunnel_smoke_present": self.tunnel_smoke_present,
             "final_task_status": self.final_task_status,
         }
 
@@ -591,15 +605,17 @@ class UserIntentValidator:
             )
 
         if name == "metric_tests":
-            has_metric_test = bool(re.search(
-                r'(?:metric|score|parse|extract|evaluate)',
+            has_metric_test_content = bool(re.search(
+                r'(?:small_packet|metric|ratio|aggregation|before.*after|'
+                r'countermeasure|shaper|roundtrip)',
                 patch_text, re.IGNORECASE,
             ))
+            satisfied = len(test_paths) > 0 and has_metric_test_content
             return AcceptanceEvidence(
                 criterion_name=name,
-                satisfied=has_metric_test and len(test_paths) > 0,
-                evidence=f"test paths: {test_paths}, metric content: {has_metric_test}",
-                detail="" if (has_metric_test and test_paths) else "No metric tests found",
+                satisfied=satisfied,
+                evidence=f"test paths: {test_paths}, metric content: {has_metric_test_content}",
+                detail="" if satisfied else "No tests for new evaluation metric",
             )
 
         # Generic test check
@@ -699,16 +715,22 @@ class UserIntentValidator:
         eval_paths = [p for p in patch_paths if "evaluation" in p or "fingerprint" in p]
 
         if name == "metric_in_output":
-            has_report_fields = bool(re.search(
-                r'(?:report|metric|score|risk|field)',
+            has_metric = bool(re.search(
+                r'(?:selected_metrics|small_packet_ratio|repeated_length_ratio|'
+                r'dominant_ngram_ratio|burst_pattern|app_transport_diff|'
+                r'probe_response|http2_frame)',
                 patch_text, re.IGNORECASE,
             ))
-            satisfied = len(eval_paths) > 0 or has_report_fields
+            has_countermeasure_files = any(
+                p.startswith("src/shaping/") for p in patch_paths
+            )
+            satisfied = has_metric or has_countermeasure_files or len(eval_paths) > 0
             return AcceptanceEvidence(
                 criterion_name=name,
                 satisfied=satisfied,
-                evidence=f"evaluation paths: {eval_paths}, report/metric content: {has_report_fields}",
-                detail="" if satisfied else "No report/metric fields found",
+                evidence=f"metrics in patch: {has_metric}, "
+                         f"countermeasure files: {has_countermeasure_files}",
+                detail="" if satisfied else "New metric not found in evaluation output",
             )
 
         if name == "before_after_evidence":
@@ -1462,15 +1484,103 @@ class UserIntentValidator:
                         f"found in patch for {spec.path_pattern}"
                     )
 
-        # Check 6: Detection countermeasure special — before/after evidence
+        # Check 6: Detection countermeasure — metric-specific required files
+        # and structured evidence
         if blueprint.module_name == "detection_countermeasure":
-            has_before_after = bool(re.search(
-                r'(?:before.*after|comparison|compare|delta|diff|'
-                r'metric.*improve|report.*metric|synthetic.*comparison|'
-                r'before_after_metric)',
+            # Resolve which shaping files exist on disk (for existence-aware matching)
+            existing_shaping = []
+            for root, _dirs, files in os.walk("src/shaping"):
+                for f in files:
+                    if f.endswith(".py"):
+                        existing_shaping.append(os.path.join(root, f))
+            existing_shaping_set = set(existing_shaping)
+
+            # Determine which metrics are relevant from detected + request context
+            relevant_metrics = set(result.selected_metrics)
+            if not relevant_metrics:
+                # Fallback: if no metrics detected, use all metric_mappings
+                relevant_metrics = set(blueprint.metric_mappings.keys())
+
+            # Collect metric-specific required files
+            metric_required_files: set[str] = set()
+            touched_files: set[str] = set()
+            for metric in relevant_metrics:
+                mapping = blueprint.metric_mappings.get(metric, {})
+                metric_files = mapping.get("files", [])
+                for mf in metric_files:
+                    metric_required_files.add(mf)
+                # Track which countermeasure files the patch actually touches
+                for mf in metric_files:
+                    for pp in patch_paths:
+                        if fnmatch.fnmatch(pp, mf) or pp == mf:
+                            touched_files.add(mf)
+
+            result.touched_countermeasure_files = sorted(touched_files)
+
+            # Check metric-specific required files against patch
+            for mrf in sorted(metric_required_files):
+                found = any(
+                    fnmatch.fnmatch(p, mrf) or p == mrf
+                    for p in patch_paths
+                )
+                if not found:
+                    result.required_file_changes_missing.append(mrf)
+                    result.errors.append(
+                        f"BLUEPRINT VIOLATION: Metric-required file missing: "
+                        f"{mrf}"
+                    )
+
+            # common/config.py is only required when patch touches YAML
+            # top-level / ClientConfig / ServerConfig schema fields
+            common_config_in_patch = any(
+                "src/common/config.py" in p for p in patch_paths
+            )
+            common_config_needed = (
+                common_config_in_patch
+                or bool(re.search(
+                    r'(?:ClientConfig|ServerConfig|class\s+\w+Config\s*\(|'
+                    r'yaml.*schema|top.level.*config)',
+                    patch_text, re.IGNORECASE,
+                ))
+            )
+            if common_config_needed and not common_config_in_patch:
+                result.warnings.append(
+                    "BLUEPRINT: Patch introduces config schema changes "
+                    "but src/common/config.py is not in patch. "
+                    "Verify common config wiring."
+                )
+            # When common config IS touched, record it as evidence
+            if common_config_in_patch:
+                result.config_fields_added_or_changed = True
+
+            # --- Structured evidence population ---
+            result.config_flag_added = bool(re.search(
+                r'(?:small_packet_mitigation_enabled|_enabled\s*[=:]\s*False|'
+                r'feature_flag|default.*OFF|default.*off|'
+                r'\.enabled\s*=\s*False)',
+                patch_text,
+            ))
+
+            result.default_off_test_present = bool(re.search(
+                r'(?:default.*off|default.*disabled|mitigation.*disabled|'
+                r'not enabled|isinstance.*Noop)',
                 patch_text, re.IGNORECASE,
             ))
-            if not has_before_after:
+
+            result.enabled_behavior_test_present = bool(re.search(
+                r'(?:def test.*enabled|def test.*mitigation|enabled.*True|'
+                r'AggregationShaper|PipelineTrafficShaper)',
+                patch_text, re.IGNORECASE,
+            ))
+
+            result.before_after_evidence_present = bool(re.search(
+                r'(?:before.*after|comparison|compare|delta|diff|'
+                r'ratio_before|ratio_after|spr_before|spr_after|'
+                r'small_packet_ratio.*before|small_packet_ratio.*after)',
+                patch_text, re.IGNORECASE,
+            ))
+
+            if not result.before_after_evidence_present:
                 result.missing_validation_evidence.append(
                     "before_after_metric_evidence"
                 )

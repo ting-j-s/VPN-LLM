@@ -653,8 +653,8 @@ def _build_detection_countermeasure_blueprint() -> PatchBlueprint:
             "files": [
                 "src/shaping/aggregation.py",
                 "src/shaping/scheduler.py",
-                "src/common/config.py",
-                "tests/test_traffic_shaper_aggregation.py",
+                "src/shaping/factory.py",
+                "tests/test_traffic_shaper_*aggregation*.py",
             ],
             "template_key": "aggregation_countermeasure",
             "config_flag": "shaping.aggregation.enabled",
@@ -669,9 +669,7 @@ def _build_detection_countermeasure_blueprint() -> PatchBlueprint:
             "strategy": "random padding + length bucket randomization",
             "files": [
                 "src/shaping/padding.py",
-                "src/common/config.py",
-                "src/transport/factory.py",
-                "tests/test_traffic_shaper_padding.py",
+                "tests/test_traffic_shaper_padding*.py",
             ],
             "template_key": "padding_countermeasure",
             "config_flag": "shaping.padding.enabled",
@@ -687,8 +685,7 @@ def _build_detection_countermeasure_blueprint() -> PatchBlueprint:
             "files": [
                 "src/shaping/chunking.py",
                 "src/transport/http2_transport.py",
-                "src/common/config.py",
-                "tests/test_traffic_shaper_chunking.py",
+                "tests/test_traffic_shaper_chunking*.py",
             ],
             "template_key": "chunking_countermeasure",
             "config_flag": "shaping.chunking.enabled",
@@ -703,8 +700,7 @@ def _build_detection_countermeasure_blueprint() -> PatchBlueprint:
             "files": [
                 "src/shaping/timing.py",
                 "src/shaping/scheduler.py",
-                "src/common/config.py",
-                "tests/test_traffic_shaper_timing.py",
+                "tests/test_traffic_shaper_timing*.py",
             ],
             "template_key": "burst_countermeasure",
             "config_flag": "shaping.burst_control.enabled",
@@ -719,9 +715,8 @@ def _build_detection_countermeasure_blueprint() -> PatchBlueprint:
             "files": [
                 "src/shaping/timing.py",
                 "src/shaping/scheduler.py",
-                "src/common/config.py",
                 "scripts/comparison_timing.py",
-                "tests/test_traffic_shaper_timing.py",
+                "tests/test_traffic_shaper_timing*.py",
             ],
             "template_key": "timing_countermeasure",
             "config_flag": "shaping.timing.enabled",
@@ -736,7 +731,6 @@ def _build_detection_countermeasure_blueprint() -> PatchBlueprint:
             "files": [
                 "src/core/server_core.py",
                 "tests/test_core_probe_response.py",
-                "src/common/config.py",
             ],
             "template_key": "probe_countermeasure",
             "config_flag": "core.probe_defense.enabled",
@@ -752,7 +746,6 @@ def _build_detection_countermeasure_blueprint() -> PatchBlueprint:
             "files": [
                 "src/transport/http2_transport.py",
                 "src/shaping/chunking.py",
-                "src/common/config.py",
                 "tests/test_http2_transport.py",
             ],
             "template_key": "http2_countermeasure",
@@ -808,8 +801,8 @@ def _build_detection_countermeasure_blueprint() -> PatchBlueprint:
     config_file = FileChangeSpec(
         path_pattern="src/common/config.py",
         action="edit",
-        required=True,
-        purpose="Add feature flag config fields (default OFF)",
+        required=False,
+        purpose="Add YAML top-level / ClientConfig / ServerConfig fields for config gate (only required when introducing new schema fields)",
         expected_content=["enabled", "False", "shaping"],
         forbidden_content=["threshold", "detector_enabled.*False"],
         template_key="config_feature_flag",
@@ -1010,7 +1003,7 @@ if __name__ == "__main__":
         module_name="detection_countermeasure",
         description="Blueprint for implementing detection countermeasures behind config flags",
         required_file_changes=[
-            config_file,
+            *test_files,
         ],
         allowed_file_changes=shaping_files + [config_file] + test_files + [comparison_script],
         forbidden_file_changes=[

@@ -1198,7 +1198,6 @@ def _build_module_registry() -> dict[str, TaskModuleContract]:
         ],
         required_edit_patterns=[
             "src/shaping/*.py",
-            "src/common/config.py",
         ],
         forbidden_patterns=[
             "config/client.yaml",
