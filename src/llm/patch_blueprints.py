@@ -1031,3 +1031,31 @@ if __name__ == "__main__":
     )
 
     return blueprint
+
+
+# ---------------------------------------------------------------------------
+# Metric extraction helpers
+# ---------------------------------------------------------------------------
+
+_KNOWN_METRIC_NAMES: list[str] = [
+    "small_packet_ratio",
+    "repeated_length_ratio",
+    "dominant_ngram_ratio",
+    "burst_pattern_score",
+    "app_transport_diff_ms",
+    "probe_response_variance",
+    "http2_frame_pattern",
+]
+
+
+def extract_detected_metrics(request: str, module_name: str | None = None) -> list[str]:
+    """Extract known detection metric names from a natural language request.
+
+    Only returns metrics whose names appear as substrings in the request.
+    When module_name is provided and not 'detection_countermeasure', returns
+    an empty list — metric extraction is only relevant for countermeasure tasks.
+    """
+    if module_name and module_name != "detection_countermeasure":
+        return []
+    request_lower = request.lower()
+    return [m for m in _KNOWN_METRIC_NAMES if m.lower() in request_lower]

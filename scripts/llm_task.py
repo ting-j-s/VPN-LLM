@@ -52,6 +52,194 @@ _EXTREME_RISK_KEYWORDS = [
 ]
 
 
+def _run_stage_repair(
+    stage_name: str,
+    stage_desc: str,
+    stage_patch: str,
+    stage_files: list[str],
+    allowed_edit_files: list[str],
+    forbidden_files: list[str],
+    transport_name: str,
+    patch_gen,
+    task_dir: str,
+    args,
+    plan,
+    repo_context,
+    max_repair_attempts: int,
+    staged_results: list,
+    stage_patches: list,
+) -> tuple[bool, str | None, int]:
+    """Run stage-level incremental repair.
+
+    Applies the stage patch, runs validation, and if failures are found,
+    calls the LLM to repair only the current stage's files.
+
+    Returns (repair_ok, error_message, repair_attempt_count).
+    """
+    from src.llm.task_modules import (collect_stage_failure_evidence,
+                                       build_stage_repair_prompt)
+
+    # Apply the stage patch
+    import subprocess
+    patch_path = os.path.join(task_dir, f"stage_{stage_name}_repair.patch")
+    with open(patch_path, "w", encoding="utf-8") as f:
+        f.write(stage_patch)
+
+    result = subprocess.run(
+        ["git", "apply", patch_path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"    [{stage_name}] repair: patch apply FAILED: {result.stderr[:200]}")
+        return True, None, 0  # Patch doesn't apply — this is a generation failure, not repair
+
+    # Run targeted validation
+    pytest_target = ""
+    test_files = [f for f in stage_files if f.startswith("tests/")]
+    if test_files:
+        pytest_target = " ".join(test_files)
+
+    repair_plan = collect_stage_failure_evidence(
+        stage_name=stage_name,
+        patch_files=[f for f in stage_files if f.endswith(".py")],
+        pytest_target=pytest_target,
+    )
+
+    if not repair_plan.validation_errors:
+        print(f"    [{stage_name}] repair: validation PASSED, no repair needed")
+        return True, None, 0
+
+    print(f"    [{stage_name}] repair: {len(repair_plan.validation_errors)} validation failure(s)")
+
+    # Set up repair boundaries
+    repair_plan.allowed_repair_files = list(allowed_edit_files)
+    repair_plan.forbidden_repair_files = list(forbidden_files) if forbidden_files else []
+    repair_plan.max_repair_attempts = max_repair_attempts
+
+    for repair_attempt in range(max_repair_attempts):
+        repair_plan.repair_attempt_count = repair_attempt
+        repair_plan.repair_status = "in_progress"
+
+        # Re-read current file content (may have been modified by previous repair)
+        for f in repair_plan.allowed_repair_files:
+            full_path = os.path.join(os.getcwd(), f)
+            if os.path.isfile(full_path):
+                try:
+                    with open(full_path, "r", encoding="utf-8") as fh:
+                        repair_plan.current_file_content[f] = fh.read()[:8000]
+                except Exception:
+                    pass
+
+        repair_prompt = build_stage_repair_prompt(
+            repair_plan,
+            stage_description=stage_desc,
+            transport_name=transport_name,
+        )
+
+        # Save repair prompt
+        prompt_path = os.path.join(task_dir, f"repair_prompt_{stage_name}_{repair_attempt}.txt")
+        with open(prompt_path, "w", encoding="utf-8") as f:
+            f.write(repair_prompt)
+
+        print(f"    [{stage_name}] repair attempt {repair_attempt + 1}/{max_repair_attempts}")
+
+        try:
+            # Build repair stage_info
+            repair_stage_info = {
+                "stage_name": f"{stage_name}_repair",
+                "description": f"Repair attempt {repair_attempt + 1} for {stage_name}",
+                "prompt_section": (
+                    f"REPAIR STAGE: {stage_name}\n\n"
+                    f"This is a REPAIR for stage '{stage_name}'.\n"
+                    "All files EXCEPT the allowed repair files are correct.\n"
+                    "Only fix the specific validation errors listed below.\n"
+                ),
+                "constraint_text": repair_prompt,
+                "allowed_edit_files": repair_plan.allowed_repair_files or None,
+                "allowed_create_paths": None,
+                "required_edit_files": None,
+                "required_create_files": None,
+                "forbidden_files": repair_plan.forbidden_repair_files or None,
+                "max_output_files": len(repair_plan.allowed_repair_files),
+            }
+
+            # Call LLM for repair
+            from src.llm.patch_generator import LLMPatchGenerator
+            repair_request = (
+                f"Repair stage '{stage_name}' for {transport_name} transport. "
+                f"Fix the validation errors below."
+            )
+            repair_patch = patch_gen.generate(
+                repair_request, plan, repo_context,
+                allowed_edit_files=(repair_plan.allowed_repair_files or None),
+                allowed_create_paths=None,
+                allowed_create_patterns=None,
+                must_create_files=None,
+                task_dir=task_dir,
+                stage_info=repair_stage_info,
+            )
+
+            # Verify repair patch only touches allowed files
+            repair_files = LLMPatchGenerator._parse_file_paths(repair_patch)
+            forbidden_hit = [f for f in repair_files if f not in repair_plan.allowed_repair_files]
+            if forbidden_hit:
+                print(f"    [{stage_name}] repair: FORBIDDEN file(s) touched: {forbidden_hit}")
+                continue
+
+            # Apply repair patch
+            repair_patch_path = os.path.join(task_dir, f"repair_{stage_name}_{repair_attempt}.patch")
+            with open(repair_patch_path, "w", encoding="utf-8") as f:
+                f.write(repair_patch)
+
+            result = subprocess.run(
+                ["git", "apply", repair_patch_path],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"    [{stage_name}] repair patch apply FAILED: {result.stderr[:200]}")
+                repair_plan.last_error = result.stderr[:500]
+                continue
+
+            stage_patches.append(repair_patch)
+            print(f"    [{stage_name}] repair applied: {', '.join(repair_files)}")
+
+            # Re-validate
+            repair_plan2 = collect_stage_failure_evidence(
+                stage_name=stage_name,
+                patch_files=[f for f in repair_plan.allowed_repair_files if f.endswith(".py")],
+                pytest_target=pytest_target,
+            )
+
+            if not repair_plan2.validation_errors:
+                print(f"    [{stage_name}] repair SUCCESS: validation passes after repair")
+                repair_plan.repair_status = "passed"
+                staged_results.append({
+                    "stage_name": stage_name,
+                    "status": "repaired",
+                    "patch_files": stage_files + repair_files,
+                    "error": None,
+                    "retry_used": False,
+                    "repair_used": True,
+                    "repair_attempts": repair_attempt + 1,
+                    "attempts": 1,
+                })
+                return True, None, repair_attempt + 1
+
+            print(f"    [{stage_name}] repair: still {len(repair_plan2.validation_errors)} failure(s)")
+            repair_plan.validation_errors = repair_plan2.validation_errors
+            repair_plan.syntax_errors = repair_plan2.syntax_errors
+            repair_plan.pytest_failures = repair_plan2.pytest_failures
+
+        except Exception as e:
+            print(f"    [{stage_name}] repair attempt FAILED: {e}")
+            repair_plan.last_error = str(e)[:500]
+
+    # All repair attempts exhausted
+    repair_plan.repair_status = "exhausted"
+    print(f"    [{stage_name}] repair EXHAUSTED after {max_repair_attempts} attempt(s)")
+    return True, None, max_repair_attempts  # Stage still has a patch but validation may still fail
+
+
 def _build_stage_retry_prompt(
     stage_name: str,
     stage_desc: str,
@@ -418,6 +606,14 @@ def main():
         "--disable-stage-retry", action="store_true",
         help="Disable per-stage retry (equivalent to --max-stage-retries 0)."
     )
+    parser.add_argument(
+        "--stage-repair", action="store_true",
+        help="Enable stage-level incremental repair: apply, validate, and repair each stage."
+    )
+    parser.add_argument(
+        "--max-repair-attempts", type=int, default=2,
+        help="Max repair attempts per stage when --stage-repair is enabled (default: 2)."
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -593,7 +789,8 @@ def main():
         # 4c. Impact expansion
         print("Expanding impact...")
         expander = ImpactExpander(repo_index)
-        file_selection = expander.expand(args.request, plan, candidates)
+        file_selection = expander.expand(args.request, plan, candidates,
+                                         module_resolution=module_resolution)
         print(f"  Must edit: {len(file_selection.must_edit_files)} files")
         print(f"  Must review: {len(file_selection.must_review_files)} files")
         print(f"  Test files: {len(file_selection.test_files)}")
@@ -841,6 +1038,8 @@ def main():
                 stage_attempt = 0
                 stage_passed = False
                 last_error = None
+                stage_patch = ""
+                stage_files: list[str] = []
 
                 while stage_attempt <= max_retries:
                     stage_attempt += 1
@@ -862,14 +1061,6 @@ def main():
                         print(f"    [{stage_name}] generated {len(stage_files)} file(s): "
                               f"{', '.join(stage_files)}"
                               + (f" (retry {stage_attempt - 1}/{max_retries})" if stage_attempt > 1 else ""))
-                        staged_results.append({
-                            "stage_name": stage_name,
-                            "status": "passed",
-                            "patch_files": stage_files,
-                            "error": None,
-                            "retry_used": stage_attempt > 1,
-                            "attempts": stage_attempt,
-                        })
                         stage_passed = True
                         break
                     except LLMPatchGeneratorError as e:
@@ -900,6 +1091,35 @@ def main():
                                 + "\n\n" + retry_diag
                             )
 
+                # After generation retry loop: run repair if generation succeeded
+                repair_used = False
+                repair_attempts = 0
+                if stage_passed and args.stage_repair and stage_files:
+                    repair_ok, repair_err, repair_used_count = _run_stage_repair(
+                        stage_name=stage_name,
+                        stage_desc=stage_desc,
+                        stage_patch=stage_patch,
+                        stage_files=stage_files,
+                        allowed_edit_files=stage_allowed_edit,
+                        forbidden_files=stage_forbidden,
+                        transport_name=target,
+                        patch_gen=patch_gen,
+                        task_dir=task_dir,
+                        args=args,
+                        plan=plan,
+                        repo_context=repo_context,
+                        max_repair_attempts=args.max_repair_attempts,
+                        staged_results=staged_results,
+                        stage_patches=stage_patches,
+                    )
+                    if repair_used_count > 0:
+                        repair_used = True
+                        repair_attempts = repair_used_count
+                    if repair_ok:
+                        print(f"    [{stage_name}] repair passed (stage kept)")
+                    else:
+                        print(f"    [{stage_name}] repair did not fix all errors (stage kept with warnings)")
+
                 if not stage_passed:
                     print(f"    [{stage_name}] FAILED after {stage_attempt} attempt(s): {last_error}")
                     staged_results.append({
@@ -909,8 +1129,21 @@ def main():
                         "error": last_error,
                         "retry_used": stage_attempt > 1,
                         "attempts": stage_attempt,
+                        "repair_used": repair_used,
+                        "repair_attempts": repair_attempts,
                     })
                     break
+
+                staged_results.append({
+                    "stage_name": stage_name,
+                    "status": "passed",
+                    "patch_files": stage_files,
+                    "error": None,
+                    "retry_used": stage_attempt > 1,
+                    "attempts": stage_attempt,
+                    "repair_used": repair_used,
+                    "repair_attempts": repair_attempts,
+                })
 
             # Merge all stage patches
             if merged_patches:
@@ -1075,6 +1308,7 @@ def main():
                     if git_apply_check_result is not None else None
                 ),
                 tunnel_smoke_result=tunnel_smoke_result,
+                module_resolution=module_resolution,
             )
             print(f"User intent validation: {intent_result.user_intent_status}")
             print(f"  Patch integrity: {intent_result.patch_integrity_status}")

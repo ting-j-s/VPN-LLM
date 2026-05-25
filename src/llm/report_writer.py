@@ -314,6 +314,14 @@ def write_report(
                 lines.append("- **Missing Template Evidence**:")
                 for f in intent_result.missing_template_evidence:
                     lines.append(f"  - {f}")
+            if intent_result.selected_metrics:
+                lines.append("- **Selected Metrics**:")
+                for m in intent_result.selected_metrics:
+                    lines.append(f"  - `{m}`")
+            if intent_result.selected_countermeasure_templates:
+                lines.append("- **Selected Countermeasure Templates**:")
+                for t in intent_result.selected_countermeasure_templates:
+                    lines.append(f"  - `{t}`")
             if intent_result.missing_validation_evidence:
                 lines.append("- **Missing Validation Evidence**:")
                 for f in intent_result.missing_validation_evidence:

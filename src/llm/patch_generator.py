@@ -870,12 +870,18 @@ class LLMPatchGenerator:
 
         # ---- Module Contract + Patch Blueprint prompt injection ----
         if module_resolution is not None:
+            from src.llm.patch_blueprints import extract_detected_metrics
             transport_name = getattr(task_plan, "target_transport", "") or ""
             stage_name = stage_info.get("stage_name", "") if stage_info else ""
+            detected_metrics = extract_detected_metrics(
+                user_request,
+                module_name=getattr(module_resolution, "selected_module", None),
+            )
             module_section = _build_module_contract_prompt_section(
                 module_resolution,
                 transport_name=transport_name,
                 stage_name=stage_name,
+                detected_metrics=detected_metrics,
             )
             if module_section:
                 constraints += "\n\n" + module_section
@@ -901,7 +907,6 @@ class LLMPatchGenerator:
             "model": self._model,
             "messages": messages,
             "temperature": 0.1,
-            "max_tokens": 8192,
         })
 
         req = urllib.request.Request(

@@ -271,7 +271,6 @@ class LLMTaskPlanner:
                 {"role": "user", "content": request},
             ],
             "temperature": 0.1,
-            "max_tokens": 1024,
         })
 
         req = urllib.request.Request(

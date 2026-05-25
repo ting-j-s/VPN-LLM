@@ -2210,3 +2210,85 @@ class TestM2Regression:
         assert mc.config_driven_change_required is True
         assert mc.feature_flag_required is True
         assert mc.preserve_default_behavior is True
+
+
+class TestM2DetectedMetricsPropagation:
+    """Phase LLM-M2: detected_metrics extraction and blueprint injection."""
+
+    def test_extract_small_packet_ratio_from_request(self):
+        from src.llm.patch_blueprints import extract_detected_metrics
+        metrics = extract_detected_metrics(
+            "reduce small_packet_ratio with countermeasure",
+            module_name="detection_countermeasure",
+        )
+        assert "small_packet_ratio" in metrics
+
+    def test_extract_repeated_length_ratio_from_request(self):
+        from src.llm.patch_blueprints import extract_detected_metrics
+        metrics = extract_detected_metrics(
+            "添加 repeated_length_ratio countermeasure",
+            module_name="detection_countermeasure",
+        )
+        assert "repeated_length_ratio" in metrics
+
+    def test_extract_app_transport_diff_from_request(self):
+        from src.llm.patch_blueprints import extract_detected_metrics
+        metrics = extract_detected_metrics(
+            "fix app_transport_diff_ms timing issue",
+            module_name="detection_countermeasure",
+        )
+        assert "app_transport_diff_ms" in metrics
+
+    def test_extract_multiple_metrics_from_request(self):
+        from src.llm.patch_blueprints import extract_detected_metrics
+        metrics = extract_detected_metrics(
+            "reduce small_packet_ratio and repeated_length_ratio",
+            module_name="detection_countermeasure",
+        )
+        assert "small_packet_ratio" in metrics
+        assert "repeated_length_ratio" in metrics
+
+    def test_no_metrics_for_non_countermeasure_module(self):
+        from src.llm.patch_blueprints import extract_detected_metrics
+        metrics = extract_detected_metrics(
+            "reduce small_packet_ratio",
+            module_name="transport_runtime",
+        )
+        assert metrics == []
+
+    def test_empty_request_returns_empty(self):
+        from src.llm.patch_blueprints import extract_detected_metrics
+        metrics = extract_detected_metrics(
+            "add a new feature",
+            module_name="detection_countermeasure",
+        )
+        assert metrics == []
+
+    def test_blueprint_prompt_filters_by_detected_metrics(self):
+        from src.llm.patch_blueprints import get_blueprint
+        bp = get_blueprint("detection_countermeasure")
+        section = bp.build_prompt_section(
+            detected_metrics=["small_packet_ratio"],
+        )
+        assert "aggregation" in section.lower()
+        assert "repeated_length_ratio" not in section
+
+    def test_blueprint_prompt_shows_all_metrics_when_empty(self):
+        from src.llm.patch_blueprints import get_blueprint
+        bp = get_blueprint("detection_countermeasure")
+        section = bp.build_prompt_section(
+            detected_metrics=[],
+        )
+        # When no metrics specified, should not inject metric mappings section
+        assert "Relevant countermeasure mappings" not in section
+
+    def test_user_intent_result_to_dict_includes_selected_metrics(self):
+        from src.llm.user_intent_validator import UserIntentValidationResult
+        result = UserIntentValidationResult()
+        result.selected_metrics = ["small_packet_ratio"]
+        result.selected_countermeasure_templates = ["aggregation_countermeasure"]
+        d = result.to_dict()
+        assert "selected_metrics" in d
+        assert d["selected_metrics"] == ["small_packet_ratio"]
+        assert "selected_countermeasure_templates" in d
+        assert d["selected_countermeasure_templates"] == ["aggregation_countermeasure"]

@@ -504,8 +504,11 @@ def _detect_implementation_level(text: str, task_type: str) -> tuple[str, dict]:
     # NOTE: skeleton is no longer a valid level — all requests are treated
     # as requiring full runtime capability.
 
-    # Transport/feature additions always require runtime
+    # Transport/feature additions default to runtime, but evaluation-only
+    # requests with no runtime keywords take precedence
     if task_type in ("transport_addition", "feature_addition", "transport_change"):
+        if signals["has_evaluation"] and not signals["has_runtime"]:
+            return "evaluation_only", signals
         return "runtime", signals
 
     if signals["has_bugfix"]:
@@ -581,7 +584,8 @@ def _build_acceptance_criteria(contract: IntentContract, text: str) -> list[Acce
     ))
 
     # Runtime transport (required for all transport/feature additions)
-    if contract.task_type in ("transport_addition", "feature_addition", "transport_change"):
+    if (contract.task_type in ("transport_addition", "feature_addition", "transport_change")
+            and contract.implementation_level != "evaluation_only"):
         criteria.extend([
             AcceptanceCriterion(
                 name="importable_and_constructable",

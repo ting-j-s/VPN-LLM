@@ -13,6 +13,7 @@ Design:
 from __future__ import annotations
 
 import fnmatch
+import glob as glob_module
 import os
 from dataclasses import dataclass, field
 
@@ -63,6 +64,17 @@ class TaskModuleContract:
     allow_default_change: bool = False
     allow_completed_with_warnings: bool = False
 
+    # No-Delete Policy (Phase LLM-M1D)
+    deletion_allowed: bool = False
+    allowed_delete_patterns: list[str] = field(default_factory=list)
+    forbidden_delete_patterns: list[str] = field(default_factory=lambda: ["**/*"])
+
+    # Config-Driven Change Policy (Phase LLM-M1D)
+    config_driven_change_required: bool = False
+    preserve_default_behavior: bool = True
+    feature_flag_required: bool = False
+    default_behavior_change_requires_explicit_request: bool = True
+
     # Evidence (references AcceptanceCriterion names)
     required_evidence: list[str] = field(default_factory=list)
     forbidden_evidence_failures: list[str] = field(default_factory=list)
@@ -103,6 +115,15 @@ class TaskModuleContract:
             "allow_stub": self.allow_stub,
             "allow_default_change": self.allow_default_change,
             "allow_completed_with_warnings": self.allow_completed_with_warnings,
+            "deletion_allowed": self.deletion_allowed,
+            "allowed_delete_patterns": self.allowed_delete_patterns,
+            "forbidden_delete_patterns": self.forbidden_delete_patterns,
+            "config_driven_change_required": self.config_driven_change_required,
+            "preserve_default_behavior": self.preserve_default_behavior,
+            "feature_flag_required": self.feature_flag_required,
+            "default_behavior_change_requires_explicit_request": (
+                self.default_behavior_change_requires_explicit_request
+            ),
             "required_evidence": self.required_evidence,
             "forbidden_evidence_failures": self.forbidden_evidence_failures,
             "forbidden_degradations": self.forbidden_degradations,
@@ -148,6 +169,47 @@ class TaskModuleContract:
         lines.append(f"  Allow Completed With Warnings: {self.allow_completed_with_warnings}")
         lines.append(f"  Extra Files Require Reason: {self.extra_files_require_reason}")
 
+        # No-Delete Policy
+        if not self.deletion_allowed:
+            no_del = self.build_no_delete_policy_text()
+            if no_del:
+                lines.append("")
+                lines.append(no_del)
+
+        # Config-Driven Change Policy
+        if self.config_driven_change_required:
+            cfg = self.build_config_driven_policy_text()
+            if cfg:
+                lines.append("")
+                lines.append(cfg)
+
+        return "\n".join(lines)
+
+    def build_no_delete_policy_text(self) -> str:
+        """Build the NO DELETE POLICY section for prompt injection."""
+        lines = ["NO DELETE POLICY:"]
+        lines.append("  - Do NOT delete any files.")
+        lines.append("  - Do NOT remove existing transports, shapers, detectors, tests, docs, or configs.")
+        lines.append("  - Prefer feature flags and configuration switches over deletion.")
+        lines.append("  - Preserve default behavior unless the user explicitly requested a default change.")
+        lines.append("  - If changing runtime behavior, expose config fields and add tests.")
+        if self.forbidden_delete_patterns:
+            lines.append("  Forbidden delete patterns:")
+            for p in self.forbidden_delete_patterns[:10]:
+                lines.append(f"    - {p}")
+        return "\n".join(lines)
+
+    def build_config_driven_policy_text(self) -> str:
+        """Build the CONFIG-DRIVEN CHANGE POLICY section for prompt injection."""
+        lines = ["CONFIG-DRIVEN CHANGE POLICY:"]
+        lines.append("  - New runtime behavior must be opt-in via configuration unless explicitly requested.")
+        lines.append("  - Add config examples and tests for both enabled and disabled states.")
+        lines.append(f"  - Preserve default behavior: {self.preserve_default_behavior}")
+        lines.append(f"  - Feature flag required for new behavior: {self.feature_flag_required}")
+        if self.preserve_default_behavior:
+            lines.append("  - Do NOT change config/client.yaml or config/server.yaml defaults.")
+        if self.feature_flag_required:
+            lines.append("  - New behavior MUST default to OFF. User enables via config flag.")
         return "\n".join(lines)
 
     def build_prompt_constraints(self, target_transport: str | None = None) -> str:
@@ -189,6 +251,17 @@ class TaskModuleContract:
             parts.append("- DO NOT modify default config unless runtime smoke tests exist and pass.")
             if t:
                 parts.append(f"- Run tunnel smoke with transport={t} before marking task complete.")
+
+        elif self.module_name == "detection_countermeasure":
+            parts.append("DETECTION COUNTERMEASURE CONSTRAINTS:")
+            parts.append("- Implement countermeasure behind config flags (default OFF).")
+            parts.append("- Do NOT delete or disable existing detectors or shapers.")
+            parts.append("- Do NOT lower detection thresholds to fake improvement.")
+            parts.append("- Do NOT claim metric improvement with docs-only changes.")
+            parts.append("- Add tests for both default-off and enabled behavior.")
+            parts.append("- Provide before/after metric evidence.")
+            parts.append("- If touching core/transport/shaping runtime path, tunnel smoke required.")
+            parts.append("- Preserve default behavior — countermeasure must be opt-in.")
 
         elif self.module_name == "llm_workflow":
             parts.append("LLM WORKFLOW CONSTRAINTS:")
@@ -340,6 +413,46 @@ class StageContext:
                 }
                 for tf in self.target_files
             ],
+        }
+
+
+@dataclass
+class StageRepairPlan:
+    """Tracks the repair process for a single stage that generated valid files
+    but failed validation (compile, pytest, or tunnel smoke).
+
+    repair_status is one of: pending, in_progress, passed, failed, exhausted.
+    """
+
+    stage_name: str
+    failed_files: list[str] = field(default_factory=list)
+    allowed_repair_files: list[str] = field(default_factory=list)
+    forbidden_repair_files: list[str] = field(default_factory=list)
+    validation_errors: list[str] = field(default_factory=list)
+    syntax_errors: list[str] = field(default_factory=list)
+    pytest_failures: list[str] = field(default_factory=list)
+    tunnel_smoke_errors: list[str] = field(default_factory=list)
+    current_file_content: dict[str, str] = field(default_factory=dict)
+    repair_prompt_path: str = ""
+    repair_attempt_count: int = 0
+    max_repair_attempts: int = 1
+    repair_status: str = "pending"
+    last_error: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "stage_name": self.stage_name,
+            "failed_files": self.failed_files,
+            "allowed_repair_files": self.allowed_repair_files,
+            "forbidden_repair_files": self.forbidden_repair_files,
+            "validation_errors": self.validation_errors,
+            "syntax_errors": self.syntax_errors,
+            "pytest_failures": self.pytest_failures,
+            "tunnel_smoke_errors": self.tunnel_smoke_errors,
+            "repair_attempt_count": self.repair_attempt_count,
+            "max_repair_attempts": self.max_repair_attempts,
+            "repair_status": self.repair_status,
+            "last_error": self.last_error,
         }
 
 
@@ -738,6 +851,173 @@ def build_stage_context_prompt_section(ctx: StageContext) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Stage repair functions (Phase M1C)
+# ---------------------------------------------------------------------------
+
+def collect_stage_failure_evidence(
+    stage_name: str,
+    patch_files: list[str],
+    repo_root: str = ".",
+    pytest_target: str = "",
+    tunnel_smoke_result=None,
+) -> StageRepairPlan:
+    """Collect validation failure evidence for a stage.
+
+    Runs py_compile and targeted pytest on the stage's patch files,
+    gathers error output, and reads current file content.
+
+    Returns a StageRepairPlan with all collected evidence.
+    """
+    import subprocess
+    import os as _os
+
+    plan = StageRepairPlan(stage_name=stage_name)
+
+    # Collect failed files
+    plan.failed_files = list(patch_files)
+
+    # Collect current file content
+    for f in patch_files:
+        full_path = _os.path.join(repo_root, f)
+        if _os.path.isfile(full_path):
+            try:
+                with open(full_path, "r", encoding="utf-8") as fh:
+                    plan.current_file_content[f] = fh.read()
+            except Exception:
+                pass
+
+    # Run py_compile on each patch file
+    for f in patch_files:
+        full_path = _os.path.join(repo_root, f)
+        if _os.path.isfile(full_path) and f.endswith(".py"):
+            try:
+                subprocess.run(
+                    ["python3", "-m", "py_compile", full_path],
+                    capture_output=True, text=True, timeout=15, check=True,
+                )
+            except subprocess.CalledProcessError as e:
+                err = e.stderr.strip() or e.stdout.strip()
+                plan.syntax_errors.append(f"{f}: {err[:300]}")
+                plan.validation_errors.append(f"compile: {f}: {err[:300]}")
+
+    # Run targeted pytest
+    if pytest_target:
+        try:
+            result = subprocess.run(
+                ["python3", "-m", "pytest", pytest_target, "-q", "--tb=short"],
+                capture_output=True, text=True, timeout=120,
+                cwd=repo_root,
+            )
+            if result.returncode != 0:
+                # Extract failure summary lines
+                stdout = result.stdout
+                failure_lines = [l for l in stdout.split("\n") if "FAILED" in l or "Error" in l]
+                plan.pytest_failures.extend(failure_lines[:30])
+                plan.validation_errors.append(
+                    f"pytest: {pytest_target} returned {result.returncode}"
+                )
+                # Also capture stderr
+                if result.stderr.strip():
+                    stderr_lines = result.stderr.strip().split("\n")
+                    plan.pytest_failures.extend(stderr_lines[:20])
+        except Exception as e:
+            plan.validation_errors.append(f"pytest collection error: {e}")
+
+    # Collect tunnel smoke errors
+    if tunnel_smoke_result is not None:
+        if hasattr(tunnel_smoke_result, "mock_tun_smoke") and tunnel_smoke_result.mock_tun_smoke is not None:
+            mock = tunnel_smoke_result.mock_tun_smoke
+            if not mock.success:
+                err_msg = f"tunnel_smoke failed: {mock.error}" if hasattr(mock, "error") else "tunnel_smoke failed"
+                plan.tunnel_smoke_errors.append(err_msg)
+                plan.validation_errors.append(err_msg)
+
+    return plan
+
+
+def build_stage_repair_prompt(
+    repair_plan: StageRepairPlan,
+    stage_description: str = "",
+    transport_name: str = "",
+) -> str:
+    """Build a repair prompt for a failed stage.
+
+    The prompt includes:
+    1. Stage name and description
+    2. Allowed/forbidden repair files
+    3. Current file content for exact anchor matching
+    4. Validation failure evidence (compile errors, pytest failures)
+    5. Repair constraints (no bypass files, no cross-stage edits)
+    """
+    lines = [
+        "=== STAGE REPAIR PROMPT ===",
+        f"This is a REPAIR attempt {repair_plan.repair_attempt_count + 1} "
+        f"for stage '{repair_plan.stage_name}': {stage_description}",
+        "",
+        "PREVIOUS ATTEMPT RESULT:",
+        "  The stage patch applies cleanly but validation FAILED.",
+        "",
+    ]
+
+    if repair_plan.validation_errors:
+        lines.append("VALIDATION ERRORS:")
+        for err in repair_plan.validation_errors[:20]:
+            lines.append(f"  - {err[:500]}")
+        lines.append("")
+
+    if repair_plan.syntax_errors:
+        lines.append("SYNTAX/COMPILE ERRORS:")
+        for err in repair_plan.syntax_errors[:10]:
+            lines.append(f"  {err[:300]}")
+        lines.append("")
+
+    if repair_plan.pytest_failures:
+        lines.append("PYTEST FAILURES:")
+        for f in repair_plan.pytest_failures[:15]:
+            lines.append(f"  {f[:300]}")
+        lines.append("")
+
+    if repair_plan.tunnel_smoke_errors:
+        lines.append("TUNNEL SMOKE ERRORS:")
+        for err in repair_plan.tunnel_smoke_errors[:5]:
+            lines.append(f"  {err[:300]}")
+        lines.append("")
+
+    lines.append("ALLOWED REPAIR FILES (you may ONLY modify these):")
+    for f in repair_plan.allowed_repair_files:
+        lines.append(f"  - {f}")
+    lines.append("")
+
+    lines.append("FORBIDDEN REPAIR FILES (DO NOT touch):")
+    for f in repair_plan.forbidden_repair_files:
+        lines.append(f"  - {f}")
+    lines.append("")
+
+    lines.append("REPAIR RULES:")
+    lines.append("  1. ONLY modify files listed under ALLOWED REPAIR FILES.")
+    lines.append("  2. Do NOT create new files outside the allowed list.")
+    tname = transport_name or "x"
+    lines.append(f"  3. Do NOT create bypass files like {tname}_full_transport.py.")
+    lines.append("  4. Do NOT rewrite working code from other stages.")
+    lines.append("  5. Use EXACT file content below for FIND/REPLACE anchors.")
+    lines.append("  6. Fix ONLY the specific errors listed above.")
+    lines.append("  7. Output complete FILE: blocks with correct ACTION.")
+    lines.append("")
+
+    if repair_plan.current_file_content:
+        lines.append("CURRENT FILE CONTENT (use for exact FIND anchors):")
+        for filepath, content in repair_plan.current_file_content.items():
+            lines.append(f"\n--- {filepath} ---")
+            lines.append("```")
+            # Cap content at 6000 chars per file to stay within token budget
+            lines.append(content[:6000])
+            lines.append("```")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 def _build_module_registry() -> dict[str, TaskModuleContract]:
     """Build and return the module registry.
 
@@ -765,6 +1045,8 @@ def _build_module_registry() -> dict[str, TaskModuleContract]:
             "src/transport/{name}_full_transport.py",
             "src/transport/{name}_runtime_transport.py",
             "src/transport/{name}_new_transport.py",
+            "src/transport/{name}_v2_transport.py",
+            "src/transport/{name}_real_transport.py",
         ],
         require_tests=True,
         require_docs=True,
@@ -774,6 +1056,20 @@ def _build_module_registry() -> dict[str, TaskModuleContract]:
         allow_default_change=False,
         allow_completed_with_warnings=False,
         extra_files_require_reason=True,
+        # No-Delete Policy
+        deletion_allowed=False,
+        allowed_delete_patterns=[],
+        forbidden_delete_patterns=[
+            "src/transport/*_transport.py",
+            "tests/test_*transport*.py",
+            "docs/transports/*.md",
+            "config/examples/*_transport.yaml",
+        ],
+        # Config-Driven Change Policy
+        config_driven_change_required=True,
+        preserve_default_behavior=True,
+        feature_flag_required=False,
+        default_behavior_change_requires_explicit_request=True,
         required_evidence=[
             "factory_registered",
             "config_allowed",
@@ -876,6 +1172,81 @@ def _build_module_registry() -> dict[str, TaskModuleContract]:
         ],
     )
 
+    # -- detection_countermeasure --
+    detection_countermeasure = TaskModuleContract(
+        module_name="detection_countermeasure",
+        description="Implement detection countermeasure to reduce fingerprint/metric risk",
+        task_types=["feature_addition", "transport_change", "bugfix",
+                     "fingerprint_mitigation", "traffic_shaping"],
+        implementation_levels=["runtime", "bugfix"],
+        allowed_edit_patterns=[
+            "src/shaping/*.py",
+            "src/shaping/**/*.py",
+            "src/core/client_core.py",
+            "src/core/server_core.py",
+            "src/common/config.py",
+            "tests/test_traffic_shaper_*.py",
+            "tests/test_core_traffic_shaping.py",
+            "docs/traffic_shaping.md",
+            "scripts/*comparison*.py",
+            "src/llm/detection/countermeasure_policy.py",
+        ],
+        allowed_create_patterns=[
+            "src/shaping/*.py",
+            "tests/test_traffic_shaper_*.py",
+            "scripts/*comparison*.py",
+        ],
+        required_edit_patterns=[
+            "src/shaping/*.py",
+            "src/common/config.py",
+        ],
+        forbidden_patterns=[
+            "config/client.yaml",
+            "config/server.yaml",
+        ],
+        require_tests=True,
+        require_docs=True,
+        require_config=True,
+        require_tunnel_smoke=False,
+        require_trace_or_evaluation=True,
+        allow_stub=False,
+        allow_default_change=False,
+        allow_completed_with_warnings=False,
+        extra_files_require_reason=True,
+        # No-Delete Policy
+        deletion_allowed=False,
+        allowed_delete_patterns=[],
+        forbidden_delete_patterns=[
+            "src/shaping/*.py",
+            "tests/test_traffic_shaper_*.py",
+            "tests/test_core_traffic_shaping.py",
+            "docs/traffic_shaping.md",
+        ],
+        # Config-Driven Change Policy
+        config_driven_change_required=True,
+        preserve_default_behavior=True,
+        feature_flag_required=True,
+        default_behavior_change_requires_explicit_request=True,
+        required_evidence=[
+            "config_flag_default_off",
+            "enabled_tests",
+            "disabled_default_tests",
+            "before_after_metric_evidence",
+            "encode_decode_roundtrip",
+            "no_detector_threshold_lowering",
+        ],
+        forbidden_degradations=[
+            "detector_disabled_or_removed",
+            "detector_threshold_lowered",
+            "docs_only_improvement_claim",
+            "unrelated_transport_rewrite",
+        ],
+        validation_commands=[
+            "python3 -m pytest tests/test_traffic_shaper_*.py -v",
+            "python3 -m pytest tests/test_core_traffic_shaping.py -v",
+        ],
+    )
+
     # -- llm_workflow --
     llm_workflow = TaskModuleContract(
         module_name="llm_workflow",
@@ -905,6 +1276,7 @@ def _build_module_registry() -> dict[str, TaskModuleContract]:
         "transport_skeleton": transport_skeleton,
         "default_transport_change": default_transport_change,
         "docs_only": docs_only,
+        "detection_countermeasure": detection_countermeasure,
         "llm_workflow": llm_workflow,
     }
 
@@ -993,7 +1365,29 @@ def resolve_task_module(
         resolution.warnings = warnings
         return resolution
 
-    # ---- Rule 5: llm workflow tasks ----
+    # ---- Rule 5: detection countermeasure ----
+    _DETECTION_KEYWORDS = [
+        "detection", "countermeasure", "fingerprint", "混淆",
+        "small_packet_ratio", "repeated_length_ratio", "dominant_ngram_ratio",
+        "burst_pattern", "rtt", "app_transport_diff",
+        "probe_response", "shaping", "traffic_shaper",
+        "packet_ratio", "ngram", "burst",
+    ]
+    is_detection = (
+        task_type in ("feature_addition", "transport_change", "bugfix",
+                       "fingerprint_mitigation", "traffic_shaping")
+        and any(kw in (ic.original_request or "").lower() for kw in _DETECTION_KEYWORDS)
+    )
+    if is_detection:
+        module = registry["detection_countermeasure"]
+        resolution = _expand_module(module, target, repo_root)
+        resolution.selected_module = "detection_countermeasure"
+        resolution.confidence = 0.85
+        resolution.reason = "Detection/fingerprint/countermeasure keywords detected in request"
+        resolution.warnings = warnings
+        return resolution
+
+    # ---- Rule 6: llm workflow tasks ----
     _LLM_TASK_KEYWORDS = [
         "llm", "agent", "planner", "patch", "validator", "retry",
         "intent", "prompt", "patch_generator", "task_planner",
@@ -1014,7 +1408,7 @@ def resolve_task_module(
         resolution.warnings = warnings
         return resolution
 
-    # ---- Rule 6: transport_addition without runtime → transport_skeleton (fallback) ----
+    # ---- Rule 7: transport_addition without runtime → transport_skeleton (fallback) ----
     if task_type in ("transport_addition", "feature_addition", "transport_change") and target:
         if level == "runtime":
             module = registry["transport_runtime"]
@@ -1042,6 +1436,11 @@ def resolve_task_module(
         warnings=["No TaskModuleContract matched — task is unconstrained"],
     )
     return resolution
+
+
+def _is_glob_pattern(pat: str) -> bool:
+    """Return True if the pattern contains glob wildcards."""
+    return "*" in pat or "?" in pat
 
 
 def _expand_module(
@@ -1073,19 +1472,31 @@ def _expand_module(
 
     for pat in module.required_edit_patterns:
         expanded = pat.format(name=t) if t and "{name}" in pat else pat
-        full = os.path.join(repo_root, expanded)
-        if os.path.isfile(full):
-            required_edit.append(expanded)
+        if _is_glob_pattern(expanded):
+            matched = glob_module.glob(os.path.join(repo_root, expanded))
+            for m in matched:
+                rel = os.path.relpath(m, repo_root)
+                required_edit.append(rel)
         else:
-            required_create.append(expanded)
+            full = os.path.join(repo_root, expanded)
+            if os.path.isfile(full):
+                required_edit.append(expanded)
+            else:
+                required_create.append(expanded)
 
     for pat in module.required_create_patterns:
         expanded = pat.format(name=t) if t and "{name}" in pat else pat
-        full = os.path.join(repo_root, expanded)
-        if os.path.isfile(full):
-            required_edit.append(expanded)
+        if _is_glob_pattern(expanded):
+            matched = glob_module.glob(os.path.join(repo_root, expanded))
+            for m in matched:
+                rel = os.path.relpath(m, repo_root)
+                required_edit.append(rel)
         else:
-            required_create.append(expanded)
+            full = os.path.join(repo_root, expanded)
+            if os.path.isfile(full):
+                required_edit.append(expanded)
+            else:
+                required_create.append(expanded)
 
     for pat in module.forbidden_patterns:
         expanded = pat.format(name=t) if t and "{name}" in pat else pat

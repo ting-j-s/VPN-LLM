@@ -77,6 +77,10 @@ class UserIntentValidationResult:
     missing_template_evidence: list[str] = field(default_factory=list)
     missing_validation_evidence: list[str] = field(default_factory=list)
 
+    # M2 detected metrics (detection_countermeasure)
+    selected_metrics: list[str] = field(default_factory=list)
+    selected_countermeasure_templates: list[str] = field(default_factory=list)
+
     # --- Final task status ---
     final_task_status: str = "not_evaluated"
     # One of: completed, completed_with_warnings, intent_not_satisfied,
@@ -116,6 +120,8 @@ class UserIntentValidationResult:
             "forbidden_blueprint_changes": self.forbidden_blueprint_changes,
             "missing_template_evidence": self.missing_template_evidence,
             "missing_validation_evidence": self.missing_validation_evidence,
+            "selected_metrics": self.selected_metrics,
+            "selected_countermeasure_templates": self.selected_countermeasure_templates,
             "final_task_status": self.final_task_status,
         }
 
@@ -1379,6 +1385,17 @@ class UserIntentValidator:
             return pat.replace("{name}", t) if t else pat
 
         result.selected_blueprint = blueprint.blueprint_name
+
+        # Record detected metrics for detection_countermeasure
+        if blueprint.module_name == "detection_countermeasure" and blueprint.metric_mappings:
+            from src.llm.patch_blueprints import extract_detected_metrics
+            detected = extract_detected_metrics(patch_text)
+            result.selected_metrics = detected
+            for metric in detected:
+                mapping = blueprint.metric_mappings.get(metric, {})
+                tkey = mapping.get("template_key", "")
+                if tkey:
+                    result.selected_countermeasure_templates.append(tkey)
         errors_before = len(result.errors)
 
         # Check 1: required_file_changes present
