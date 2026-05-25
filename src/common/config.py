@@ -82,6 +82,11 @@ class TransportConfig:
     http2_settings_profile: str = "default"
     http2_settings_enable_randomization: bool = False
     http2_settings_rng_seed: int = 42
+    # SOCKS5-specific options
+    socks5_proxy_host: Optional[str] = None
+    socks5_proxy_port: Optional[int] = None
+    socks5_username: Optional[str] = None
+    socks5_password: Optional[str] = None
 
 
 @dataclass
@@ -240,6 +245,10 @@ def load_client_config(path: str) -> ClientConfig:
         http2_settings_profile=transport_data.get("http2_settings_profile", "default"),
         http2_settings_enable_randomization=transport_data.get("http2_settings_enable_randomization", False),
         http2_settings_rng_seed=transport_data.get("http2_settings_rng_seed", 42),
+        socks5_proxy_host=transport_data.get("socks5_proxy_host"),
+        socks5_proxy_port=transport_data.get("socks5_proxy_port"),
+        socks5_username=transport_data.get("socks5_username"),
+        socks5_password=transport_data.get("socks5_password"),
     )
 
     # SSH-specific validation (only when using SSH transport)
@@ -320,6 +329,10 @@ def load_server_config(path: str) -> ServerConfig:
         http2_settings_profile=transport_data.get("http2_settings_profile", "default"),
         http2_settings_enable_randomization=transport_data.get("http2_settings_enable_randomization", False),
         http2_settings_rng_seed=transport_data.get("http2_settings_rng_seed", 42),
+        socks5_proxy_host=transport_data.get("socks5_proxy_host"),
+        socks5_proxy_port=transport_data.get("socks5_proxy_port"),
+        socks5_username=transport_data.get("socks5_username"),
+        socks5_password=transport_data.get("socks5_password"),
     )
 
     # Build SessionConfig

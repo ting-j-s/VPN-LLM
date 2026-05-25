@@ -1,21 +1,39 @@
-# SOCKS5 transport example configuration (skeleton)
-# This file is for reference only – the transport is not yet implemented.
+# SOCKS5 transport example configuration (runtime)
+# This file shows both client and server usage patterns.
 
-# Server configuration (example)
+# =========================================================================
+# Example 1 – Server
+# =========================================================================
+# server:
+#   listen_mode: socks5          # ignored, but kept for reference
+#   listen_port: 2226
+# transport:
+#   type: socks5
+#   socks5_username: vpn_user
+#   socks5_password: vpn_pass
+# forwarding:
+#   enable_nat: false
+#   enable_route: true
+# session:
+#   heartbeat_interval: 10
+#   heartbeat_timeout: 30
+# shaping:
+#   enabled: false
+
+# =========================================================================
+# Example 2 – Client
+# =========================================================================
 server:
-  listen_mode: socks5
-  listen_port: 2226  # example port
-
+  host: vpn.example.com
+  port: 2226
 transport:
   type: socks5
-
-forwarding:
-  enable_nat: false
-  enable_route: true
-
+  socks5_proxy_host: 10.0.0.1
+  socks5_proxy_port: 1080
+  socks5_username: proxy_user
+  socks5_password: proxy_pass
 session:
   heartbeat_interval: 10
   heartbeat_timeout: 30
-
 shaping:
   enabled: false

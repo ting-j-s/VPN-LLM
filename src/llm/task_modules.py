@@ -477,6 +477,7 @@ class TaskModuleStage:
     max_output_files: int = 4
     allow_partial_stage: bool = False
     next_stage: str | None = None
+    force_full_content_patterns: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -575,15 +576,19 @@ def _build_stages_for_transport_runtime() -> list[TaskModuleStage]:
 
     stage_2 = TaskModuleStage(
         stage_name="integration_wiring",
-        description="Wire runtime transport into factory, config, and config example",
+        description="Wire runtime transport into factory, config, CLI entry points, and config example",
         allowed_edit_patterns=[
             "src/transport/factory.py",
             "src/common/config.py",
+            "src/server.py",
+            "src/client.py",
             "config/examples/{name}_transport.yaml",
         ],
         required_edit_patterns=[
             "src/transport/factory.py",
             "src/common/config.py",
+            "src/server.py",
+            "src/client.py",
         ],
         required_create_patterns=[
             "config/examples/{name}_transport.yaml",
@@ -600,11 +605,15 @@ def _build_stages_for_transport_runtime() -> list[TaskModuleStage]:
             "config_example_exists",
         ],
         validation_commands=[
-            "python3 -m py_compile src/transport/factory.py src/common/config.py",
+            "python3 -m py_compile src/transport/factory.py src/common/config.py src/server.py src/client.py",
         ],
-        max_output_files=3,
+        max_output_files=5,
         allow_partial_stage=False,
         next_stage="tests_docs_config",
+        force_full_content_patterns=[
+            "src/transport/factory.py",
+            "src/common/config.py",
+        ],
     )
 
     stage_3 = TaskModuleStage(
@@ -654,6 +663,7 @@ def _build_stages_for_transport_runtime() -> list[TaskModuleStage]:
         ],
         validation_commands=[
             "python3 -m compileall src tests",
+            "python3 -m pytest tests/test_transport_contract.py -v --tb=short",
             "python3 -m pytest tests/ -q",
         ],
         max_output_files=0,
@@ -698,14 +708,17 @@ def build_stage_context(
         resolved = pat.replace("{name}", transport_name)
         target_paths.add(resolved)
 
+    # Patterns that force full content (integration files where excerpts hide loaders)
+    force_full = set(stage.force_full_content_patterns or [])
+
     for path in sorted(target_paths):
-        tf = _build_target_file(path, repo_root)
+        tf = _build_target_file(path, repo_root, force_full_content=path in force_full)
         context.target_files.append(tf)
 
     return context
 
 
-def _build_target_file(path: str, repo_root: str) -> StageTargetFile:
+def _build_target_file(path: str, repo_root: str, force_full_content: bool = False) -> StageTargetFile:
     """Build a StageTargetFile for a single file path.
 
     Reads content from disk and determines the best edit strategy.
@@ -730,8 +743,8 @@ def _build_target_file(path: str, repo_root: str) -> StageTargetFile:
             lines = full_content.split("\n")
             line_count = len(lines)
 
-            # For small files, keep full content
-            if line_count < 200:
+            # For small files or force_full_content, keep full content
+            if line_count < 200 or force_full_content:
                 content_excerpt = full_content
             else:
                 # First 30 + last 40 lines

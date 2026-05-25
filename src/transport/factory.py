@@ -8,6 +8,7 @@ from typing import Optional
 
 from ..common.errors import VPNError, ConfigError
 from ..common.logger import get_logger
+from ..shaping.base import NoopTrafficShaper
 from .base import Transport, MockTransport
 from .ssh_transport import SSHTransport
 from .tcp_transport import TCPTransport
@@ -15,6 +16,8 @@ from .tls_transport import TLSTransport
 from .websocket_transport import WebSocketTransport
 from .http2_transport import HTTP2Transport
 from .socks5_transport import Socks5Transport
+from .shaped_transport import ShapedTransport
+from ..shaping.factory import create_traffic_shaper
 
 
 logger = get_logger(__name__)
@@ -111,43 +114,39 @@ def _create_ssh_transport(config) -> SSHTransport:
         raise ConfigError("Server-side SSH transport not yet implemented")
 
 
-def _create_tcp_transport(config) -> TCPTransport:
+def _create_tcp_transport(config) -> Transport:
     """Create TCPTransport from configuration.
 
     Args:
         config: Configuration object.
 
     Returns:
-        TCPTransport instance.
+        Transport instance (possibly wrapped with shaping).
 
     Notes:
         Client config: mode="client", connects to server.host:server.port
         Server config: mode="server", binds to server.tun_ip:2222
     """
     # Determine if client or server
-    # Client config has 'client' section, server config has 'server' section
     if hasattr(config, 'server') and hasattr(config.server, 'host'):
-        # Client config
         host = getattr(config.server, 'host', '127.0.0.1')
         port = getattr(config.server, 'port', 2222)
 
         logger.info(f"Creating TCPTransport (client): host={host}, port={port}")
 
-        return TCPTransport(
+        transport = TCPTransport(
             mode=TCPTransport.MODE_CLIENT,
             host=host,
             port=port,
         )
 
     elif hasattr(config, 'server') and hasattr(config.server, 'tun_ip'):
-        # Server config
-        # Note: bind to 0.0.0.0, not tun_ip. tun_ip is for TUN device routing, not TCP binding.
         host = '0.0.0.0'
         port = getattr(config.server, 'listen_port', 2222)
 
         logger.info(f"Creating TCPTransport (server): host={host}, port={port}")
 
-        return TCPTransport(
+        transport = TCPTransport(
             mode=TCPTransport.MODE_SERVER,
             host=host,
             port=port,
@@ -155,6 +154,14 @@ def _create_tcp_transport(config) -> TCPTransport:
 
     else:
         raise ConfigError("Invalid configuration for TCP transport")
+
+    shaping_cfg = getattr(config, 'shaping', None)
+    if shaping_cfg is not None:
+        shaper = create_traffic_shaper(shaping_cfg)
+        if not isinstance(shaper, NoopTrafficShaper):
+            logger.info("Wrapping TCPTransport with ShapedTransport (shaping enabled)")
+            return ShapedTransport(transport, shaper)
+    return transport
 
 
 def _create_tls_transport(config) -> TLSTransport:
@@ -270,16 +277,51 @@ def _create_websocket_transport(config) -> WebSocketTransport:
 
 
 def _create_socks5_transport(config) -> Socks5Transport:
-    """Create Socks5Transport skeleton from configuration.
+    """Create Socks5Transport from configuration.
 
     Args:
-        config: Configuration object.
+        config: Configuration object (client or server).
 
     Returns:
-        Socks5Transport instance (skeleton).
+        Socks5Transport instance.
     """
-    logger.info("Creating Socks5Transport (skeleton)")
-    return Socks5Transport()
+    # Client config: has server.host
+    if hasattr(config, 'server') and hasattr(config.server, 'host'):
+        target_host = getattr(config.server, 'host', '127.0.0.1')
+        target_port = getattr(config.server, 'port', 2226)
+        proxy_host = getattr(config.transport, 'socks5_proxy_host', '127.0.0.1')
+        proxy_port = getattr(config.transport, 'socks5_proxy_port', 1080)
+        username = getattr(config.transport, 'socks5_username', None)
+        password = getattr(config.transport, 'socks5_password', None)
+
+        logger.info(
+            "Creating Socks5Transport (client): proxy=%s:%d target=%s:%d",
+            proxy_host, proxy_port, target_host, target_port,
+        )
+        return Socks5Transport(
+            mode=Socks5Transport.MODE_CLIENT,
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            target_host=target_host,
+            target_port=target_port,
+            username=username,
+            password=password,
+        )
+    # Server config
+    else:
+        listen_host = '0.0.0.0'
+        listen_port = getattr(config.server, 'listen_port', 2226)
+        username = getattr(config.transport, 'socks5_username', None)
+        password = getattr(config.transport, 'socks5_password', None)
+
+        logger.info("Creating Socks5Transport (server): %s:%d", listen_host, listen_port)
+        return Socks5Transport(
+            mode=Socks5Transport.MODE_SERVER,
+            listen_host=listen_host,
+            listen_port=listen_port,
+            username=username,
+            password=password,
+        )
 
 
 def _create_http2_transport(config) -> HTTP2Transport:
