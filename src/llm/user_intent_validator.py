@@ -58,6 +58,25 @@ class UserIntentValidationResult:
     missing_required_evidence: list[str] = field(default_factory=list)
     module_completion_allowed: bool = True
 
+    # --- No-Delete Policy validation (Phase LLM-M1D) ---
+    no_delete_status: str = "not_run"  # passed / failed / not_run
+    deleted_files: list[str] = field(default_factory=list)
+    forbidden_deletions: list[str] = field(default_factory=list)
+
+    # --- Config-Driven Change validation (Phase LLM-M1D) ---
+    config_driven_status: str = "not_run"  # passed / failed / not_run
+    config_fields_added_or_changed: bool = False
+    default_config_changed: bool = False
+    feature_flag_status: str = "not_run"
+
+    # --- Blueprint validation (Phase LLM-M2) ---
+    blueprint_status: str = "not_run"  # passed / failed / not_run
+    selected_blueprint: str = ""
+    required_file_changes_missing: list[str] = field(default_factory=list)
+    forbidden_blueprint_changes: list[str] = field(default_factory=list)
+    missing_template_evidence: list[str] = field(default_factory=list)
+    missing_validation_evidence: list[str] = field(default_factory=list)
+
     # --- Final task status ---
     final_task_status: str = "not_evaluated"
     # One of: completed, completed_with_warnings, intent_not_satisfied,
@@ -84,6 +103,19 @@ class UserIntentValidationResult:
             "missing_required_files": self.missing_required_files,
             "missing_required_evidence": self.missing_required_evidence,
             "module_completion_allowed": self.module_completion_allowed,
+            "no_delete_status": self.no_delete_status,
+            "deleted_files": self.deleted_files,
+            "forbidden_deletions": self.forbidden_deletions,
+            "config_driven_status": self.config_driven_status,
+            "config_fields_added_or_changed": self.config_fields_added_or_changed,
+            "default_config_changed": self.default_config_changed,
+            "feature_flag_status": self.feature_flag_status,
+            "blueprint_status": self.blueprint_status,
+            "selected_blueprint": self.selected_blueprint,
+            "required_file_changes_missing": self.required_file_changes_missing,
+            "forbidden_blueprint_changes": self.forbidden_blueprint_changes,
+            "missing_template_evidence": self.missing_template_evidence,
+            "missing_validation_evidence": self.missing_validation_evidence,
             "final_task_status": self.final_task_status,
         }
 
@@ -190,6 +222,18 @@ class UserIntentValidator:
                 result.errors.append(
                     f"Required files missing: {boundary['missing_required_files']}"
                 )
+
+        # ---- Layer 0B: No-Delete Policy validation (Phase LLM-M1D) ----
+        if module_resolution is not None:
+            self._check_no_delete_policy(result, patch_text, patch_paths, module_resolution)
+
+        # ---- Layer 0C: Config-Driven Change Policy validation (Phase LLM-M1D) ----
+        if module_resolution is not None:
+            self._check_config_driven_policy(result, patch_text, patch_paths, module_resolution)
+
+        # ---- Layer 0D: Blueprint validation (Phase LLM-M2) ----
+        if module_resolution is not None:
+            self._check_blueprint(result, patch_text, patch_paths, module_resolution)
 
         # ---- Layer 1: Patch integrity ----
         integrity_ok = self._check_patch_integrity(
@@ -1036,6 +1080,418 @@ class UserIntentValidator:
                 evidence=f"Phase 9 skipped: {reason[:200]}",
                 detail="real_netns not available or not required",
             ))
+
+    # ------------------------------------------------------------------
+    # No-Delete Policy (Phase LLM-M1D)
+    # ------------------------------------------------------------------
+
+    def _check_no_delete_policy(
+        self,
+        result: UserIntentValidationResult,
+        patch_text: str,
+        patch_paths: list[str],
+        module_resolution,
+    ) -> None:
+        """Check No-Delete Policy compliance.
+
+        Detects file deletions in the patch and checks against
+        allowed/forbidden delete patterns from the module contract.
+        """
+        from src.llm.task_modules import get_module_contract
+
+        contract = get_module_contract(module_resolution.selected_module)
+        if contract is None:
+            return
+
+        if contract.deletion_allowed:
+            result.no_delete_status = "passed"
+            return
+
+        # Detect deleted files from unified diff
+        deleted = self._detect_deleted_files(patch_text)
+        result.deleted_files = deleted
+
+        if deleted:
+            result.no_delete_status = "failed"
+            result.errors.append(
+                f"NO DELETE POLICY VIOLATION: Patch deletes files but "
+                f"module '{contract.module_name}' forbids deletion: {deleted}"
+            )
+            result.module_completion_allowed = False
+            return
+
+        # Check for forbidden delete patterns (modifications that effectively delete)
+        import fnmatch
+        for f in patch_paths:
+            for pat in contract.forbidden_delete_patterns:
+                if fnmatch.fnmatch(f, pat):
+                    # Check if the patch effectively empties/deletes content
+                    if self._patch_effectively_deletes(patch_text, f):
+                        result.forbidden_deletions.append(f)
+                        result.no_delete_status = "failed"
+                        result.errors.append(
+                            f"NO DELETE POLICY VIOLATION: Patch effectively deletes "
+                            f"content from '{f}' which matches forbidden delete pattern '{pat}'"
+                        )
+                        result.module_completion_allowed = False
+                        return
+
+        result.no_delete_status = "passed"
+
+    @staticmethod
+    def _detect_deleted_files(patch_text: str) -> list[str]:
+        """Detect files that would be deleted by a unified diff.
+
+        Looks for 'deleted file mode' and '--- a/file\n+++ /dev/null' patterns.
+        """
+        import re
+        deleted: list[str] = []
+
+        # Pattern 1: git diff --git with deleted file mode
+        for m in re.finditer(
+            r'^deleted file mode \d+\n.*?^--- a/(.+?)$',
+            patch_text, re.MULTILINE | re.DOTALL,
+        ):
+            deleted.append(m.group(1))
+
+        # Pattern 2: --- a/file\n+++ /dev/null (entire file deletion)
+        for m in re.finditer(
+            r'^--- a/(.+?)$\n^\+\+\+ /dev/null$',
+            patch_text, re.MULTILINE,
+        ):
+            fname = m.group(1)
+            if fname not in deleted:
+                deleted.append(fname)
+
+        return deleted
+
+    @staticmethod
+    def _patch_effectively_deletes(patch_text: str, filepath: str) -> bool:
+        """Check if a patch effectively empties or deletes the content of a file.
+
+        A REPLACE block that replaces the entire file content with nothing
+        or just a stub is effectively a deletion.
+        """
+        # Look for large-scale removal: all lines are deletions in the hunk
+        file_section_pattern = re.compile(
+            rf'^--- a/{re.escape(filepath)}$.*?^(?=diff --git|\Z)',
+            re.MULTILINE | re.DOTALL,
+        )
+        m = file_section_pattern.search(patch_text)
+        if not m:
+            return False
+
+        section = m.group(0)
+        minus_lines = [l for l in section.split("\n") if l.startswith("-") and not l.startswith("---")]
+        plus_lines = [l for l in section.split("\n") if l.startswith("+") and not l.startswith("+++")]
+
+        # If only deletions and no additions, file is effectively emptied
+        if len(minus_lines) > 5 and len(plus_lines) == 0:
+            return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Config-Driven Change Policy (Phase LLM-M1D)
+    # ------------------------------------------------------------------
+
+    def _check_config_driven_policy(
+        self,
+        result: UserIntentValidationResult,
+        patch_text: str,
+        patch_paths: list[str],
+        module_resolution,
+    ) -> None:
+        """Check Config-Driven Change Policy compliance.
+
+        Verifies:
+        1. Default config not modified unless explicitly requested
+        2. Config fields added when config_driven_change_required=true
+        3. Feature flag default-off when feature_flag_required=true
+        """
+        from src.llm.task_modules import get_module_contract
+
+        contract = get_module_contract(module_resolution.selected_module)
+        if contract is None:
+            return
+
+        errors_before = len(result.errors)
+
+        # Check 1: preserve_default_behavior — no default config changes
+        if contract.preserve_default_behavior:
+            default_configs = {"config/client.yaml", "config/server.yaml"}
+            modified_defaults = [p for p in patch_paths if p in default_configs]
+            if modified_defaults:
+                result.default_config_changed = True
+                result.errors.append(
+                    f"CONFIG-DRIVEN POLICY VIOLATION: Default config modified "
+                    f"without explicit default change request: {modified_defaults}. "
+                    f"Add config/examples/ instead of changing defaults."
+                )
+                result.module_completion_allowed = False
+
+        # Check 2: config_driven_change_required — must add config fields
+        if contract.config_driven_change_required:
+            has_config_change = any(
+                "config" in p.lower() or p.endswith(".yaml") or p.endswith(".yml")
+                for p in patch_paths
+            )
+            if has_config_change:
+                result.config_fields_added_or_changed = True
+            else:
+                result.warnings.append(
+                    f"CONFIG-DRIVEN POLICY: Module '{contract.module_name}' requires "
+                    f"config-driven changes but no config files appear in patch."
+                )
+
+        # Check 3: feature_flag_required — default-off + enabled tests
+        if contract.feature_flag_required:
+            self._check_feature_flag(result, patch_text, patch_paths, contract)
+
+        # Detection countermeasure special checks
+        if contract.module_name == "detection_countermeasure":
+            self._check_detection_countermeasure_special(result, patch_text, patch_paths)
+
+        # Determine config_driven_status
+        had_errors = len(result.errors) > errors_before
+        result.config_driven_status = "failed" if had_errors else "passed"
+
+    def _check_feature_flag(
+        self,
+        result: UserIntentValidationResult,
+        patch_text: str,
+        patch_paths: list[str],
+        contract,
+    ) -> None:
+        """Check feature flag requirements: default-off + enabled path tests."""
+        has_disabled_test = bool(re.search(
+            r'(?:default.*off|disabled|enabled.*false|enabled\s*=\s*False)',
+            patch_text, re.IGNORECASE,
+        ))
+        has_enabled_test = bool(re.search(
+            r'(?:enabled.*true|enabled\s*=\s*True|with.*countermeasure|when.*enabled)',
+            patch_text, re.IGNORECASE,
+        ))
+        has_default_flag = bool(re.search(
+            r'(?:enabled\s*[=:]\s*False|default.*False|feature_flag|opt.*in)',
+            patch_text, re.IGNORECASE,
+        ))
+
+        if has_default_flag and has_disabled_test and has_enabled_test:
+            result.feature_flag_status = "passed"
+        elif has_default_flag:
+            result.feature_flag_status = "partial"
+            result.warnings.append(
+                "FEATURE FLAG: Default-off flag found but missing dual "
+                "enabled/disabled behavior tests."
+            )
+        else:
+            result.feature_flag_status = "failed"
+            result.errors.append(
+                "FEATURE FLAG REQUIRED: Module requires new behavior to default "
+                "to OFF via config flag. No default-off flag detected in patch."
+            )
+            result.module_completion_allowed = False
+
+    def _check_detection_countermeasure_special(
+        self,
+        result: UserIntentValidationResult,
+        patch_text: str,
+        patch_paths: list[str],
+    ) -> None:
+        """Special checks for detection_countermeasure module."""
+        # Check: no detector threshold lowering
+        threshold_lowered = bool(re.search(
+            r'(?:threshold\s*[=:]\s*\d+|min_.*=\s*\d+|max_.*=\s*\d+)',
+            patch_text, re.IGNORECASE,
+        ))
+        has_countermeasure = bool(re.search(
+            r'(?:countermeasure|padding|aggregation|timing|chunking|randomize|obfuscate)',
+            patch_text, re.IGNORECASE,
+        ))
+
+        if threshold_lowered and not has_countermeasure:
+            result.errors.append(
+                "DETECTION COUNTERMEASURE VIOLATION: Detection thresholds modified "
+                "without implementing a countermeasure. This is a fake improvement."
+            )
+            result.module_completion_allowed = False
+
+        # Check: no detector disabling
+        detector_disabled = bool(re.search(
+            r'(?:enabled\s*[=:]\s*False.*detect|detect.*enabled\s*[=:]\s*False|'
+            r'skip.*detect|detect.*skip)',
+            patch_text, re.IGNORECASE,
+        ))
+        if detector_disabled:
+            result.errors.append(
+                "DETECTION COUNTERMEASURE VIOLATION: Detector appears to be "
+                "disabled. Implement countermeasures, not detector bypass."
+            )
+            result.module_completion_allowed = False
+
+        # Check: before/after evidence
+        has_before_after = bool(re.search(
+            r'(?:before.*after|comparison|compare|delta|diff|metric.*improve|'
+            r'report.*metric|synthetic.*comparison)',
+            patch_text, re.IGNORECASE,
+        ))
+        if not has_before_after:
+            result.warnings.append(
+                "DETECTION COUNTERMEASURE: No before/after metric evidence "
+                "detected in patch. Countermeasure should include comparison data."
+            )
+
+    # ------------------------------------------------------------------
+    # Blueprint validation (Phase LLM-M2)
+    # ------------------------------------------------------------------
+
+    def _check_blueprint(
+        self,
+        result: UserIntentValidationResult,
+        patch_text: str,
+        patch_paths: list[str],
+        module_resolution,
+    ) -> None:
+        """Validate patch against PatchBlueprint requirements.
+
+        Checks:
+        1. Required file changes appear in patch
+        2. Forbidden file changes do NOT appear
+        3. No delete action present
+        4. Expected content patterns found
+        5. Forbidden content patterns NOT found
+        6. Detection countermeasure: before/after evidence
+        7. Outer protocol: runtime tests + tunnel smoke evidence
+        """
+        from src.llm.patch_blueprints import get_blueprint
+        import fnmatch
+
+        blueprint = get_blueprint(module_resolution.selected_module)
+        if blueprint is None:
+            result.blueprint_status = "not_run"
+            return
+
+        t = module_resolution.target_transport
+
+        def _subst(pat: str) -> str:
+            """Substitute {name} placeholder in a path pattern."""
+            return pat.replace("{name}", t) if t else pat
+
+        result.selected_blueprint = blueprint.blueprint_name
+        errors_before = len(result.errors)
+
+        # Check 1: required_file_changes present
+        for spec in blueprint.required_file_changes:
+            if not spec.required:
+                continue
+            path_pat = _subst(spec.path_pattern)
+            found = any(
+                fnmatch.fnmatch(p, path_pat) or p == path_pat
+                for p in patch_paths
+            )
+            if not found:
+                result.required_file_changes_missing.append(path_pat)
+                result.errors.append(
+                    f"BLUEPRINT VIOLATION: Required file change missing: "
+                    f"[{spec.action}] {path_pat} — {spec.purpose}"
+                )
+
+        # Check 2: forbidden_file_changes present
+        for spec in blueprint.forbidden_file_changes:
+            path_pat = _subst(spec.path_pattern)
+            for p in patch_paths:
+                if fnmatch.fnmatch(p, path_pat) or p == path_pat:
+                    result.forbidden_blueprint_changes.append(p)
+                    result.errors.append(
+                        f"BLUEPRINT VIOLATION: Forbidden file change detected: "
+                        f"{p} — {spec.purpose}"
+                    )
+
+        # Check 3: No delete action
+        for spec in blueprint.required_file_changes + blueprint.allowed_file_changes:
+            if spec.action == "delete":
+                result.forbidden_blueprint_changes.append(spec.path_pattern)
+                result.errors.append(
+                    f"BLUEPRINT VIOLATION: Delete action not allowed for "
+                    f"{spec.path_pattern}"
+                )
+
+        # Check 4: expected_content patterns in patch
+        for spec in blueprint.required_file_changes:
+            if not spec.required or not spec.expected_content:
+                continue
+            path_pat = _subst(spec.path_pattern)
+            # Only check if the file is in the patch
+            matching = [p for p in patch_paths
+                       if fnmatch.fnmatch(p, path_pat) or p == path_pat]
+            if matching:
+                # Substitute {name} in expected content
+                for expected_raw in spec.expected_content:
+                    expected = _subst(expected_raw.replace("{Name}", t.title()) if t else expected_raw)
+                    if expected_raw not in patch_text and expected not in patch_text:
+                        result.missing_template_evidence.append(
+                            f"{path_pat}: expected content '{expected_raw}' not found"
+                        )
+
+        # Check 5: forbidden_content patterns NOT in patch
+        for spec in blueprint.required_file_changes + blueprint.forbidden_file_changes:
+            if not spec.forbidden_content:
+                continue
+            for forbidden in spec.forbidden_content:
+                if forbidden in patch_text:
+                    result.errors.append(
+                        f"BLUEPRINT VIOLATION: Forbidden content '{forbidden}' "
+                        f"found in patch for {spec.path_pattern}"
+                    )
+
+        # Check 6: Detection countermeasure special — before/after evidence
+        if blueprint.module_name == "detection_countermeasure":
+            has_before_after = bool(re.search(
+                r'(?:before.*after|comparison|compare|delta|diff|'
+                r'metric.*improve|report.*metric|synthetic.*comparison|'
+                r'before_after_metric)',
+                patch_text, re.IGNORECASE,
+            ))
+            if not has_before_after:
+                result.missing_validation_evidence.append(
+                    "before_after_metric_evidence"
+                )
+                result.warnings.append(
+                    "BLUEPRINT: Detection countermeasure should include "
+                    "before/after metric evidence."
+                )
+
+        # Check 7: Outer protocol — runtime tests + tunnel smoke
+        if blueprint.module_name == "transport_runtime":
+            has_runtime_test = bool(re.search(
+                r'(?:roundtrip|round_trip|send_recv|client_server|smoke)',
+                patch_text, re.IGNORECASE,
+            ))
+            if not has_runtime_test:
+                result.missing_validation_evidence.append("runtime_tests")
+                result.errors.append(
+                    "BLUEPRINT VIOLATION: Outer protocol blueprint requires "
+                    "runtime roundtrip tests."
+                )
+
+            has_tunnel_smoke = bool(re.search(
+                r'(?:tunnel.smoke|mock.tun|tunnel_smoke)',
+                patch_text, re.IGNORECASE,
+            ))
+            if not has_tunnel_smoke:
+                result.missing_validation_evidence.append("tunnel_smoke_evidence")
+                # Tunnel smoke is verified externally, so warning only
+
+        # Determine blueprint status
+        had_errors = len(result.errors) > errors_before
+        if had_errors:
+            result.blueprint_status = "failed"
+            result.module_completion_allowed = False
+        elif result.missing_template_evidence or result.missing_validation_evidence:
+            result.blueprint_status = "partial"
+        else:
+            result.blueprint_status = "passed"
 
     # ------------------------------------------------------------------
     # Final status determination

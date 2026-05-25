@@ -296,6 +296,30 @@ def write_report(
                 lines.append(f"| {e.criterion_name} | {status} | {e.evidence[:80]} |")
             lines.append("")
 
+        # ---- Blueprint Validation (Phase LLM-M2) ----
+        if intent_result is not None and intent_result.selected_blueprint:
+            lines.append("## Patch Blueprint")
+            lines.append("")
+            lines.append(f"- **Selected Blueprint**: `{intent_result.selected_blueprint}`")
+            lines.append(f"- **Blueprint Status**: `{intent_result.blueprint_status}`")
+            if intent_result.required_file_changes_missing:
+                lines.append("- **Missing Required File Changes**:")
+                for f in intent_result.required_file_changes_missing:
+                    lines.append(f"  - `{f}`")
+            if intent_result.forbidden_blueprint_changes:
+                lines.append("- **Forbidden Blueprint Changes Detected**:")
+                for f in intent_result.forbidden_blueprint_changes:
+                    lines.append(f"  - `{f}`")
+            if intent_result.missing_template_evidence:
+                lines.append("- **Missing Template Evidence**:")
+                for f in intent_result.missing_template_evidence:
+                    lines.append(f"  - {f}")
+            if intent_result.missing_validation_evidence:
+                lines.append("- **Missing Validation Evidence**:")
+                for f in intent_result.missing_validation_evidence:
+                    lines.append(f"  - {f}")
+            lines.append("")
+
     # ---- End-to-End Tunnel Validation ----
     if tunnel_smoke_result is not None and (
         tunnel_smoke_result.mock_tun_smoke is not None

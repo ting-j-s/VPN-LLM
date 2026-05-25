@@ -141,11 +141,16 @@ def _check_delimiter_leakage(filepath: str, find_str: str, content: str,
             )
 
 
-def _build_module_contract_prompt_section(resolution, transport_name: str = "") -> str:
+def _build_module_contract_prompt_section(resolution, transport_name: str = "",
+                                         stage_name: str = "",
+                                         detected_metrics: list[str] | None = None) -> str:
     """Build a prompt section describing the module contract constraints.
 
     Injected into the LLM prompt so the model understands which files it
     may/must/forbidden edit, and what evidence is required.
+
+    Phase LLM-M2: Also injects the PATCH BLUEPRINT section when a blueprint
+    exists for the selected module.
     """
     if resolution is None:
         return ""
@@ -200,6 +205,39 @@ def _build_module_contract_prompt_section(resolution, transport_name: str = "") 
     elif resolution.selected_module == "docs_only":
         lines.append("ONLY edit documentation files (*.md, docs/).")
         lines.append("Do NOT change src/ or tests/ files.")
+    elif resolution.selected_module == "detection_countermeasure":
+        lines.append("Implement countermeasure behind config flags (default OFF).")
+        lines.append("Do NOT delete or disable detectors. Do NOT lower detection thresholds.")
+        lines.append("Provide before/after metric evidence.")
+
+    # ---- No-Delete Policy (Phase LLM-M1D) ----
+    from src.llm.task_modules import get_module_contract
+    contract = get_module_contract(resolution.selected_module)
+    if contract is not None and not contract.deletion_allowed:
+        no_del = contract.build_no_delete_policy_text()
+        if no_del:
+            lines.append("")
+            lines.append(no_del)
+
+    # ---- Config-Driven Change Policy (Phase LLM-M1D) ----
+    if contract is not None and contract.config_driven_change_required:
+        cfg = contract.build_config_driven_policy_text()
+        if cfg:
+            lines.append("")
+            lines.append(cfg)
+
+    # ---- Patch Blueprint (Phase LLM-M2) ----
+    from src.llm.patch_blueprints import get_blueprint
+    blueprint = get_blueprint(resolution.selected_module)
+    if blueprint is not None:
+        bp_section = blueprint.build_prompt_section(
+            stage_name=stage_name,
+            target_transport=transport_name,
+            detected_metrics=detected_metrics,
+        )
+        if bp_section:
+            lines.append("")
+            lines.append(bp_section)
 
     return "\n".join(lines)
 
@@ -424,7 +462,8 @@ class LLMPatchGenerator:
                                 allowed_create_patterns,
                                 must_create_files=must_create_files,
                                 extra_messages=extra_messages,
-                                stage_info=stage_info)
+                                stage_info=stage_info,
+                                module_resolution=module_resolution)
 
             # Phase 1: Strict protocol — response must start with FILE:
             if not raw.strip().startswith("FILE:"):
@@ -641,7 +680,8 @@ class LLMPatchGenerator:
                   allowed_create_patterns: list[str] | None = None,
                   must_create_files: list[str] | None = None,
                   extra_messages: list[dict] | None = None,
-                  stage_info: dict | None = None) -> str:
+                  stage_info: dict | None = None,
+                  module_resolution=None) -> str:
         planner_type = "llm_based" if hasattr(task_plan, "summary") else "rule_based"
         plan_summary = getattr(task_plan, "summary", "") or getattr(task_plan, "description", "")
         plan_dict = {
@@ -827,6 +867,18 @@ class LLMPatchGenerator:
                     f"\nSTAGE FORBIDDEN FILES (do NOT touch):\n"
                     + "\n".join(f"  - {f}" for f in stage_forbidden)
                 )
+
+        # ---- Module Contract + Patch Blueprint prompt injection ----
+        if module_resolution is not None:
+            transport_name = getattr(task_plan, "target_transport", "") or ""
+            stage_name = stage_info.get("stage_name", "") if stage_info else ""
+            module_section = _build_module_contract_prompt_section(
+                module_resolution,
+                transport_name=transport_name,
+                stage_name=stage_name,
+            )
+            if module_section:
+                constraints += "\n\n" + module_section
 
         user_message = (
             f"USER REQUEST:\n{user_request}\n\n"
