@@ -30,6 +30,8 @@ def write_report(
     patch_generation_error: str | None = None,
     intent_result=None,
     tunnel_smoke_result=None,
+    post_apply_tunnel_smoke_result=None,
+    file_selection_validation=None,
 ) -> str:
     """Generate a Markdown validation report.
 
@@ -381,6 +383,66 @@ def write_report(
             lines.append(f"  - Real netns available: {tunnel_smoke_result.real_netns_available}")
             lines.append("")
 
+    # ---- Post-Apply Tunnel Smoke Validation ----
+    if post_apply_tunnel_smoke_result is not None and (
+        post_apply_tunnel_smoke_result.mock_tun_smoke is not None
+        or post_apply_tunnel_smoke_result.phase9_smoke is not None
+    ):
+        lines.append("## Post-Apply Tunnel Smoke Validation")
+        lines.append("")
+
+        if post_apply_tunnel_smoke_result.mock_tun_smoke is not None:
+            mock = post_apply_tunnel_smoke_result.mock_tun_smoke
+            status_icon = "PASS" if mock.success else "FAIL"
+            lines.append(f"- **Mock-TUN Smoke**: {status_icon}")
+            lines.append(f"  - Transport: `{mock.transport}`")
+            lines.append(f"  - Duration: {mock.duration_sec}s")
+            lines.append(f"  - Log Dir: `{mock.log_dir}`")
+            if mock.error:
+                lines.append(f"  - Error: {mock.error}")
+            lines.append("")
+
+        if post_apply_tunnel_smoke_result.phase9_smoke is not None:
+            p9 = post_apply_tunnel_smoke_result.phase9_smoke
+            status_icon = "PASS" if post_apply_tunnel_smoke_result.phase9_passed else "FAIL"
+            lines.append(f"- **Phase 9 Real Trace**: {status_icon}")
+            if "output_dir" in p9:
+                lines.append(f"  - Output Dir: `{p9['output_dir']}`")
+            if "error" in p9 and p9["error"]:
+                lines.append(f"  - Error: {p9['error']}")
+            lines.append("")
+        elif post_apply_tunnel_smoke_result.phase9_skipped:
+            lines.append(f"- **Phase 9 Real Trace**: SKIPPED")
+            lines.append("")
+
+    # ---- File Selection Consistency ----
+    if file_selection_validation is not None:
+        lines.append("## File Selection Consistency")
+        lines.append("")
+        fsv = file_selection_validation
+        status = "PASS" if fsv.success else "FAIL"
+        lines.append(f"- **Status**: {status}")
+        if fsv.errors:
+            lines.append(f"- **Errors**: {len(fsv.errors)}")
+            for e in fsv.errors:
+                lines.append(f"  - {e}")
+        if fsv.warnings:
+            lines.append(f"- **Warnings**: {len(fsv.warnings)}")
+            for w in fsv.warnings:
+                lines.append(f"  - {w}")
+        evidence = fsv.evidence if hasattr(fsv, 'evidence') else {}
+        if evidence:
+            for key in ("conflicts", "missing_required_files", "disallowed_create_files",
+                        "docs_only_violations", "config_only_violations",
+                        "downgraded_retriever_only_files"):
+                items = evidence.get(key, [])
+                if items:
+                    label = key.replace("_", " ").title()
+                    lines.append(f"- **{label}**: {len(items)}")
+                    for item in items:
+                        lines.append(f"  - `{item}`")
+        lines.append("")
+
     # Failure summary — separate pre-apply from post-apply
     pre_apply_checks = [
         ("Compile Check", compile_result),
@@ -452,6 +514,15 @@ def write_report(
     post_apply_all_pass = len(post_failures) == 0
     core_all_pass = len(core_pre_failures) == 0 and post_apply_all_pass
     all_pass = core_all_pass and not has_llm_failures and not has_coverage_warnings
+
+    # File selection failures are hard blockers
+    if file_selection_validation is not None and not file_selection_validation.success:
+        all_pass = False
+
+    # Post-apply tunnel smoke failure blocks on runtime/end-to-end tasks
+    if post_apply_tunnel_smoke_result is not None and post_apply_tunnel_smoke_result.mock_tun_smoke is not None:
+        if not post_apply_tunnel_smoke_result.mock_tun_smoke.success:
+            all_pass = False
 
     lines.append("## Conclusion")
     lines.append("")

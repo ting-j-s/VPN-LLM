@@ -2292,3 +2292,228 @@ class TestM2DetectedMetricsPropagation:
         assert d["selected_metrics"] == ["small_packet_ratio"]
         assert "selected_countermeasure_templates" in d
         assert d["selected_countermeasure_templates"] == ["aggregation_countermeasure"]
+
+
+class TestFileSelectionConsistencyValidator:
+    """validate_file_selection_consistency enforces module/intent boundaries."""
+
+    def _make_fs(self, **kwargs):
+        from src.llm.impact_expander import FileSelection
+        fs = FileSelection()
+        for k, v in kwargs.items():
+            setattr(fs, k, v)
+        return fs
+
+    def test_forbidden_overlap_with_must_edit_causes_failure(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        fs = self._make_fs(
+            must_edit_files=["src/core/server.py"],
+            forbidden_files=["src/core/server.py"],
+        )
+        result = validate_file_selection_consistency(fs, None)
+        assert result.success is False
+        assert any("conflict" in e.lower() for e in result.errors)
+        assert len(result.evidence["forbidden_overlaps"]) > 0
+
+    def test_forbidden_overlap_with_must_create_causes_failure(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        fs = self._make_fs(
+            must_create_files=["src/transport/bypass.py"],
+            forbidden_files=["src/transport/bypass.py"],
+        )
+        result = validate_file_selection_consistency(fs, None)
+        assert result.success is False
+        assert len(result.evidence["forbidden_overlaps"]) > 0
+
+    def test_missing_required_module_file_reported(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        class FakeResolution:
+            required_files = ["src/transport/new_transport.py"]
+            allowed_files = []
+            forbidden_files = []
+            selected_module = "transport_runtime"
+
+        fs = self._make_fs(
+            must_edit_files=["src/transport/factory.py"],
+            must_create_files=[],
+        )
+        result = validate_file_selection_consistency(
+            fs, None, module_resolution=FakeResolution(),
+        )
+        assert result.success is False
+        assert any("new_transport" in e for e in result.errors)
+
+    def test_required_module_file_covered_by_must_create_passes(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        class FakeResolution:
+            required_files = ["src/transport/new_transport.py"]
+            allowed_files = []
+            forbidden_files = []
+            selected_module = "transport_runtime"
+
+        fs = self._make_fs(
+            must_edit_files=["src/transport/factory.py"],
+            must_create_files=["src/transport/new_transport.py"],
+        )
+        result = validate_file_selection_consistency(
+            fs, None, module_resolution=FakeResolution(),
+        )
+        assert len(result.evidence["missing_required_files"]) == 0
+
+    def test_module_contract_create_exempt_from_allowed_check(self):
+        """Rule 4: module_contract-sourced files bypass allowed_create_paths check."""
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        fs = self._make_fs(
+            must_create_files=["src/common/config.py"],
+            allowed_create_paths=["src/transport/", "tests/"],
+            action_sources={"src/common/config.py": "module_contract:transport_runtime(required_create)"},
+        )
+        result = validate_file_selection_consistency(fs, None)
+        assert result.success is True
+        assert len(result.evidence.get("disallowed_create_files", [])) == 0
+
+    def test_non_module_contract_create_rejected_by_allowed_check(self):
+        """Rule 4: files without module_contract source must be covered by allowed_create."""
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        fs = self._make_fs(
+            must_create_files=["src/llm/unauthorized.py"],
+            allowed_create_paths=["src/transport/", "tests/"],
+            action_sources={"src/llm/unauthorized.py": "candidate_promoted(score=0.96)"},
+        )
+        result = validate_file_selection_consistency(fs, None)
+        assert result.success is False
+        assert "src/llm/unauthorized.py" in result.evidence.get("disallowed_create_files", [])
+
+    def test_must_create_existing_file_converts_to_must_edit(self):
+        import os
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        # Use a real file that exists on disk
+        existing = "src/common/config.py"
+        assert os.path.isfile(existing), f"Test requires {existing} to exist"
+
+        fs = self._make_fs(
+            must_create_files=[existing],
+            must_edit_files=[],
+        )
+        result = validate_file_selection_consistency(fs, None)
+        assert existing not in fs.must_create_files
+        assert existing in fs.must_edit_files
+        assert any("converted to must_edit" in w.lower() for w in result.warnings)
+
+    def test_docs_only_cannot_edit_source_files(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        class FakeIntent:
+            implementation_level = "docs_only"
+
+        fs = self._make_fs(
+            must_edit_files=["src/core/client_core.py", "docs/readme.md"],
+        )
+        result = validate_file_selection_consistency(
+            fs, None, intent_contract=FakeIntent(),
+        )
+        assert result.success is False
+        assert any("docs_only" in e.lower() for e in result.errors)
+        assert "src/core/client_core.py" in result.evidence["docs_only_violations"]
+
+    def test_docs_only_allows_doc_files(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        class FakeIntent:
+            implementation_level = "docs_only"
+
+        fs = self._make_fs(
+            must_edit_files=["docs/readme.md", "docs/transports/tcp.md"],
+        )
+        result = validate_file_selection_consistency(
+            fs, None, intent_contract=FakeIntent(),
+        )
+        assert len(result.evidence["docs_only_violations"]) == 0
+
+    def test_config_only_warns_on_runtime_core_edit(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        class FakeIntent:
+            implementation_level = "config_only"
+            requires_no_behavior_change = False
+
+        fs = self._make_fs(
+            must_edit_files=["src/core/server_core.py", "src/common/config.py"],
+        )
+        result = validate_file_selection_consistency(
+            fs, None, intent_contract=FakeIntent(),
+        )
+        assert result.success is True
+        assert any("review needed" in w.lower() for w in result.warnings)
+        assert "src/core/server_core.py" in result.evidence["config_only_violations"]
+
+    def test_config_only_errors_when_no_behavior_change(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        class FakeIntent:
+            implementation_level = "config_only"
+            requires_no_behavior_change = True
+
+        fs = self._make_fs(
+            must_edit_files=["src/core/server_core.py"],
+        )
+        result = validate_file_selection_consistency(
+            fs, None, intent_contract=FakeIntent(),
+        )
+        assert result.success is False
+        assert any("cannot edit runtime core file" in e.lower() for e in result.errors)
+
+    def test_retriever_only_candidate_demoted_to_must_review(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        fs = self._make_fs(
+            must_edit_files=["src/transport/extra.py"],
+            must_review_files=[],
+            action_sources={"src/transport/extra.py": "candidate_promoted(score=0.96, sources=['keyword'])"},
+        )
+        result = validate_file_selection_consistency(fs, None)
+        assert "src/transport/extra.py" not in fs.must_edit_files
+        assert "src/transport/extra.py" in fs.must_review_files
+        assert len(result.evidence["downgraded_retriever_only_files"]) > 0
+
+    def test_retriever_with_module_justification_not_demoted(self):
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        class FakeResolution:
+            required_files = ["src/transport/extra.py"]
+            allowed_files = []
+            forbidden_files = []
+            selected_module = "transport_runtime"
+
+        fs = self._make_fs(
+            must_edit_files=["src/transport/extra.py"],
+            must_review_files=[],
+            action_sources={"src/transport/extra.py": "candidate_promoted(score=0.96, sources=['keyword'])"},
+        )
+        result = validate_file_selection_consistency(
+            fs, None, module_resolution=FakeResolution(),
+        )
+        assert "src/transport/extra.py" in fs.must_edit_files
+        assert "src/transport/extra.py" not in fs.must_review_files
+
+    def test_to_dict_includes_evidence_fields(self):
+        from src.llm.file_selection_validator import FileSelectionValidationResult
+
+        result = FileSelectionValidationResult()
+        result.errors.append("test error")
+        result.warnings.append("test warning")
+        result.evidence["conflicts"].append("src/a.py")
+
+        d = result.to_dict()
+        assert d["success"] is True  # only 1 error doesn't flip success in isolation
+        assert "test error" in d["errors"]
+        assert "test warning" in d["warnings"]
+        assert "conflicts" in d["evidence"]
+        assert "src/a.py" in d["evidence"]["conflicts"]

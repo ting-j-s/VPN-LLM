@@ -750,6 +750,7 @@ def main():
     file_selection = None
     repo_context = ""
     context_summary = None
+    fs_validation = None
 
     if args.generate_patch:
         from src.llm.repo_indexer import RepoIndexer
@@ -829,12 +830,88 @@ def main():
             record_mgr.update_status(task_id, "failed", all_passed=False)
             sys.exit(1)
 
+        # ---- File Selection Consistency Validation ----
+        from src.llm.file_selection_validator import validate_file_selection_consistency
+
+        print("Validating file selection consistency...")
+        fs_validation = validate_file_selection_consistency(
+            file_selection=file_selection,
+            repo_index=repo_index,
+            intent_contract=intent_contract,
+            module_resolution=module_resolution,
+            request=args.request,
+        )
+        status_icon = "PASS" if fs_validation.success else "FAIL"
+        print(f"  File selection consistency: {status_icon}")
+        if fs_validation.errors:
+            for e in fs_validation.errors:
+                print(f"  ERROR: {e}")
+        if fs_validation.warnings:
+            for w in fs_validation.warnings:
+                print(f"  WARNING: {w}")
+
+        # Save file selection validation result
+        record_mgr._write_file(
+            task_id, "file_selection_validation.json",
+            json.dumps(fs_validation.to_dict(), indent=2),
+        )
+
+        # Block on hard failures
+        if not fs_validation.success:
+            print()
+            print(">>> File selection consistency check FAILED. <<<")
+            print(">>> This is a file selection conflict, not an LLM output failure. <<<")
+            retry_lines = ["# File Selection Retry Prompt", ""]
+            retry_lines.append(
+                "The file selection phase produced conflicts that must be resolved "
+                "before patch generation:"
+            )
+            retry_lines.append("")
+            for e in fs_validation.errors:
+                retry_lines.append(f"- ERROR: {e}")
+            for w in fs_validation.warnings:
+                retry_lines.append(f"- WARNING: {w}")
+            retry_lines.append("")
+            retry_lines.append("## Suggested Actions")
+            retry_lines.append("- Review the request for ambiguity about which files to modify.")
+            retry_lines.append("- Check whether required module files exist and are named correctly.")
+            retry_lines.append("- If this is a docs_only/config_only task, remove source file edits.")
+            retry_prompt = "\n".join(retry_lines)
+            record_mgr._write_file(task_id, "retry_prompt.txt", retry_prompt)
+            print(f"Retry prompt saved to: {task_dir}/retry_prompt.txt")
+            report = write_report(
+                task_id=task_id, request=args.request, plan=plan,
+                compile_result=None, targeted_result=None,
+                full_result=None, git_result=None,
+                planner_type=planner_type,
+                file_selection_validation=fs_validation,
+            )
+            record_mgr.save_report(task_id, report)
+            record_mgr.update_status(task_id, "failed", all_passed=False)
+            sys.exit(1)
+
         # 4d. Build context for LLM (use cwd so tests work with temp repos)
         print("Building repository context...")
         builder = ContextBuilder(os.getcwd())
         repo_context, context_summary = builder.build(file_selection)
         print(f"  Context size: {context_summary.total_bytes} bytes "
               f"({len(context_summary.files_included)} files)")
+
+        # ---- ContextBuilder truncation check for must_edit files ----
+        truncated_must_edit = [
+            f for f in context_summary.files_truncated
+            if f in file_selection.must_edit_files
+        ]
+        if truncated_must_edit:
+            print(f"  WARNING: {len(truncated_must_edit)} must-edit file(s) truncated:")
+            for f in truncated_must_edit:
+                print(f"    - {f}")
+            if fs_validation is not None:
+                fs_validation.evidence["truncated_must_edit_files"] = truncated_must_edit
+                fs_validation.warnings.append(
+                    f"Must-edit file(s) truncated in repository context: "
+                    f"{', '.join(truncated_must_edit)}"
+                )
 
         # Save context summary
         record_mgr._write_file(task_id, "context_summary.json",
@@ -1205,6 +1282,16 @@ def main():
             patch_file_paths = PG._parse_file_paths(patch_text)
             print(f"Files in patch: {', '.join(patch_file_paths) if patch_file_paths else '(none)'}")
 
+            # ---- git apply --check (run before validator so it gets real result) ----
+            print("Running git apply --check...")
+            git_apply_check_result = runner.run_git_apply_check(patch_path)
+            if git_apply_check_result.success:
+                print("  git apply --check: PASS (patch would apply cleanly)")
+            else:
+                print(f"  git apply --check: FAIL (returncode={git_apply_check_result.returncode})")
+                if git_apply_check_result.stderr:
+                    print(f"  {git_apply_check_result.stderr.strip()[:500]}")
+
             # ---- Patch completeness validation ----
             from src.llm.patch_generator import check_patch_completeness
             completeness = check_patch_completeness(
@@ -1417,19 +1504,6 @@ def main():
                 for w in artifact_coverage_warnings:
                     print(f"  Warning: {w}")
 
-            # git apply --check (dry-run only, does NOT apply)
-            print("Running git apply --check...")
-            git_apply_check_result = runner.run_git_apply_check(patch_path)
-            if git_apply_check_result.success:
-                if not completeness.passed:
-                    print("  git apply --check: PASS (but completeness check FAILED — do not apply)")
-                else:
-                    print("  git apply --check: PASS (patch would apply cleanly)")
-            else:
-                print(f"  git apply --check: FAIL (returncode={git_apply_check_result.returncode})")
-                if git_apply_check_result.stderr:
-                    print(f"  {git_apply_check_result.stderr.strip()[:500]}")
-
             # ---- Default switch gate ----
             if requires_default_switch and runtime_check.is_skeleton:
                 print()
@@ -1451,6 +1525,7 @@ def main():
     apply_result = None
     post_apply_validation = None
     replacement_smoke_result = None
+    post_apply_tunnel_smoke_result = None
 
     if args.apply_patch:
         from src.llm.patch_generator import LLMPatchGeneratorError
@@ -1530,6 +1605,36 @@ def main():
             post_apply_validation["Full Test Suite"] = runner.run_full_tests()
             status = "PASS" if post_apply_validation["Full Test Suite"].success else "FAIL"
             print(f"  [{status}] full test suite")
+
+            # ---- Post-apply tunnel smoke validation ----
+            from src.llm.tunnel_smoke_validator import run_tunnel_smoke_validation
+            print("Running tunnel smoke (post-apply)...")
+            _task_type = getattr(plan, "task_type", None)
+            _target_transport = getattr(plan, "target_transport", None)
+            _intent_contract = getattr(plan, "intent_contract", None)
+            post_smoke_dir = os.path.join(task_dir, "tunnel_smoke_post_apply")
+            post_apply_tunnel_smoke_result = run_tunnel_smoke_validation(
+                task_type=_task_type,
+                target_transport=_target_transport,
+                intent_contract=_intent_contract,
+                output_dir=post_smoke_dir,
+            )
+            if post_apply_tunnel_smoke_result.mock_tun_smoke is not None:
+                ms = post_apply_tunnel_smoke_result.mock_tun_smoke
+                print(f"  Mock-TUN smoke: {ms.status} (transport={ms.transport}, {ms.duration_sec}s)")
+                if ms.error:
+                    print(f"    Error: {ms.error}")
+            if post_apply_tunnel_smoke_result.phase9_passed:
+                print("  Phase 9 real trace: PASS")
+            elif post_apply_tunnel_smoke_result.phase9_skipped:
+                print("  Phase 9 real trace: SKIPPED")
+            elif post_apply_tunnel_smoke_result.phase9_smoke is not None:
+                print(f"  Phase 9 real trace: FAIL")
+            # Save post-apply tunnel smoke result
+            record_mgr._write_file(
+                task_id, "post_apply_tunnel_smoke_result.json",
+                json.dumps(post_apply_tunnel_smoke_result.to_dict(), indent=2, default=str),
+            )
 
             print("Running git status (post-apply)...")
             post_apply_validation["Git Status"] = runner.run_git_status()
@@ -1688,6 +1793,8 @@ def main():
         patch_generation_error=patch_generation_error,
         intent_result=intent_result if args.generate_patch else None,
         tunnel_smoke_result=tunnel_smoke_result,
+        post_apply_tunnel_smoke_result=post_apply_tunnel_smoke_result,
+        file_selection_validation=fs_validation,
     )
 
     # 8. Save all artifacts
@@ -1711,6 +1818,11 @@ def main():
         all_pass = False
     if tunnel_smoke_result is not None and tunnel_smoke_result.mock_tun_smoke is not None:
         if not tunnel_smoke_result.mock_tun_smoke.success:
+            intent_contract = getattr(plan, "intent_contract", None)
+            if intent_contract is not None and (intent_contract.runtime_required or intent_contract.end_to_end_required):
+                all_pass = False
+    if post_apply_tunnel_smoke_result is not None and post_apply_tunnel_smoke_result.mock_tun_smoke is not None:
+        if not post_apply_tunnel_smoke_result.mock_tun_smoke.success:
             intent_contract = getattr(plan, "intent_contract", None)
             if intent_contract is not None and (intent_contract.runtime_required or intent_contract.end_to_end_required):
                 all_pass = False
